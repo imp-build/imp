@@ -269,6 +269,9 @@ struct HostState {
     expansion_results: HashMap<u64, LuaTable>,
     graph_run_active: bool,
     task_results: HashMap<u64, LuaTable>,
+    /// The resolved value of each `expansion:get()` handle that a task
+    /// declares as an input, by handle id.
+    projection_values: HashMap<u64, LuaValue>,
     nodes: HashMap<u64, GraphNode>,
     filesets: HashMap<String, u64>,
     loaded_roots: Vec<u64>,
@@ -356,6 +359,7 @@ impl LuauWorkspace {
             expansion_results: HashMap::new(),
             graph_run_active: false,
             task_results: HashMap::new(),
+            projection_values: HashMap::new(),
             nodes: HashMap::new(),
             filesets: HashMap::new(),
             loaded_roots: Vec::new(),
@@ -459,6 +463,7 @@ impl LuauWorkspace {
         let mut host = self.host.borrow_mut();
         host.task_results.clear();
         host.expansion_results.clear();
+        host.projection_values.clear();
         host.graph_run_active = true;
         host.cancellation = cancellation;
     }
@@ -1447,6 +1452,13 @@ fn install_task_executor(
                 let task = host.borrow().tasks.get(&task_id).cloned().ok_or_else(|| {
                     LuaError::external(format!("unknown Luau task handle {task_id}"))
                 })?;
+                // Report a failed projection with its own message, as a
+                // failed task run is reported.
+                if let Err(error) = resolve_projection_inputs(&lua, &host, &task.inputs).await {
+                    let message = error.to_string();
+                    host.borrow_mut().task_failure.get_or_insert(message.clone());
+                    return Err(LuaError::external(message));
+                }
                 let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
                 let returns_outputs = !task.outputs.is_empty();
                 let exec = lua.create_table()?;
@@ -1487,6 +1499,24 @@ fn install_task_executor(
                         lua.create_function(move |lua, handle: LuaAnyUserData| {
                             let id = handle.borrow::<GraphHandle>()?.id;
                             let function = format!("exec.{name}");
+                            // An artifact handle is a resolved task input or
+                            // the output of an action in this task. Its
+                            // digest nests the artifact at its captured path.
+                            let artifact = match fileset_host.borrow().nodes.get(&id) {
+                                Some(GraphNode::Artifact(artifact)) => Some(artifact.clone()),
+                                _ => None,
+                            };
+                            if let Some(artifact) = artifact {
+                                if want_paths {
+                                    return Err(LuaError::external(format!(
+                                        "{function}(handle) requires a files handle"
+                                    )));
+                                }
+                                let digest = normalize_luau_artifact(&artifact).map_err(|error| {
+                                    LuaError::external(format!("{function}: {error:#}"))
+                                })?;
+                                return Ok(LuaValue::String(lua.create_string(digest.digest())?));
+                            }
                             require_declared_input(&fileset_inputs, id, &function)?;
                             let captured =
                                 captured_fileset(&fileset_host.borrow(), &fileset_captures, id)
@@ -1762,7 +1792,10 @@ fn resolve_task_inputs(
         let (key, value) = pair?;
         let value = if let LuaValue::UserData(userdata) = &value {
             if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                if handle.kind == "task_output" {
+                let projected = host.borrow().projection_values.get(&handle.id).cloned();
+                if let Some(projected) = projected {
+                    projected
+                } else if handle.kind == "task_output" {
                     let node = host.borrow().nodes.get(&handle.id).cloned();
                     let Some(GraphNode::TaskOutput { task_id, name }) = node else {
                         return Err(LuaError::external("invalid Luau task output handle"));
@@ -1788,6 +1821,106 @@ fn resolve_task_inputs(
         resolved.set(key, value)?;
     }
     Ok(resolved)
+}
+
+/// Resolve each `expansion:get(key, workflow, facet?)` handle in `inputs`:
+/// discover the expansion, then execute the selected child. The task inputs
+/// then receive the value of the child, as they do for a task output.
+async fn resolve_projection_inputs(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    inputs: &LuaTable,
+) -> LuaResult<()> {
+    let mut projections = Vec::new();
+    for pair in inputs.pairs::<LuaValue, LuaValue>() {
+        let (_, value) = pair?;
+        let LuaValue::UserData(userdata) = value else {
+            continue;
+        };
+        let Ok(handle) = userdata.borrow::<GraphHandle>() else {
+            continue;
+        };
+        let host = host.borrow();
+        if host.projection_values.contains_key(&handle.id) {
+            continue;
+        }
+        if let Some(GraphNode::ExpansionAll { .. }) = host.nodes.get(&handle.id) {
+            return Err(LuaError::external(
+                "an expansion:all() handle cannot be a task input; use expansion:get()",
+            ));
+        }
+        if let Some(GraphNode::ExpansionGet {
+            expansion_id,
+            key,
+            workflow,
+            facet,
+        }) = host.nodes.get(&handle.id)
+        {
+            projections.push((
+                handle.id,
+                *expansion_id,
+                key.clone(),
+                workflow.clone(),
+                facet.clone(),
+            ));
+        }
+    }
+    for (projection_id, expansion_id, key, workflow, facet) in projections {
+        let discover = lua
+            .globals()
+            .get::<LuaFunction>("__imp_discover_expansion")?;
+        let children = discover.call_async::<LuaTable>(expansion_id).await?;
+        let child_id =
+            expansion_child_handle(&host.borrow(), &children, &key, &workflow, facet.as_deref())
+                .map_err(|error| LuaError::external(format!("{error:#}")))?;
+        if !matches!(
+            host.borrow().nodes.get(&child_id),
+            Some(GraphNode::Task | GraphNode::TaskOutput { .. })
+        ) {
+            return Err(LuaError::external(format!(
+                "expansion child '{key}' {workflow} must be a task or task output to be a task input"
+            )));
+        }
+        let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+        let value = execute.call_async::<LuaValue>(child_id).await?;
+        host.borrow_mut()
+            .projection_values
+            .insert(projection_id, value);
+    }
+    Ok(())
+}
+
+/// The handle id of `children[key][workflow][facet?]`, the child that an
+/// expansion projection selects.
+fn expansion_child_handle(
+    host: &HostState,
+    children: &LuaTable,
+    key: &str,
+    workflow: &str,
+    facet: Option<&str>,
+) -> Result<u64> {
+    let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
+    let child = children.get::<LuaValue>(key).map_err(lua_error)?;
+    let workflow_value = match child {
+        LuaValue::Nil => bail!("expansion has no child '{key}'"),
+        LuaValue::Table(table) => table.get::<LuaValue>(workflow).map_err(lua_error)?,
+        _ => bail!("expansion child '{key}' must contain workflow handles"),
+    };
+    let workflow_value = if let Some(facet) = facet {
+        workflow_value
+            .as_table()
+            .with_context(|| format!("expansion child '{key}' has no facet '{facet}'"))?
+            .get::<LuaValue>(facet)
+            .map_err(lua_error)?
+    } else {
+        workflow_value
+    };
+    let LuaValue::UserData(userdata) = workflow_value else {
+        bail!("expansion child '{key}' has no requested {workflow} workflow handle");
+    };
+    let id = userdata.borrow::<GraphHandle>().map_err(lua_error)?.id;
+    validate_expansion_child(host, id, workflow, key)?;
+    Ok(id)
 }
 
 fn validate_task_result(
@@ -2997,6 +3130,7 @@ async fn with_test_fake(
         }
         state.task_results.clear();
         state.expansion_results.clear();
+        state.projection_values.clear();
     }
     let result = body.call_async::<LuaMultiValue>(recorder).await;
     {
@@ -3014,6 +3148,7 @@ async fn with_test_fake(
         }
         state.task_results.clear();
         state.expansion_results.clear();
+        state.projection_values.clear();
     }
     result
 }
@@ -5816,6 +5951,10 @@ local formatter = core.task({
             outputs = { formatted = output.directory("src") },
             allow_failure = true,
         })
+        -- The digest of an action artifact nests it at its captured path.
+        local formatted_digest = exec.digest(result.outputs.formatted)
+        assert(core.read_file_in_digest(formatted_digest, "src/b.txt") == "same\n")
+        expect_error("exec.paths(handle) requires a files handle", exec.paths, result.outputs.formatted)
         return {
             paths = paths,
             sources_digest = sources_digest,
@@ -6154,8 +6293,10 @@ return {
         assert_eq!(report, "Published 1 target:\n  //:image");
     }
 
-    /// The Luau workspace of this repository loads, and every `TEST` root in
-    /// it passes. This is `IMP_RUNTIME=luau imp test //...` without the CLI.
+    /// The Luau workspace of this repository loads, and every rule test root
+    /// (`core.test_root()`) in it passes. Product test roots, such as the
+    /// CMake example ctest roots, need real toolchains and are left to
+    /// `IMP_RUNTIME=luau imp test //...`.
     #[tokio::test]
     async fn repository_luau_workspace_tests_pass() {
         let rules_root = crate::loader::RulesSource::discover()
@@ -6175,6 +6316,18 @@ return {
             .into_iter()
             .filter(|root| root.workflow == "test")
             .collect();
+        let roots: Vec<_> = {
+            let host = runtime.host.borrow();
+            roots
+                .into_iter()
+                .filter(|root| {
+                    matches!(
+                        host.nodes.get(&(root.handle_id as u64)),
+                        Some(GraphNode::TestRoot { .. })
+                    )
+                })
+                .collect()
+        };
         assert!(
             roots
                 .iter()

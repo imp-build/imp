@@ -8923,6 +8923,90 @@ return {
     }
 
     #[tokio::test]
+    async fn luau_task_consumes_an_expansion_child_as_an_input() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        write_file(&workspace.join(WORKSPACE_LUAU_FILE), "return {}\n");
+        write_file(
+            &workspace.join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+local output = core.output
+local sh = core.native_tool("sh")
+local metadata = core.task({
+    inputs = { sh = sh },
+    outputs = { names = output.value() },
+    run = function(exec)
+        exec.action({ argv = { "sh", "-c", "true" } })
+        return { names = { "alpha", "beta" } }
+    end,
+})
+local targets = core.expand({
+    inputs = { names = metadata.outputs.names },
+    create = function(inputs)
+        local children = {}
+        for _, name in ipairs(inputs.names) do
+            local produce = core.task({
+                inputs = { sh = sh },
+                outputs = { file = output.artifact() },
+                run = function(exec)
+                    local result = exec.action({
+                        argv = { "sh", "-c", `printf {name} > build/{name}.txt` },
+                        outputs = { file = output.file(`build/{name}.txt`) },
+                    })
+                    return { file = result.outputs.file }
+                end,
+            })
+            children[name] = { BUILD = produce.outputs.file }
+        end
+        return children
+    end,
+})
+local function consumer(key)
+    return core.task({
+        inputs = { sh = sh, child = targets:get(key, core.BUILD) },
+        outputs = { status = output.value() },
+        run = function(exec, inputs)
+            local path = exec.path(inputs.child)
+            assert(path == "build/alpha.txt", path)
+            exec.action({
+                argv = { "sh", "-c", `read -r line < {path} || true; [ "$line" = alpha ]` },
+                inputs = { inputs.child },
+            })
+            return { status = "ok" }
+        end,
+    })
+end
+return {
+    consume = { BUILD = consumer("alpha") },
+    missing = { BUILD = consumer("missing") },
+}
+"#,
+        );
+        let live = load_workspace_with_rules(workspace, RulesSource::discover())
+            .await
+            .unwrap();
+
+        run_goal_live(&live, workspace, "build", &["//:consume".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            live.luau.as_ref().unwrap().borrow().action_count(),
+            3,
+            "the consumer must run the producer, the selected child, and itself only"
+        );
+
+        let error = run_goal_live(&live, workspace, "build", &["//:missing".to_owned()])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expansion has no child 'missing'"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn expansion_children_are_listable_dependency_visible_and_individually_buildable() {
         // Issue #8: `imp targets`/`imp dependencies` couldn't see expand()-
         // discovered work (Rust per-crate tests, CMake per-target libs) that

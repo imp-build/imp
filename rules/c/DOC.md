@@ -314,9 +314,10 @@ custom ownership or mixed build layouts are not rewritten unexpectedly.
 ## Luau modules
 
 **Verified:** on 2026-10-13, `@imp/rules/c`, `@imp/rules/c/toolchain`,
-`@imp/rules/c/gcc`, `@imp/rules/c/zig`, `@imp/rules/c/msvc`, and
-`@imp/rules/c/mold` have Luau modules beside the JavaScript modules.
-`cmakeProject()` and the C build generator stay JavaScript. Select the Luau
+`@imp/rules/c/gcc`, `@imp/rules/c/zig`, `@imp/rules/c/msvc`,
+`@imp/rules/c/mold`, and `@imp/rules/c/cmake` have Luau modules beside the
+JavaScript modules. `//rules/c/cmake`'s own docs describe the CMake modules.
+The C build generator stays JavaScript. Select the Luau
 workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
 

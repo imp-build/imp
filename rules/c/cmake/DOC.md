@@ -192,3 +192,98 @@ These flow through as `transitiveLinkopts` — a `ccBinary()` consumer folds
 them into its own link step automatically, and an `odinPackage()` consumer
 needs `unsafeSystemPaths: true` of its own (see `//rules/odin`'s own docs)
 to actually accept `-L` flags under `/usr/lib` on its own linker invocation.
+
+## Luau modules
+
+**Verified:** on 2026-10-13, `@imp/rules/c/cmake` has Luau modules beside the
+JavaScript modules. Select the Luau workspace with `IMP_RUNTIME=luau`, as
+`docs/design/luau-authoring-contract.md` describes. The C build generator
+stays JavaScript.
+
+`cmake_project(options)` and `cmake_library_dep(project, name, options)`
+declare the same tasks and actions as `cmakeProject()` and
+`cmakeLibraryDep()`, with the differences that the last part of this section
+gives. The option and result names use `snake_case`:
+
+| JavaScript | Luau |
+| --- | --- |
+| `buildDir`, `extraGlobs`, `cmakeArgs` | `build_dir`, `extra_globs`, `cmake_args` |
+| `cmakeToolchain`, `unsafeSystemPaths` | `cmake_toolchain`, `unsafe_system_paths` |
+| `includeDirs` | `include_dirs` |
+| `transitiveArchives`, `transitiveSharedLibs` | `transitive_archives`, `transitive_shared_libs` |
+| `transitiveIncludeDirs`, `transitiveLinkopts` | `transitive_include_dirs`, `transitive_linkopts` |
+
+The other options (`path`, `srcs`, `dirs`, `deps`, `toolchain`, `linkopts`,
+and `shared`) have the same names. The result of `cmake_project()` is an
+expansion. Select its children with method calls:
+`project:get(cmake_target_name, workflow, facet?)` and
+`project:all(workflow, facet?)`. Put a `TEST` child directly in the `TEST`
+slot.
+
+**Runnable example:** `//rules/c/cmake/example/BUILD.luau` declares these
+targets.
+
+```luau
+local build = require("@imp/rules/workflows/build")
+local test = require("@imp/rules/workflows/test")
+local cmake = require("@imp/rules/c/cmake")
+local gcc = require("@imp/rules/c/gcc")
+local c = require("@imp/rules/c")
+
+local hello = cmake.cmake_project({
+	path = "rules/c/cmake/example",
+	cmake_args = { "-DCMAKE_BUILD_TYPE=Debug" },
+})
+local hello_lib = cmake.cmake_library_dep(hello, "hello_cmake", {
+	include_dirs = { "rules/c/cmake/example" },
+	shared = true,
+})
+
+return {
+	hello_cmake_main = {
+		[build.BUILD] = hello:get("hello_cmake_main", build.BUILD),
+		[test.TEST] = hello:get("hello_cmake_main", test.TEST, "unit"),
+	},
+	uses_cmake_lib_test = c.cc_test({
+		srcs = { "uses_cmake_lib.c" },
+		deps = { hello_lib },
+		toolchain = gcc.default_graph_toolchain(),
+	}),
+}
+```
+
+```sh
+# From the repository root, after `cargo build -p imp`:
+IMP_RUNTIME=luau target/debug/imp test //rules/c/cmake/example:hello_cmake_main //rules/c/cmake/example:uses_cmake_lib_test
+```
+
+`cmake_project_specs()` returns the declared projects in declaration order.
+The C build generator uses it to find duplicate declarations.
+
+### CMake toolchain
+
+`@imp/rules/c/cmake/toolchain` declares CMake 4.4.3 as the default when it
+loads on Linux or Windows, on x86_64 or aarch64.
+`cmake_toolchain(version, options?)` declares another version. The options
+are `default`, `unverified`, and `lockfile`. The result has a `GEN_LOCKFILES`
+root. `graph_toolchain(version?)` returns `{ tool, version }`, and
+`cmake_bin(exec, tool)` returns the absolute path of the cmake executable in
+a task body.
+
+### Differences from the JavaScript modules
+
+- The Luau host runs one action at a time. The edges of a replay wave thus
+  run one after another. Each edge still has its own action and its own
+  cache entry.
+- A replay action gets the tools of its task inputs: the compiler provider,
+  cmake, `mkdir`, `cp`, and `dirname`. The providers have no `toolSpec(name)`.
+- The configure task finds nested `CTestTestfile.cmake` files through the
+  `subdirs()` entries of the top-level file.
+- The Luau modules do not provide `cmakeBin()`, `installCmakeToolchain()`,
+  `cmakeGraphToolSpec()`, or `cmakeGraphToolchainDir()`. `imp @cmake` does
+  not dispatch to a Luau workspace.
+- ctest comes from the host PATH, as in the JavaScript module, not from the
+  pinned CMake toolchain.
+
+**Unknown:** the Windows behavior of the Luau modules is not verified on a
+Windows host. The fake-host tests check only the argv values.

@@ -27,7 +27,7 @@ the gaps that block catalog migration.
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `self_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
 | Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/codegen`, `fmt`, `generate`, `generate_build`, `lint`, `lockfiles`, `publish`, and `run` register the `codegen`, `fmt` (with `--check`), `generate` (with `--check`), `generate-build` (with `--check`), `lint` (with `--fix`), `gen-lockfiles`, `publish`, and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
-| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as CMake and the C build generator, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/cmake`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as the C build generator, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -93,9 +93,11 @@ A Cargo build in the checkout reads `@imp/rules` from the checkout's `rules/`
 directory. It finds that directory from the executable path, not from the
 workspace. Set `IMP_RULES_DIR="$PWD/rules"` only for a build in a different
 `CARGO_TARGET_DIR`. A workspace cannot supply `@imp/rules` modules. The
-`luau::tests::repository_luau_workspace_tests_pass` test runs every Luau `TEST`
-root of the repository, so `imp test //crates/imp-engine:imp_engine` covers
-them.
+`luau::tests::repository_luau_workspace_tests_pass` test runs every Luau rule
+test root (`core.test_root()`) of the repository, so
+`imp test //crates/imp-engine:imp_engine` covers them. Product test roots that
+need real toolchains, such as the CMake example ctest roots, run with
+`IMP_RUNTIME=luau imp test //...`.
 
 ### Test host fakes
 
@@ -351,6 +353,7 @@ A task reads a files handle from its `inputs` with these `exec` functions:
 | --- | --- | --- |
 | `exec.paths(files)` | Returns the sorted workspace-relative paths of the fileset. | `exec.paths(fileset)` |
 | `exec.digest(files)` | Returns the CAS tree digest of the fileset. The tree holds each file at its workspace-relative path. | `digestOf(fileset)` |
+| `exec.digest(artifact)` | Returns the CAS tree digest of an artifact handle, for example a resolved task input or an output of an `exec.action` call in this task. The tree holds the artifact at its captured path, so `core.read_file_in_digest` can read files that the action wrote. | `artifact.digest` |
 
 Imp captures each fileset one time in a task run. `exec.paths`, `exec.digest`,
 and `exec.action({ inputs = ... })` use the same capture. Thus the paths and
@@ -358,7 +361,10 @@ the digest agree with the files that the action stages. The handle must be a
 declared task input, or the call fails with `exec.paths(handle) requires a
 declared task input`. A graph handle that is not a files handle fails with
 `exec.paths(handle) requires a files handle`. `exec.digest` fails with the same
-messages, with the prefix `exec.digest(handle)`. In a `core.test.with_fake_run` scope, these functions still capture
+messages, with the prefix `exec.digest(handle)`, except that it also accepts
+an artifact handle. An artifact handle needs no declaration as a task input.
+A placeholder artifact of a faked action has no content in the CAS, so do
+not read it with `core.read_file_in_digest`. In a `core.test.with_fake_run` scope, these functions still capture
 the real workspace files.
 
 A formatter for the `fmt` workflow uses these functions to fill its `FMT`
@@ -401,6 +407,15 @@ return {
     },
 }
 ```
+
+A task can also declare an `expansion:get(key, workflow, facet?)` handle
+as an input. Before the task runs, Imp resolves the expansion, runs the
+selected child, and gives the task the value of the child, as it does for a
+task output. For example, `@imp/rules/c/cmake` gives a discovered CMake
+library to `cc_binary` this way. Only a top-level input of the task is resolved, and the child must be a
+task or task output. A missing child fails the task with
+`expansion has no child '<key>'`. An `expansion:all()` handle fails as a task
+input.
 
 Selecting an aggregate root also makes each child addressable as
 `<target-address>#<child-key>`. Imp resolves only expansions reachable from
