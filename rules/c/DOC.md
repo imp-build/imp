@@ -311,39 +311,122 @@ export const cConfig = {
 Then run `imp goal generate-build`. Generation is opt-in so repositories with
 custom ownership or mixed build layouts are not rewritten unexpectedly.
 
-## Luau mold module
+## Luau toolchain modules
 
-**Verified:** on 2026-10-11, `@imp/rules/c/mold` has a Luau module beside the
-JavaScript module. The other C modules stay JavaScript. Select the Luau
-workspace with `IMP_RUNTIME=luau`, as
-`docs/design/luau-authoring-contract.md` describes.
+**Verified:** on 2026-10-13, `@imp/rules/c/toolchain`, `@imp/rules/c/gcc`,
+`@imp/rules/c/zig`, `@imp/rules/c/msvc`, and `@imp/rules/c/mold` have Luau
+modules beside the JavaScript modules. `ccLibrary()`, `ccBinary()`, and
+`cmakeProject()` stay JavaScript. Select the Luau workspace with
+`IMP_RUNTIME=luau`, as `docs/design/luau-authoring-contract.md` describes.
 
-The module declares mold 2.42.1 as the default when it loads on Linux.
-`mold_toolchain(version, { default?, unverified?, lockfile? })` declares
-another version. Its result has a `GEN_LOCKFILES` root, so a BUILD module can
-export it for `imp goal gen-lockfiles`. A lockfile address must start with
-`@workspace/` or `@imp/rules/`.
+### Compiler providers
 
-`graph_toolchain(version?)` returns `{ tool, version }`. Put `tool` in the
-inputs of the task that links. In the task body,
-`rust_linker_env(exec, tool)` returns `{ rustflags, path_dirs }` and
-`odin_linker_env(exec, tool)` returns `{ flags, path_dirs }`. `path_dirs` has
-the absolute `bin` directory of the installed mold.
+`gcc.graph_toolchain(version?)`, `zig.graph_toolchain(version?)`, and
+`msvc.msvc_toolchain()` return a provider table with the same fields:
+
+| Field | Result |
+| --- | --- |
+| `kind` | `"gcc"`, `"zig"`, or `"msvc-host-toolchain"` |
+| `task_inputs()` | The graph handles that a compile, archive, or link task declares as inputs |
+| `commands(exec, inputs, options?)` | `{ env, rsp_quote, compile_command, archive_command, link_command }` |
+| `cmake_configure(exec, inputs, options?)` | `{ compiler_args, env }` for a CMake configure |
+| `resolves_tool_name(name)`, `resolve_state(exec, inputs)`, `edge_env(state)` | The CMake replay part of the contract |
+
+Add the `task_inputs()` handles to the inputs of the task. In the task body,
+`commands()` gives `sh -c` tokens and an `env` table for `exec.action`. The
+gcc and Zig tool handles put the compiler names on PATH. The MSVC `env` puts
+the MSVC and Windows SDK `bin` directories of the host on PATH, and sets
+`INCLUDE` and `LIB`. The `unsafe_system_paths` option of gcc `commands()`
+and `cmake_configure()` selects the compilers that skip the Bootlin path guard.
+
+`toolchain.cc_toolchain_for_platform({ linux = ..., windows = ... })` returns
+a union. `toolchain.select_cc_toolchain(value, platform?)` returns the
+provider of the host OS, or of `platform`. A branch can be a function that
+returns a provider.
+
+The Zig provider has no CMake support: its `cmake_configure` fails, and
+`resolves_tool_name` is false.
 
 **Illustrative example:**
 
 ```luau
 local core = require("@imp/core")
-local mold = require("@imp/rules/c/mold")
+local gcc = require("@imp/rules/c/gcc")
 
-local link = core.task({
-	inputs = { mold = mold.graph_toolchain().tool },
-	run = function(exec, inputs)
-		local env = mold.rust_linker_env(exec, inputs.mold)
-		-- Add env.path_dirs to PATH, and pass env.rustflags to rustc.
+local provider = gcc.graph_toolchain()
+local inputs = provider.task_inputs()
+inputs.sh = core.native_tool("sh")
+
+local compile = core.task({
+	inputs = inputs,
+	run = function(exec, resolved)
+		local commands = provider.commands(exec, resolved)
+		-- Join commands.compile_command({ ... }) into an `sh -c` script, and
+		-- give commands.env to exec.action.
 	end,
 })
 ```
 
-The Luau module does not provide `installMoldToolchain()`, `moldTool()`, or
-`moldBin()`. `imp @mold` does not dispatch to a Luau workspace.
+### Declare toolchain versions
+
+Each module declares its pinned default when it loads on a platform that it
+supports: gcc 2025.08-1 on Linux x86_64 and 16.2.0posix-14.0.0-ucrt-r1 on
+Windows x86_64, Zig 0.16.0 on Linux and Windows, and NASM 3.02 and mold
+2.42.1 on their only platforms. The JavaScript gcc and Zig modules fail to
+load on another platform. The Luau modules declare no default there.
+
+`gcc_toolchain(version, options?)`, `zig_toolchain(version, options?)`,
+`nasm_toolchain(version?, options?)`, and `mold_toolchain(version, options?)`
+declare another version. The options are `default`, `unverified`, and
+`lockfile`. gcc takes a version and a lockfile address for each OS, for
+example `{ linux = "2025.08-1", windows = "16.2.0posix-14.0.0-ucrt-r1" }`.
+The result has a `GEN_LOCKFILES` root, so a BUILD module can export it for
+`imp goal gen-lockfiles`. A lockfile address must start with `@workspace/` or
+`@imp/rules/`.
+
+### Absolute host paths
+
+Some programs need an absolute path, for example a rustc linker or a path
+that CMake writes into build.ninja. These functions take the task `exec` and
+a tool handle that the task declares as an input:
+
+- `gcc.rust_link_driver_env(exec, tool, kache_active)` returns
+  `{ rustflags, env, path_dirs }`.
+- `gcc.cmake_compiler_args(exec, tool, unsafe_system_paths?)` and
+  `gcc.windows_runtime_archives(exec, tool, version)` return argument lists.
+- `msvc.resolve_nasm_host(exec, nasm_tool)` returns the path of nasm.exe.
+- `mold.rust_linker_env(exec, tool)` returns `{ rustflags, path_dirs }`, and
+  `mold.odin_linker_env(exec, tool)` returns `{ flags, path_dirs }`.
+
+### Differences from the JavaScript modules
+
+- The Luau modules do not provide `installGccToolchain()`,
+  `installZigToolchain()`, `gccTool()`, `gccBin()`, `zigBin()`,
+  `nasmHostBin()`, `nasmGenLockfiles()`, `installMoldToolchain()`,
+  `moldTool()`, or `moldBin()`. `imp @gcc`, `imp @zig`, `imp @nasm`, and
+  `imp @mold` do not dispatch to a Luau workspace.
+- The providers have no `toolSpec(name)`. A CMake replay edge finds the gcc
+  names through the tool handle, and the MSVC names through the PATH of the
+  provider `env`.
+- The MSVC provider does not copy the host `bin` directories into named
+  caches. It runs the host programs where Visual Studio installed them.
+- The Zig build cache is shared by each workspace on the computer. The
+  JavaScript module keeps it in the workspace scope. Zig locks its cache
+  entries, so concurrent writers are safe.
+- The NASM named cache has a key for each version. The JavaScript module uses
+  one fixed key, `default`, for all versions.
+- On Windows, the gcc install script runs `mkdir`, `cp`, `mv`, and `unzip`
+  by name. The JavaScript module gives their absolute paths.
+
+**Unknown:** the Windows behavior of the Luau modules is not verified on a
+Windows host. The fake-host tests check only the argv and environment
+values. These points need a real host:
+
+- The gcc, Zig, and NASM install scripts that run tools by name.
+- The MSVC `PATH` value `C:/...;C:/...`, after the `sh` of Git for Windows
+  converts it.
+- A CMake replay edge that runs a bare `rc` or `mt` through that `PATH`.
+
+To verify, run `IMP_RUNTIME=luau imp build` on Windows for a task that
+compiles and links a C source with `gcc.graph_toolchain()`,
+`zig.graph_toolchain()`, and `msvc.msvc_toolchain()`.

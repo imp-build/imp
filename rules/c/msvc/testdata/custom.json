@@ -1,0 +1,13 @@
+{
+  "tool": "nasm",
+  "versions": {
+    "2.16.03": {
+      "windows/x86_64": {
+        "url": "https://locked.example/nasm.zip",
+        "artifact": "nasm.zip",
+        "size": 42,
+        "sha256": "beef"
+      }
+    }
+  }
+}
