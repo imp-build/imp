@@ -311,13 +311,56 @@ export const cConfig = {
 Then run `imp goal generate-build`. Generation is opt-in so repositories with
 custom ownership or mixed build layouts are not rewritten unexpectedly.
 
-## Luau toolchain modules
+## Luau modules
 
-**Verified:** on 2026-10-13, `@imp/rules/c/toolchain`, `@imp/rules/c/gcc`,
-`@imp/rules/c/zig`, `@imp/rules/c/msvc`, and `@imp/rules/c/mold` have Luau
-modules beside the JavaScript modules. `ccLibrary()`, `ccBinary()`, and
-`cmakeProject()` stay JavaScript. Select the Luau workspace with
-`IMP_RUNTIME=luau`, as `docs/design/luau-authoring-contract.md` describes.
+**Verified:** on 2026-10-13, `@imp/rules/c`, `@imp/rules/c/toolchain`,
+`@imp/rules/c/gcc`, `@imp/rules/c/zig`, `@imp/rules/c/msvc`, and
+`@imp/rules/c/mold` have Luau modules beside the JavaScript modules.
+`cmakeProject()` and the C build generator stay JavaScript. Select the Luau
+workspace with `IMP_RUNTIME=luau`, as
+`docs/design/luau-authoring-contract.md` describes.
+
+### Raw targets
+
+`cc_library(options)`, `cc_binary(options)`, and `cc_test(options)` of
+`@imp/rules/c` declare the same tasks and actions as `ccLibrary()`,
+`ccBinary()`, and `ccTest()`, with the differences that the last part of this
+section gives. The option and result names use `snake_case`:
+
+| JavaScript | Luau |
+| --- | --- |
+| `generatedSrcs` | `generated_srcs` |
+| `outputName` | `output_name` |
+| `unsafeSystemPaths` | `unsafe_system_paths` |
+| `transitiveArchives`, `transitiveSharedLibs`, `transitiveImportLibs` | `transitive_archives`, `transitive_shared_libs`, `transitive_import_libs` |
+| `transitiveIncludeDirs`, `transitiveHdrs`, `transitiveLinkopts` | `transitive_include_dirs`, `transitive_hdrs`, `transitive_linkopts` |
+
+The other options (`path`, `srcs`, `hdrs`, `deps`, `toolchain`, `copts`,
+`linkopts`, and `shared`) have the same names. The results use the `BUILD`,
+`PACKAGE`, `RUN`, and `TEST` slot keys of the workflow modules.
+`DEFAULT_CPP_SRCS` and `DEFAULT_CPP_HDRS` are the default globs.
+
+**Illustrative example:**
+
+```luau
+local c = require("@imp/rules/c")
+local gcc = require("@imp/rules/c/gcc")
+
+local toolchain = gcc.default_graph_toolchain()
+local lib = c.cc_library({ path = "app/lib", toolchain = toolchain })
+
+return {
+	lib = lib,
+	app = c.cc_binary({ path = "app", srcs = { "main.c" }, deps = { lib }, toolchain = toolchain }),
+	app_test = c.cc_test({ path = "app/test", deps = { lib }, toolchain = toolchain }),
+}
+```
+
+`//rules/c/graph_example/BUILD.luau` declares a library and a binary in the
+same way.
+
+`cc_workload_specs()` returns the declared targets in declaration order. The
+C build generator uses it to find duplicate declarations.
 
 ### Compiler providers
 
@@ -400,6 +443,12 @@ a tool handle that the task declares as an input:
 
 ### Differences from the JavaScript modules
 
+- `cc_library`, `cc_binary`, and `cc_test` always compile with the debug
+  flags. The Luau host has no mode axes yet, so a task cannot read the `opt`
+  axis. `--profile` and `--axis` do not change these targets.
+- The Luau host runs one action at a time. The compile actions of a target
+  thus run one after another. Each source still has its own action and its
+  own cache entry.
 - The Luau modules do not provide `installGccToolchain()`,
   `installZigToolchain()`, `gccTool()`, `gccBin()`, `zigBin()`,
   `nasmHostBin()`, `nasmGenLockfiles()`, `installMoldToolchain()`,
