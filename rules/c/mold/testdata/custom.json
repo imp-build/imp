@@ -1,0 +1,13 @@
+{
+  "tool": "mold",
+  "versions": {
+    "2.40.0": {
+      "linux/x86_64": {
+        "url": "https://locked.example/tool.tar.gz",
+        "artifact": "tool.tar.gz",
+        "size": 42,
+        "sha256": "beef"
+      }
+    }
+  }
+}

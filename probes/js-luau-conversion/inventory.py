@@ -82,7 +82,7 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     "imp-toolchain": MigrationBoundary(
         "Imp toolchain rules",
         "2026-10-10-port-luau-imp-toolchain",
-        "rules/imp/toolchain and lockfileFor",
+        "rules/imp/toolchain, lockfileFor, and rules/c/mold",
         ("tool/path host APIs", "workspace/catalog discovery"),
     ),
     "rust-graph": MigrationBoundary(
@@ -173,7 +173,7 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     "c-toolchains": MigrationBoundary(
         "C compiler toolchains",
         "2026-09-30-port-luau-c-toolchains",
-        "rules/c/{gcc,mold,msvc,zig}",
+        "rules/c/{gcc,msvc,zig}",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
     "c-cmake": MigrationBoundary(
@@ -345,7 +345,7 @@ def migration_boundary_for(path: str) -> str | None:
         return "imp-host-foundation"
     if path == "rules/imp/generate_test.js":
         return "imp-generate-validation"
-    if path.startswith("rules/imp/toolchain"):
+    if path.startswith(("rules/imp/toolchain", "rules/c/mold/")):
         return "imp-toolchain"
     if path.startswith((
         "rules/imp/archive",
@@ -392,7 +392,7 @@ def migration_boundary_for(path: str) -> str | None:
         return "workflow-packaging-validation"
     if path == "rules/c/toolchain.js":
         return "c-shared-toolchain"
-    if path.startswith(("rules/c/gcc/", "rules/c/mold/", "rules/c/msvc/", "rules/c/zig/")):
+    if path.startswith(("rules/c/gcc/", "rules/c/msvc/", "rules/c/zig/")):
         return "c-toolchains"
     if path.startswith("rules/c/cmake/"):
         return "c-cmake"

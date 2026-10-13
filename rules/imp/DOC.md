@@ -374,9 +374,9 @@ overrides first.
 
 ## Luau modules
 
-**Verified:** on 2026-10-10, `@imp/rules/imp/native-tool`, `self-tool`,
-`archive`, `lockfile`, `generate`, and `codegen` have Luau modules beside the
-JavaScript modules.
+**Verified:** on 2026-10-11, `@imp/rules/imp/native-tool`, `self-tool`,
+`archive`, `lockfile`, `generate`, `codegen`, and `toolchain` have Luau
+modules beside the JavaScript modules.
 JavaScript stays the default runtime of this repository. To use the Luau
 modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
@@ -386,7 +386,8 @@ modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
 | `@imp/rules/imp/native-tool` | `native_tool(name)`: a graph tool handle for an executable on the host `PATH`. A name that is empty or not a string fails with `native_tool(name) requires a non-empty executable name`. |
 | `@imp/rules/imp/self-tool` | `imp_tool`: a graph tool handle for the running Imp executable. Actions run it as `imp`. |
 | `@imp/rules/imp/archive` | `extract_archive({ archive, dest, format, strip_components?, named_cache?, display? })` gives the directory artifact of an extracted `tar`, `tar.gz`, `tar.xz`, `zip`, or `zip-unix` archive. `extract_archive_tools(format)` lists the native tools that the extraction uses. |
-| `@imp/rules/imp/lockfile` | `download_tool_artifact(options)` downloads a toolchain artifact and verifies it against its lockfile. `resolve_tool_lockfile`, `locked_download_argv`, `locked_download_tools`, `sha_tool_name`, and `lockfile_address_to_path` are the parts it uses. |
+| `@imp/rules/imp/lockfile` | `download_tool_artifact(options)` downloads a toolchain artifact and verifies it against its lockfile. `resolve_tool_lockfile`, `locked_download_argv`, `locked_download_tools`, `sha_tool_name`, and `lockfile_address_to_path` are the parts it uses. `lockfile_for(kind, version, fallback)` returns the lockfile address of a declared toolchain version. |
+| `@imp/rules/imp/toolchain` | `define(name)` returns a kind table that keeps the declared versions and the default version of a toolchain: `declare`, `default`, `default_version`, `resolve_version`, `require_version`, `instance_for_version`, `resolve_unverified`, and `clear_default`. `bin(exec, tool, { sub_dir?, exe })` returns the absolute host path of an executable in an installed toolchain. |
 | `@imp/rules/imp/generate` | `generated_files({ display?, tools?, inputs?, output_paths, argv })` declares a `GENERATE` root for `imp generate`. |
 | `@imp/rules/imp/codegen` | `codegen(options)` takes the options of `generated_files()` and returns a frozen `{ paths, files, BUILD, CODEGEN }`. `stamp_file({ output, text })` returns a frozen `{ file, BUILD }`. `normalize_generated_srcs`, `dedupe_generated_srcs`, and `assert_generated_src_path` are internal to the language rules. |
 
@@ -453,12 +454,37 @@ return {
 }
 ```
 
+A toolchain module calls `toolchain.define(name)` one time and declares each
+version with `declare`. An install task publishes the toolchain into a named
+cache, and `core.tool()` makes a tool handle on it. A task that needs an
+absolute path declares the tool handle as an input and calls `toolchain.bin`
+in its body. `@imp/rules/c/mold` is the first module with this shape.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local toolchain = require("@imp/rules/imp/toolchain")
+
+local function linker_flags(tool)
+	return core.task({
+		inputs = { tool = tool },
+		outputs = { flags = core.output.value() },
+		run = function(exec, inputs)
+			local linker = toolchain.bin(exec, inputs.tool, { sub_dir = "bin", exe = "cc.example" })
+			return { flags = { "-C", `linker={linker}` } }
+		end,
+	})
+end
+```
+
 These modules stay JavaScript only:
 
-- `//rules/imp/toolchain` and `lockfileFor()`. They need host functions to
-  resolve a tool from a named cache, and no Luau rule uses a toolchain yet.
-  The first Luau toolchain consumer ports them.
-
+- The `Toolchain` class `bin()` product, `toolchainDir()`, and
+  `toolchainToolSpec()`. `imp @tool` does not dispatch to a Luau workspace.
+  A Luau task gets an installed toolchain directory through a declared tool
+  input and `exec.tool_dir()`, and a tool handle is the `tools` entry of an
+  action.
 - `//rules/imp/mode` and the `opt` axis. Luau has no mode axes or profiles yet.
 - `//rules/imp/test`. A Luau package declares a `TEST` root with
   `core.test_root()` and writes `.test.luau` modules with `core.test.case`, as

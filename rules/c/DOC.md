@@ -310,3 +310,40 @@ export const cConfig = {
 
 Then run `imp goal generate-build`. Generation is opt-in so repositories with
 custom ownership or mixed build layouts are not rewritten unexpectedly.
+
+## Luau mold module
+
+**Verified:** on 2026-10-11, `@imp/rules/c/mold` has a Luau module beside the
+JavaScript module. The other C modules stay JavaScript. Select the Luau
+workspace with `IMP_RUNTIME=luau`, as
+`docs/design/luau-authoring-contract.md` describes.
+
+The module declares mold 2.42.1 as the default when it loads on Linux.
+`mold_toolchain(version, { default?, unverified?, lockfile? })` declares
+another version. Its result has a `GEN_LOCKFILES` root, so a BUILD module can
+export it for `imp goal gen-lockfiles`. A lockfile address must start with
+`@workspace/` or `@imp/rules/`.
+
+`graph_toolchain(version?)` returns `{ tool, version }`. Put `tool` in the
+inputs of the task that links. In the task body,
+`rust_linker_env(exec, tool)` returns `{ rustflags, path_dirs }` and
+`odin_linker_env(exec, tool)` returns `{ flags, path_dirs }`. `path_dirs` has
+the absolute `bin` directory of the installed mold.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local mold = require("@imp/rules/c/mold")
+
+local link = core.task({
+	inputs = { mold = mold.graph_toolchain().tool },
+	run = function(exec, inputs)
+		local env = mold.rust_linker_env(exec, inputs.mold)
+		-- Add env.path_dirs to PATH, and pass env.rustflags to rustc.
+	end,
+})
+```
+
+The Luau module does not provide `installMoldToolchain()`, `moldTool()`, or
+`moldBin()`. `imp @mold` does not dispatch to a Luau workspace.

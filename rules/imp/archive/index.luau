@@ -72,7 +72,10 @@ end
 ---   strip_components  Optional tar --strip-components value. Zip formats
 ---                     accept only 1.
 ---   named_cache       Optional `{ name, key }`. Publish `dest` as a named
----                     cache directory output.
+---                     cache directory output. Each workspace on the
+---                     computer shares the slot, and Imp does not write an
+---                     existing slot again, so `key` must identify the
+---                     contents, for example a version and a platform.
 ---   display           Optional task display label.
 local function extract_archive(options)
 	if options.tools ~= nil then

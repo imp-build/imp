@@ -1,5 +1,6 @@
 local core = require("@imp/core")
 local lockfile = require("@imp/rules/imp/lockfile")
+local toolchain = require("@imp/rules/imp/toolchain")
 
 local RUFF = "@imp/rules/imp/testdata/lockfile/ruff.json"
 local INVALID = "@imp/rules/imp/testdata/lockfile/invalid.json"
@@ -37,10 +38,32 @@ local function same_list(actual, expected)
 	return true
 end
 
--- The JavaScript module also tests `lockfileFor`, which reads the lockfile
--- address of a declared Toolchain instance. Luau has no Toolchain class yet,
--- so that helper waits for the Luau toolchain module.
 return {
+	core.test.suite("lockfile_for", {
+		core.test.case("returns the lockfile of the declared instance", function()
+			local kind = toolchain.define("demo")
+			kind.declare("1.0.0", { lockfile = "@workspace/locks/demo.lock" })
+			assert(lockfile.lockfile_for(kind, "1.0.0", "@imp/rules/demo.lock") == "@workspace/locks/demo.lock")
+		end),
+
+		core.test.case("uses the default instance for a version that no instance declared", function()
+			local kind = toolchain.define("demo")
+			kind.declare("1.0.0", { default = true, lockfile = "@workspace/locks/demo.lock" })
+			assert(lockfile.lockfile_for(kind, "2.0.0", "@imp/rules/demo.lock") == "@workspace/locks/demo.lock")
+		end),
+
+		core.test.case("falls back to the shipped address when the instance has no lockfile", function()
+			local kind = toolchain.define("demo")
+			kind.declare("1.0.0")
+			assert(lockfile.lockfile_for(kind, "1.0.0", "@imp/rules/demo.lock") == "@imp/rules/demo.lock")
+		end),
+
+		core.test.case("falls back to the shipped address when no instance resolves", function()
+			local kind = toolchain.define("demo")
+			assert(lockfile.lockfile_for(kind, "1.0.0", "@imp/rules/demo.lock") == "@imp/rules/demo.lock")
+		end),
+	}),
+
 	core.test.suite("lockfile addresses", {
 		core.test.case("converts a lockfile address to a workspace-relative path", function()
 			assert(lockfile.lockfile_address_to_path("@imp/rules/python/ruff-toolchain.lock") == "rules/python/ruff-toolchain.lock")

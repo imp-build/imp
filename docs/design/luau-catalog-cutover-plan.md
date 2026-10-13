@@ -63,7 +63,7 @@ starts.
 | Imp | `imp-host-foundation` | 2 | Imp host and test task |
 | Imp | `imp-mode` | 2 | Imp mode axes task |
 | Imp | `imp-core-foundation` | 7 | Imp core task |
-| Imp | `imp-toolchain` | 2 | Imp toolchain task |
+| Imp | `imp-toolchain` | 5 | Imp toolchain task |
 | Imp | `imp-generate-validation` | 1 | Imp generate validation task |
 | Imp | `imp-validation` | 14 | Imp host and test task |
 | Workflows | `workflow-core-runtime` | 6 | Core workflow task |
@@ -76,7 +76,7 @@ starts.
 | Workflows | `workflow-packaging-validation` | 1 | Packaging workflow task |
 | Workflows | `builtin-lockfiles` | 1 | Packaging workflow task |
 | C | `c-shared-toolchain` | 1 | C toolchain task |
-| C | `c-toolchains` | 12 | C toolchain task |
+| C | `c-toolchains` | 9 | C toolchain task |
 | C | `c-cmake` | 12 | CMake task |
 | C | `c-catalog-root` | 4 | C catalog-root task |
 | C | `c-generate-build` | 1 | C BUILD generation task |
@@ -217,9 +217,11 @@ Task ownership follows these rules:
   codegen workflow task owns their BUILD and test modules.
 - A separate Imp toolchain task owns `rules/imp/toolchain`, its test, and
   `lockfileFor()` of `rules/imp/lockfile` (user decision, 2026-10-10). The
-  port needs host functions that resolve a tool from a named cache and read a
-  named cache back, and no Luau rule used a toolchain when the Imp core task
-  ran. The first Luau toolchain consumer depends on it.
+  port needs a host function that returns the named-cache directory of a tool
+  (`exec.tool_dir`), and no Luau rule used a toolchain when the Imp core task
+  ran. The task also owns `rules/c/mold`, the first Luau toolchain consumer
+  (user decision, 2026-10-11). The C toolchain task owns the other C
+  toolchains and depends on it.
 - The Imp core task moved the `generate-build` goal into
   `@imp/rules/workflows/generate_build` (user decision, 2026-10-10). The Luau
   host keeps only `core.generate_build(check)` and no goal special case.

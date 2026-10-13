@@ -27,7 +27,7 @@ the gaps that block catalog migration.
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `self_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
 | Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/codegen`, `fmt`, `generate`, `generate_build`, `lint`, `lockfiles`, `publish`, and `run` register the `codegen`, `fmt` (with `--check`), `generate` (with `--check`), `generate-build` (with `--check`), `lint` (with `--fix`), `gen-lockfiles`, `publish`, and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
-| Installed rules | The tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, and `imp/self-tool` modules. | Other packages, such as `imp/toolchain`, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Installed rules | The tree contains Luau `asset`, `c/mold`, `resource_package`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as the other C toolchains, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -138,7 +138,9 @@ The recorder tables contain these fields:
   `{ "named_cache", name, key }` for each faked action output that declares a
   named cache. The JavaScript `namedCache` entry records a cache lookup
   instead. It records `{ "self_tool" }` when a faked action receives the
-  `self_tool()` handle through its task inputs.
+  `self_tool()` handle through its task inputs. It records
+  `{ "tool_dir", name, key }` for each `exec.tool_dir` call, with the named
+  cache of the tool.
 - `calls` (workspace writes): entries with `path`, `digest`, and `from`.
 - `changes` and `calls` (digest diffs): `changes` is the list that each
   `core.diff_digests` call returns. `calls` has one `{ before, after }` entry
@@ -151,6 +153,9 @@ named cache, or call the execution service. It applies the same checks as the
 real host to input handles, tool names, tool source artifacts, outputs, and
 `env` values, in the same order. It returns placeholder artifact handles for
 the declared outputs. `exec.path()` returns the declared path of a placeholder.
+Inside a run or toolchain host fake, `exec.tool_dir(tool)` returns
+`/cache/<name>/<key>` for the named cache of the tool, and does not read the
+cache.
 Downstream tasks in the same scope can use placeholders as inputs and tools.
 
 Imp clears cached task and expansion results when a fake scope starts and when
@@ -328,7 +333,10 @@ An action declares workspace-relative paths with `output.file(path)` or
 `output.directory(path)`. A directory may also declare a named cache with
 `output.directory(path, { named_cache = { name, key } })`. The execution
 service captures outputs in CAS, writes named-cache outputs to the tool cache,
-and returns artifact handles under `result.outputs`. A task may return one of
+and returns artifact handles under `result.outputs`. A Luau named cache is
+shared: every workspace on the computer uses one slot for each `name` and
+`key`, as a JavaScript `namedCache({ shared: true })` does. Thus the key must
+identify the contents, for example a version and a platform. A task may return one of
 those handles from its matching artifact slot. A downstream task may declare
 that task output in `inputs`; Imp executes the producer first and supplies the
 resolved value or artifact handle to the consumer. When an action consumes an
@@ -420,10 +428,29 @@ Pass tool and path handles through a task's `inputs`. The tool handle makes the
 cached tool available on the sandbox action's `PATH`. `exec.path(path_handle)`
 returns the artifact's workspace-relative path inside the sandbox; include the
 same path handle in `exec.action({ inputs = ... })` to stage the artifact.
+`exec.tool_dir(tool_handle)` returns the absolute host directory of the named
+cache that holds the tool. The task must declare the tool handle as an input,
+and the call fails for another handle. Use it only when a program needs an
+absolute host path, for example a linker directory in compiler flags. An
+action that runs the tool needs only the tool handle in its inputs.
 `exec.action({ env = { NAME = "value" } })` adds explicit environment values
 to the action. These values are part of the action environment and cache key.
 Lockfile selection, checksum verification, downloads, and archive extraction
 remain rule-module policy built from graph tasks and actions.
+
+`@imp/rules/imp/toolchain` keeps the declared versions and the default
+version of each toolchain kind (`define(name)`), and `bin(exec, tool, {
+sub_dir, exe })` joins an executable name onto `exec.tool_dir`.
+`@imp/rules/imp/lockfile` `lockfile_for(kind, version, fallback)` returns the
+lockfile address of a declared version. `@imp/rules/c/mold` is the first
+toolchain module that uses them.
+
+**Not provided:** Luau has no general handle resolution outside test cases
+and no `cache_get`. A task gets an installed toolchain path through a declared
+tool input and `exec.tool_dir`. There is no `Toolchain` class with a `bin()`
+product, so `imp @tool` does not dispatch to a Luau workspace. There is no
+`toolchainToolSpec`: a tool handle is the `tools` entry of `exec.action` and
+`core.run_program`.
 
 These `@imp/core` functions serve rule modules at declaration time and in task
 callbacks:

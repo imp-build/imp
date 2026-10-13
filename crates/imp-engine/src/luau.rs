@@ -1469,6 +1469,15 @@ fn install_task_executor(
                         ))
                     })?,
                 )?;
+                let tool_dir_host = Rc::clone(&host);
+                let tool_dir_inputs = inputs.clone();
+                exec.set(
+                    "tool_dir",
+                    lua.create_function(move |lua, handle: LuaAnyUserData| {
+                        let id = handle.borrow::<GraphHandle>()?.id;
+                        exec_tool_dir(lua, &tool_dir_host, &tool_dir_inputs, id)
+                    })?,
+                )?;
                 for (name, want_paths) in [("paths", true), ("digest", false)] {
                     let fileset_host = Rc::clone(&host);
                     let fileset_inputs = inputs.clone();
@@ -2292,9 +2301,10 @@ fn create_core(
             lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::File(path)))
         })?,
     )?;
+    let directory_host = Rc::clone(&host);
     output.set(
         "directory",
-        lua.create_function(|lua, (path, options): (String, Option<LuaTable>)| {
+        lua.create_function(move |lua, (path, options): (String, Option<LuaTable>)| {
             validate_output_path(&path)?;
             let named_cache = match options {
                 Some(options) => {
@@ -2310,6 +2320,14 @@ fn create_core(
                 }
                 None => None,
             };
+            if let Some(cache) = &named_cache {
+                // GC prunes a named cache that no workspace declares.
+                imp_store::usage::record_declared_cache(
+                    &directory_host.borrow().workspace_id,
+                    &cache.name,
+                    cache.shared,
+                );
+            }
             lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Directory {
                 path,
                 named_cache,
@@ -3436,10 +3454,12 @@ fn parse_named_cache(options: &LuaTable) -> LuaResult<Option<imp_store::cache::O
     let key = cache.get::<String>("key")?;
     imp_store::cache::validate_named_cache_path("shared", &name, &key)
         .map_err(LuaError::external)?;
+    // Luau named caches hold immutable, version-keyed installs such as
+    // toolchains, so every workspace shares one slot for each key.
     Ok(Some(imp_store::cache::OutputNamedCache {
         name,
         key,
-        shared: false,
+        shared: true,
     }))
 }
 
@@ -3758,6 +3778,67 @@ fn tool_named_cache(
     artifact.named_cache.with_context(|| {
         format!("tool '{name}' declared in package '{owner_package}' must come from an output with named_cache")
     })
+}
+
+/// Return the absolute host directory of the named cache that holds a tool
+/// input. The fakes that replace `exec.action` do not populate a cache, so
+/// they return `/cache/<name>/<key>` instead.
+fn exec_tool_dir(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    inputs: &LuaTable,
+    id: u64,
+) -> LuaResult<String> {
+    require_declared_input(inputs, id, "exec.tool_dir")?;
+    let Some(GraphNode::Tool {
+        name,
+        source_id,
+        owner_package,
+        ..
+    }) = host.borrow().nodes.get(&id).cloned()
+    else {
+        return Err(LuaError::external(
+            "exec.tool_dir(handle) requires a tool handle",
+        ));
+    };
+    let cache = tool_named_cache(&host.borrow(), &name, source_id, &owner_package)
+        .map_err(|error| LuaError::external(format!("exec.tool_dir: {error:#}")))?;
+    let (fake_run, toolchain, workspace_id, service) = {
+        let host = host.borrow();
+        (
+            host.fakes.run.is_some(),
+            host.fakes.toolchain.clone(),
+            host.workspace_id.clone(),
+            Arc::clone(&host.service),
+        )
+    };
+    if fake_run {
+        if let Some(toolchain) = toolchain {
+            push_record(
+                &toolchain.raw_get::<LuaTable>("calls")?,
+                LuaValue::Table(lua.create_sequence_from([
+                    "tool_dir",
+                    cache.name.as_str(),
+                    cache.key.as_str(),
+                ])?),
+            )?;
+        }
+        return Ok(format!("/cache/{}/{}", cache.name, cache.key));
+    }
+    let path = service
+        .cache_dir_get(
+            imp_store::cache::named_cache_scope_id(cache.shared, &workspace_id),
+            &cache.name,
+            &cache.key,
+        )
+        .map_err(|error| LuaError::external(format!("exec.tool_dir: {error:#}")))?
+        .ok_or_else(|| {
+            LuaError::external(format!(
+                "exec.tool_dir: tool '{name}' cache '{}/{}' is missing",
+                cache.name, cache.key
+            ))
+        })?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Read and validate the `exec.action({ env })` table.
@@ -4289,7 +4370,11 @@ fn resolve_tool_specs(
                 }
                 let cache = tool_named_cache(&host.borrow(), &name, source_id, &owner_package)?;
                 let path = service
-                    .cache_dir_get(workspace_id, &cache.name, &cache.key)?
+                    .cache_dir_get(
+                        imp_store::cache::named_cache_scope_id(cache.shared, workspace_id),
+                        &cache.name,
+                        &cache.key,
+                    )?
                     .with_context(|| {
                         format!(
                             "tool '{}' cache '{}/{}' is missing",
@@ -7073,6 +7158,146 @@ return { consume = consumer }
         let root = exports.get::<LuaAnyUserData>("consume").unwrap();
         runtime.execute_task(&root).await.unwrap();
         assert_eq!(runtime.action_count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_exec_tool_dir_returns_the_absolute_named_cache_directory() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        // A task can return only declared outputs, so the consumer reports
+        // the directory in its error message for the test to read. Shared
+        // slots outlive the test, and an existing slot is not written again,
+        // so each run uses a new key.
+        let key = format!(
+            "run-{}",
+            workspace_root.path().file_name().unwrap().to_string_lossy()
+        );
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local output = core.output
+local producer = core.task({
+    inputs = {
+        shell = core.native_tool("sh"),
+        mkdir = core.native_tool("mkdir"),
+    },
+    outputs = { tool = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "mkdir -p staged/bin && printf 'tool' > staged/bin/fixture-tool" },
+            outputs = {
+                tool = output.directory("staged", {
+                    named_cache = { name = "luau-test-tool-dir", key = "FIXTURE_KEY" },
+                }),
+            },
+        })
+        return { tool = result.outputs.tool }
+    end,
+})
+local tool = core.tool(producer.outputs.tool, { name = "fixture-tool", bin_dirs = { "bin" } })
+local other = core.native_tool("sh")
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+local consumer = core.task({
+    inputs = { tool = tool, other = other },
+    run = function(exec, inputs)
+        expect_error("exec.tool_dir(handle) requires a tool handle", exec.tool_dir, inputs.other)
+        expect_error("exec.tool_dir(handle) requires a declared task input", exec.tool_dir, producer.outputs.tool)
+        error("TOOL_DIR=" .. exec.tool_dir(inputs.tool) .. "=END")
+    end,
+})
+return { consume = consumer }
+"#
+            .replace("FIXTURE_KEY", &key),
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let exports = runtime
+            .evaluate("@workspace/BUILD")
+            .await
+            .unwrap()
+            .as_table()
+            .cloned()
+            .unwrap();
+        let root = exports.get::<LuaAnyUserData>("consume").unwrap();
+        let message = format!("{:#}", runtime.execute_task(&root).await.unwrap_err());
+        let dir = message
+            .split("TOOL_DIR=")
+            .nth(1)
+            .and_then(|rest| rest.split("=END").next())
+            .unwrap_or_else(|| panic!("no tool directory in: {message}"));
+        let dir = Path::new(dir);
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(
+            dir.ends_with(format!("shared/luau-test-tool-dir/{key}")),
+            "{}",
+            dir.display()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("bin/fixture-tool")).unwrap(),
+            "tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn luau_exec_tool_dir_fakes_return_a_cache_path_and_record_the_call() {
+        let (_workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+local install = core.task({
+    outputs = { root = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "install" },
+            display = "install",
+            outputs = {
+                root = output.directory("demo", { named_cache = { name = "demo-tools", key = "1.0/linux-x86_64" } }),
+            },
+        })
+        return { root = result.outputs.root }
+    end,
+})
+local tool = core.tool(install.outputs.root, { name = "demo" })
+local consumer = core.task({
+    inputs = { tool = tool },
+    outputs = { dir = output.value() },
+    run = function(exec, inputs)
+        return { dir = exec.tool_dir(inputs.tool) }
+    end,
+})
+
+return {
+    core.test.case("toolchain host", function()
+        core.test.with_fake_toolchain_host(function(host)
+            assert(core.test.resolve(consumer.outputs.dir) == "/cache/demo-tools/1.0/linux-x86_64")
+            local call = host.calls[#host.calls]
+            assert(call[1] == "tool_dir" and call[2] == "demo-tools" and call[3] == "1.0/linux-x86_64")
+        end)
+    end),
+    core.test.case("run fake", function()
+        core.test.with_fake_run(function()
+            assert(core.test.resolve(consumer.outputs.dir) == "/cache/demo-tools/1.0/linux-x86_64")
+        end)
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 2/2 unit(s) passed"), "{report}");
     }
 
     #[tokio::test]

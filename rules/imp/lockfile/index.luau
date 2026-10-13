@@ -45,6 +45,16 @@ local function lockfile_address_to_path(address)
 	error(`lockfile address '{address}' must start with @workspace/ or @imp/rules/`, 2)
 end
 
+--- The lockfile address of a toolchain version: the `lockfile` of the
+--- instance that declared the version (else of the default instance), or
+--- `fallback_address`, the address of the lockfile that ships with the rule
+--- library. `kind` is a kind table from `@imp/rules/imp/toolchain`. The
+--- caller passes it, so this module does not require the toolchain module.
+local function lockfile_for(kind, version, fallback_address)
+	local instance = kind.instance_for_version(version)
+	return (instance and instance.lockfile) or fallback_address
+end
+
 local function sorted_keys(map)
 	local keys = {}
 	for key in pairs(map) do
@@ -259,6 +269,7 @@ end
 
 return {
 	lockfile_address_to_path = lockfile_address_to_path,
+	lockfile_for = lockfile_for,
 	resolve_tool_lockfile = resolve_tool_lockfile,
 	sha_tool_name = sha_tool_name,
 	locked_download_tools = locked_download_tools,
