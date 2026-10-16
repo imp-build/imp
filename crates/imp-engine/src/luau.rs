@@ -218,6 +218,7 @@ fn is_slot_key(key: &str) -> bool {
 
 #[derive(Clone)]
 struct FileSetSpec {
+    source_root: Option<PathBuf>,
     root: String,
     include: Vec<String>,
     exclude: Vec<String>,
@@ -262,6 +263,8 @@ enum GraphNode {
 }
 
 struct HostState {
+    cache_details: BTreeMap<String, LuaTable>,
+    cached_tool_bindings: Option<HashMap<u64, imp_store::cache::OutputNamedCache>>,
     next_id: u64,
     next_expansion_id: u64,
     tasks: HashMap<u64, Task>,
@@ -352,6 +355,8 @@ impl LuauWorkspace {
             failure: Rc::new(RefCell::new(None)),
         };
         let host = Rc::new(RefCell::new(HostState {
+            cache_details: BTreeMap::new(),
+            cached_tool_bindings: None,
             next_id: 0,
             next_expansion_id: 0,
             tasks: HashMap::new(),
@@ -1083,6 +1088,29 @@ impl LuauWorkspace {
         Ok(units)
     }
 
+    /// Query an existing named cache without acquiring tools.
+    pub fn named_cache_details(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Result<Option<String>>> + 'static {
+        let options = self.host.borrow().cache_details.get(name).cloned();
+        let host = Rc::clone(&self.host);
+        let configuration = Rc::clone(&self.configuration);
+        let name = name.to_owned();
+        async move {
+            let Some(options) = options else {
+                return Ok(None);
+            };
+            match run_cache_details(&host, &configuration, options, false).await {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    eprintln!("warning: named cache '{name}' details callback failed: {error}");
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     /// Execute a graph task created by `task()` through Imp's local or remote
     /// execution service.
     pub async fn execute_task(&mut self, handle: &LuaAnyUserData) -> Result<()> {
@@ -1442,7 +1470,11 @@ fn install_task_executor(
                         "Luau graph handle {id} is not an executable task or task output"
                     )))
                 }
-                None => return Err(LuaError::external(format!("unknown Luau graph handle {id}"))),
+                None => {
+                    return Err(LuaError::external(format!(
+                        "unknown Luau graph handle {id}"
+                    )))
+                }
             };
             let order = dependency_order(&host.borrow(), task_id)?;
             for task_id in order {
@@ -1456,125 +1488,14 @@ fn install_task_executor(
                 // failed task run is reported.
                 if let Err(error) = resolve_projection_inputs(&lua, &host, &task.inputs).await {
                     let message = error.to_string();
-                    host.borrow_mut().task_failure.get_or_insert(message.clone());
+                    host.borrow_mut()
+                        .task_failure
+                        .get_or_insert(message.clone());
                     return Err(LuaError::external(message));
                 }
                 let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
                 let returns_outputs = !task.outputs.is_empty();
-                let exec = lua.create_table()?;
-                let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
-                let path_host = Rc::clone(&host);
-                let path_inputs = inputs.clone();
-                exec.set(
-                    "path",
-                    lua.create_function(move |_, handle: LuaAnyUserData| {
-                        let graph_handle = handle.borrow::<GraphHandle>()?;
-                        require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
-                        let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
-                            Some(GraphNode::Path { source_id, owner_package }) => (*source_id, owner_package.clone()),
-                            Some(GraphNode::Artifact(_)) => (graph_handle.id, String::new()),
-                            _ => return Err(LuaError::external("exec.path(handle) requires a path or artifact handle")),
-                        };
-                        let artifact = resolve_source_artifact(&path_host.borrow(), source_id)?;
-                        artifact.path.ok_or_else(|| LuaError::external(
-                            format!("exec.path(handle) artifact declared in package '{owner_package}' has no captured path"),
-                        ))
-                    })?,
-                )?;
-                let tool_dir_host = Rc::clone(&host);
-                let tool_dir_inputs = inputs.clone();
-                exec.set(
-                    "tool_dir",
-                    lua.create_function(move |lua, handle: LuaAnyUserData| {
-                        let id = handle.borrow::<GraphHandle>()?.id;
-                        exec_tool_dir(lua, &tool_dir_host, &tool_dir_inputs, id)
-                    })?,
-                )?;
-                for (name, want_paths) in [("paths", true), ("digest", false)] {
-                    let fileset_host = Rc::clone(&host);
-                    let fileset_inputs = inputs.clone();
-                    let fileset_captures = Rc::clone(&captures);
-                    exec.set(
-                        name,
-                        lua.create_function(move |lua, handle: LuaAnyUserData| {
-                            let id = handle.borrow::<GraphHandle>()?.id;
-                            let function = format!("exec.{name}");
-                            // An artifact handle is a resolved task input or
-                            // the output of an action in this task. Its
-                            // digest nests the artifact at its captured path.
-                            let artifact = match fileset_host.borrow().nodes.get(&id) {
-                                Some(GraphNode::Artifact(artifact)) => Some(artifact.clone()),
-                                _ => None,
-                            };
-                            if let Some(artifact) = artifact {
-                                if want_paths {
-                                    return Err(LuaError::external(format!(
-                                        "{function}(handle) requires a files handle"
-                                    )));
-                                }
-                                let digest = normalize_luau_artifact(&artifact).map_err(|error| {
-                                    LuaError::external(format!("{function}: {error:#}"))
-                                })?;
-                                return Ok(LuaValue::String(lua.create_string(digest.digest())?));
-                            }
-                            require_declared_input(&fileset_inputs, id, &function)?;
-                            let captured =
-                                captured_fileset(&fileset_host.borrow(), &fileset_captures, id)
-                                    .map_err(|error| {
-                                        LuaError::external(format!("{function}: {error:#}"))
-                                    })?
-                                    .ok_or_else(|| {
-                                        LuaError::external(format!(
-                                            "{function}(handle) requires a files handle"
-                                        ))
-                                    })?;
-                            if want_paths {
-                                Ok(LuaValue::Table(
-                                    lua.create_sequence_from(captured.files.iter().cloned())?,
-                                ))
-                            } else {
-                                Ok(LuaValue::String(
-                                    lua.create_string(captured.digest.digest())?,
-                                ))
-                            }
-                        })?,
-                    )?;
-                }
-                let action_host = Rc::clone(&host);
-                let action_configuration = Rc::clone(&configuration);
-                let action_lua = lua.clone();
-                let action_inputs = inputs.clone();
-                let action_captures = Rc::clone(&captures);
-                exec.set(
-                    "action",
-                    lua.create_async_function(move |_, options: LuaTable| {
-                        let action_host = Rc::clone(&action_host);
-                        let action_configuration = Rc::clone(&action_configuration);
-                        let action_inputs = action_inputs.clone();
-                        let action_lua = action_lua.clone();
-                        let action_captures = Rc::clone(&action_captures);
-                        async move {
-                            match run_action(
-                                action_lua,
-                                Rc::clone(&action_host),
-                                Rc::clone(&action_configuration),
-                                options,
-                                action_inputs,
-                                action_captures,
-                            )
-                            .await
-                            {
-                                Ok(result) if returns_outputs => Ok(LuaValue::Table(result)),
-                                Ok(_) => Ok(LuaValue::Nil),
-                                Err(error) => {
-                                    action_host.borrow_mut().task_failure =
-                                        Some(format!("{error:#}"));
-                                    Err(LuaError::external(format!("{error:#}")))
-                                }
-                            }
-                        }
-                    })?,
-                )?;
+                let exec = create_task_exec(&lua, &host, &configuration, &inputs, returns_outputs)?;
                 host.borrow_mut().graph_callback_depth += 1;
                 let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
                 host.borrow_mut().graph_callback_depth -= 1;
@@ -1609,6 +1530,305 @@ fn install_task_executor(
         }
     })?;
     lua.globals().set("__imp_execute_task", execute)
+}
+
+fn create_task_exec(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    configuration: &Rc<RefCell<ConfigurationState>>,
+    inputs: &LuaTable,
+    returns_outputs: bool,
+) -> LuaResult<LuaTable> {
+    let exec = lua.create_table()?;
+    let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
+    let path_host = Rc::clone(host);
+    let path_inputs = inputs.clone();
+    exec.set(
+                    "path",
+                    lua.create_function(move |_, handle: LuaAnyUserData| {
+                        let graph_handle = handle.borrow::<GraphHandle>()?;
+                        require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
+                        let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
+                            Some(GraphNode::Path { source_id, owner_package }) => (*source_id, owner_package.clone()),
+                            Some(GraphNode::Artifact(_)) => (graph_handle.id, String::new()),
+                            _ => return Err(LuaError::external("exec.path(handle) requires a path or artifact handle")),
+                        };
+                        let artifact = resolve_source_artifact(&path_host.borrow(), source_id)?;
+                        artifact.path.ok_or_else(|| LuaError::external(
+                            format!("exec.path(handle) artifact declared in package '{owner_package}' has no captured path"),
+                        ))
+                    })?,
+                )?;
+    let tool_dir_host = Rc::clone(host);
+    let tool_dir_inputs = inputs.clone();
+    exec.set(
+        "tool_dir",
+        lua.create_function(move |lua, handle: LuaAnyUserData| {
+            let id = handle.borrow::<GraphHandle>()?.id;
+            exec_tool_dir(lua, &tool_dir_host, &tool_dir_inputs, id)
+        })?,
+    )?;
+    for (name, want_paths) in [("paths", true), ("digest", false)] {
+        let fileset_host = Rc::clone(host);
+        let fileset_inputs = inputs.clone();
+        let fileset_captures = Rc::clone(&captures);
+        exec.set(
+            name,
+            lua.create_function(move |lua, handle: LuaAnyUserData| {
+                let id = handle.borrow::<GraphHandle>()?.id;
+                let function = format!("exec.{name}");
+                // An artifact handle is a resolved task input or
+                // the output of an action in this task. Its
+                // digest nests the artifact at its captured path.
+                let artifact = match fileset_host.borrow().nodes.get(&id) {
+                    Some(GraphNode::Artifact(artifact)) => Some(artifact.clone()),
+                    _ => None,
+                };
+                if let Some(artifact) = artifact {
+                    if want_paths {
+                        return Err(LuaError::external(format!(
+                            "{function}(handle) requires a files handle"
+                        )));
+                    }
+                    let digest = normalize_luau_artifact(&artifact)
+                        .map_err(|error| LuaError::external(format!("{function}: {error:#}")))?;
+                    return Ok(LuaValue::String(lua.create_string(digest.digest())?));
+                }
+                require_declared_input(&fileset_inputs, id, &function)?;
+                let captured = captured_fileset(&fileset_host.borrow(), &fileset_captures, id)
+                    .map_err(|error| LuaError::external(format!("{function}: {error:#}")))?
+                    .ok_or_else(|| {
+                        LuaError::external(format!("{function}(handle) requires a files handle"))
+                    })?;
+                if want_paths {
+                    Ok(LuaValue::Table(
+                        lua.create_sequence_from(captured.files.iter().cloned())?,
+                    ))
+                } else {
+                    Ok(LuaValue::String(
+                        lua.create_string(captured.digest.digest())?,
+                    ))
+                }
+            })?,
+        )?;
+    }
+    let action_host = Rc::clone(host);
+    let action_configuration = Rc::clone(configuration);
+    let action_lua = lua.clone();
+    let action_inputs = inputs.clone();
+    let action_captures = Rc::clone(&captures);
+    exec.set(
+        "action",
+        lua.create_async_function(move |_, options: LuaTable| {
+            let action_host = Rc::clone(&action_host);
+            let action_configuration = Rc::clone(&action_configuration);
+            let action_inputs = action_inputs.clone();
+            let action_lua = action_lua.clone();
+            let action_captures = Rc::clone(&action_captures);
+            async move {
+                match run_action(
+                    action_lua,
+                    Rc::clone(&action_host),
+                    Rc::clone(&action_configuration),
+                    options,
+                    action_inputs,
+                    action_captures,
+                )
+                .await
+                {
+                    Ok(result) if returns_outputs => Ok(LuaValue::Table(result)),
+                    Ok(_) => Ok(LuaValue::Nil),
+                    Err(error) => {
+                        action_host.borrow_mut().task_failure = Some(format!("{error:#}"));
+                        Err(LuaError::external(format!("{error:#}")))
+                    }
+                }
+            }
+        })?,
+    )?;
+    install_worker_start(lua, host, inputs, &exec)?;
+    Ok(exec)
+}
+
+async fn run_cache_details(
+    host: &Rc<RefCell<HostState>>,
+    configuration: &Rc<RefCell<ConfigurationState>>,
+    options: LuaTable,
+    fake: bool,
+) -> LuaResult<Option<String>> {
+    let lua = host
+        .borrow()
+        .lua
+        .as_ref()
+        .and_then(mlua::WeakLua::try_upgrade)
+        .ok_or_else(|| LuaError::external("Luau runtime is not initialized"))?;
+    let inputs: LuaTable = options.get("inputs")?;
+    let caches: LuaTable = options.get("caches")?;
+    let mut bindings = HashMap::new();
+    for pair in inputs.clone().pairs::<String, LuaAnyUserData>() {
+        let (key, value) = pair?;
+        let handle = value.borrow::<GraphHandle>()?;
+        let source_id = match host.borrow().nodes.get(&handle.id) {
+            Some(GraphNode::Tool { source_id, .. }) => *source_id,
+            _ => {
+                return Err(LuaError::external(
+                    "cache details inputs must be tool handles",
+                ))
+            }
+        };
+        let spec: LuaTable = caches.get(key)?;
+        let cache = imp_store::cache::OutputNamedCache {
+            name: spec.get("name")?,
+            key: spec.get("key")?,
+            shared: spec.get::<Option<bool>>("shared")?.unwrap_or(true),
+        };
+        imp_store::cache::validate_named_cache_path("shared", &cache.name, &cache.key)
+            .map_err(LuaError::external)?;
+        if !fake {
+            let h = host.borrow();
+            if h.service
+                .cache_dir_get(
+                    imp_store::cache::named_cache_scope_id(cache.shared, &h.workspace_id),
+                    &cache.name,
+                    &cache.key,
+                )
+                .map_err(LuaError::external)?
+                .is_none()
+            {
+                return Ok(None);
+            }
+        }
+        bindings.insert(source_id, cache);
+    }
+    let previous = host.borrow_mut().cached_tool_bindings.replace(bindings);
+    let result = async {
+        let exec = create_task_exec(&lua, host, configuration, &inputs, true)?;
+        let run: LuaFunction = options.get("run")?;
+        host.borrow_mut().graph_callback_depth += 1;
+        let result = run.call_async::<Option<String>>((exec, inputs)).await;
+        host.borrow_mut().graph_callback_depth -= 1;
+        result
+    }
+    .await;
+    host.borrow_mut().cached_tool_bindings = previous;
+    host.borrow_mut().task_failure = None;
+    result
+}
+
+fn install_worker_start(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    inputs: &LuaTable,
+    exec: &LuaTable,
+) -> LuaResult<()> {
+    let host = Rc::clone(host);
+    let inputs = inputs.clone();
+    exec.set(
+        "worker_start",
+        lua.create_async_function(move |lua, (name, options): (String, LuaTable)| {
+            execute_worker_start(lua, Rc::clone(&host), inputs.clone(), name, options)
+        })?,
+    )
+}
+
+async fn execute_worker_start(
+    lua: Lua,
+    host: Rc<RefCell<HostState>>,
+    inputs: LuaTable,
+    name: String,
+    options: LuaTable,
+) -> LuaResult<LuaValue> {
+    if host.borrow().graph_callback_depth == 0 {
+        return Err(LuaError::external(
+            "worker_start requires a running task or cache-details callback",
+        ));
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+    {
+        return Err(LuaError::external(
+            "worker name must use ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    for pair in options.pairs::<String, LuaValue>() {
+        let (key, _) = pair?;
+        if !["argv", "env", "health_check_argv"].contains(&key.as_str()) {
+            return Err(LuaError::external(format!(
+                "worker_start options do not accept '{key}'"
+            )));
+        }
+    }
+    let argv: Vec<String> = options.get("argv")?;
+    let health: Vec<String> = options
+        .get::<Option<Vec<String>>>("health_check_argv")?
+        .unwrap_or_default();
+    if argv.is_empty() {
+        return Err(LuaError::external("worker_start requires non-empty argv"));
+    }
+    let mut dirs = Vec::new();
+    for pair in inputs.clone().pairs::<LuaValue, LuaValue>() {
+        if let (_, LuaValue::UserData(value)) = pair? {
+            if let Ok(handle) = value.borrow::<GraphHandle>() {
+                if matches!(
+                    host.borrow().nodes.get(&handle.id),
+                    Some(GraphNode::Tool { .. })
+                ) {
+                    dirs.push(exec_tool_dir(&lua, &host, &inputs, handle.id)?);
+                }
+            }
+        }
+    }
+    for program in std::iter::once(&argv[0]).chain(health.first()) {
+        if !dirs.iter().any(|dir| {
+            Path::new(program).strip_prefix(dir).is_ok_and(|p| {
+                !p.as_os_str().is_empty()
+                    && p.components().all(|c| matches!(c, Component::Normal(_)))
+            })
+        }) {
+            return Err(LuaError::external(
+                "worker_start executable must be inside a declared tool input",
+            ));
+        }
+    }
+    let env_table = options.get::<Option<LuaTable>>("env")?;
+    let env = action_env_entries(env_table.as_ref()).map_err(LuaError::external)?;
+    let fake = {
+        let h = host.borrow();
+        h.fakes.toolchain.clone().or_else(|| h.fakes.run.clone())
+    };
+    if let Some(fake) = fake {
+        let record = lua.create_table()?;
+        record.set(1, "worker_start")?;
+        record.set(2, name.clone())?;
+        record.set(3, options)?;
+        if let Some(calls) = fake.get::<Option<LuaTable>>("calls")? {
+            push_record(&calls, LuaValue::Table(record.clone()))?;
+        }
+        push_record(&fake.get::<LuaTable>("workers")?, LuaValue::Table(record))?;
+        if let Some(message) = fake.get::<Option<String>>("worker_error")? {
+            return Err(LuaError::external(message));
+        }
+        return lua.to_value(&serde_json::json!({"home_dir": format!("/workers/{name}/home"), "tmp_dir": format!("/workers/{name}/tmp"), "port": 31000}));
+    }
+    let (service, workspace_id) = {
+        let h = host.borrow();
+        (Arc::clone(&h.service), h.workspace_id.clone())
+    };
+    let result = service
+        .worker_start(
+            &workspace_id,
+            &name,
+            imp_exec_api::WorkerSpec {
+                argv,
+                env,
+                health_check_argv: health,
+            },
+        )
+        .await
+        .map_err(LuaError::external)?;
+    lua.to_value(&serde_json::json!({"home_dir": result.home_dir, "tmp_dir": result.tmp_dir, "port": result.port}))
 }
 
 fn lua_err(error: LuaError) -> anyhow::Error {
@@ -2134,7 +2354,53 @@ fn create_core(
         })?,
     )?;
 
+    let details_host = Rc::clone(&host);
+    core.set(
+        "named_cache_details",
+        lua.create_function(move |_, options: LuaTable| {
+            let name: String = options.get("name")?;
+            options.get::<LuaFunction>("run")?;
+            options.get::<LuaTable>("inputs")?;
+            options.get::<LuaTable>("caches")?;
+            if details_host.borrow().graph_callback_depth != 0 {
+                return Err(LuaError::external(
+                    "named_cache_details must be registered at declaration time",
+                ));
+            }
+            details_host
+                .borrow_mut()
+                .cache_details
+                .insert(name, options);
+            Ok(())
+        })?,
+    )?;
     let test_api = lua.create_table()?;
+    let cache_test_host = Rc::clone(&host);
+    let cache_test_config = Rc::clone(&configuration);
+    test_api.set(
+        "cache_details",
+        lua.create_async_function(move |_, (name, seeded): (String, bool)| {
+            let host = Rc::clone(&cache_test_host);
+            let config = Rc::clone(&cache_test_config);
+            async move {
+                if !host.borrow().test_case_active || host.borrow().fakes.toolchain.is_none() {
+                    return Err(LuaError::external(
+                        "test.cache_details requires a toolchain fake in a test case",
+                    ));
+                }
+                let options = host
+                    .borrow()
+                    .cache_details
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| LuaError::external("unknown cache details callback"))?;
+                if !seeded {
+                    return Ok(None);
+                }
+                run_cache_details(&host, &config, options, true).await
+            }
+        })?,
+    )?;
     test_api.set(
         "case",
         lua.create_function(|lua, (name, run): (String, LuaFunction)| {
@@ -2473,14 +2739,22 @@ fn create_core(
     core.set(
         "files",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options)
+            create_files_handle(lua, &graph_host, options, None)
         })?,
     )?;
     let graph_host = Rc::clone(&host);
     core.set(
         "glob",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options)
+            create_files_handle(lua, &graph_host, options, None)
+        })?,
+    )?;
+    let builtin_host = Rc::clone(&host);
+    let builtin_root = loader.rules_root.clone();
+    core.set(
+        "builtin_files",
+        lua.create_function(move |lua, options: LuaTable| {
+            create_files_handle(lua, &builtin_host, options, Some(builtin_root.clone()))
         })?,
     )?;
     let unowned_host = Rc::clone(&host);
@@ -3394,8 +3668,10 @@ fn create_files_handle(
     lua: &Lua,
     host: &Rc<RefCell<HostState>>,
     options: LuaTable,
+    source_root: Option<PathBuf>,
 ) -> LuaResult<LuaAnyUserData> {
     let spec = FileSetSpec {
+        source_root,
         root: options
             .get::<Option<String>>("root")?
             .unwrap_or_else(|| ".".to_owned()),
@@ -3410,7 +3686,8 @@ fn create_files_handle(
         ));
     }
     let fingerprint = format!(
-        "{}\n{}\n{}",
+        "{:?}\n{}\n{}\n{}",
+        spec.source_root,
         spec.root,
         spec.include.join("\n"),
         spec.exclude.join("\n")
@@ -3472,6 +3749,9 @@ fn collect_luau_owned_files(
     }
     match host.nodes.get(&node_id) {
         Some(GraphNode::Files(spec)) => {
+            if spec.source_root.is_some() {
+                return Ok(());
+            }
             let files = crate::spike::workspace_glob_files(
                 workspace_root,
                 &spec.root,
@@ -3579,7 +3859,7 @@ fn parse_named_cache(options: &LuaTable) -> LuaResult<Option<imp_store::cache::O
     };
     for pair in cache.pairs::<String, LuaValue>() {
         let (key, _) = pair?;
-        if key != "name" && key != "key" {
+        if key != "name" && key != "key" && key != "shared" {
             return Err(LuaError::external(format!(
                 "output.directory named_cache options do not accept '{key}'"
             )));
@@ -3589,12 +3869,12 @@ fn parse_named_cache(options: &LuaTable) -> LuaResult<Option<imp_store::cache::O
     let key = cache.get::<String>("key")?;
     imp_store::cache::validate_named_cache_path("shared", &name, &key)
         .map_err(LuaError::external)?;
-    // Luau named caches hold immutable, version-keyed installs such as
-    // toolchains, so every workspace shares one slot for each key.
+    // Toolchain installs are shared by default. Mutable state such as the
+    // Kache data cache can select workspace ownership with shared = false.
     Ok(Some(imp_store::cache::OutputNamedCache {
         name,
         key,
-        shared: true,
+        shared: cache.get::<Option<bool>>("shared")?.unwrap_or(true),
     }))
 }
 
@@ -3680,7 +3960,7 @@ fn captured_fileset(
         return Ok(Some(Rc::clone(captured)));
     }
     let captured = Rc::new(crate::spike::workspace_glob_files_captured(
-        &host.workspace_root,
+        spec.source_root.as_deref().unwrap_or(&host.workspace_root),
         &spec.root,
         &spec.include,
         &spec.exclude,
@@ -3905,6 +4185,13 @@ fn tool_named_cache(
     source_id: u64,
     owner_package: &str,
 ) -> Result<imp_store::cache::OutputNamedCache> {
+    if let Some(cache) = host
+        .cached_tool_bindings
+        .as_ref()
+        .and_then(|bindings| bindings.get(&source_id))
+    {
+        return Ok(cache.clone());
+    }
     let artifact = resolve_source_artifact(host, source_id)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if artifact.kind != "directory" {
@@ -4203,6 +4490,7 @@ fn fake_run_status(recorder: &LuaTable, display: &str) -> LuaResult<(i32, String
 /// recorder: `set_run_stdout`, `set_run_stderr`, and `set_run_exit_code`.
 /// Each control matches an action or program by its display.
 fn install_run_controls(lua: &Lua, recorder: &LuaTable) -> LuaResult<()> {
+    recorder.set("workers", lua.create_table()?)?;
     for (setter, field) in [
         ("set_run_stdout", "run_stdout"),
         ("set_run_stderr", "run_stderr"),
@@ -4258,6 +4546,8 @@ async fn run_action(
         .get::<Option<bool>>("allow_failure")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?
         .unwrap_or(false);
+    let cache = cache && host.borrow().cached_tool_bindings.is_none();
+    let allow_failure = allow_failure || host.borrow().cached_tool_bindings.is_some();
     let action_env = options
         .get::<Option<LuaTable>>("env")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -7314,6 +7604,120 @@ return { consume = consumer }
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_worker_and_cache_details_use_existing_declared_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("imp.workspace.luau"), "return {}\n").unwrap();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+local output = core.output
+local install = core.task({
+    inputs = { sh = core.native_tool("sh"), mkdir = core.native_tool("mkdir"), chmod = core.native_tool("chmod"), cat = core.native_tool("cat") },
+    outputs = { binary = output.artifact(), data = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", [=[
+set -e
+mkdir -p binary data
+cat > binary/fixture <<'SCRIPT'
+#!/bin/sh
+case "$1" in
+run) printf x >> "$HOME/starts"; printf '%s\n' "$$" > "$HOME/pid"; sleep 3 ;;
+status) test -f "$HOME/pid" || exit 1; read -r pid < "$HOME/pid"; kill -0 "$pid" ;;
+stats) IFS= read -r value < "$DATA/value" || :; printf %s "$value" ;;
+esac
+SCRIPT
+chmod +x binary/fixture
+]=] },
+            outputs = {
+                binary = output.directory("binary", { named_cache = { name = "luau-worker-fixture", key = "binary", shared = false } }),
+                data = output.directory("data", { named_cache = { name = "luau-worker-fixture", key = "data", shared = false } }),
+            },
+        })
+        return { binary = result.outputs.binary, data = result.outputs.data }
+    end,
+})
+local binary = core.tool(install.outputs.binary, { name = "fixture", bin_dirs = { "." } })
+local data = core.tool(install.outputs.data, { name = "fixture-data", bin_dirs = { "." } })
+local function start(exec, inputs)
+    local bin = exec.tool_dir(inputs.binary) .. "/fixture"
+    local spec = { argv = { bin, "run" }, health_check_argv = { bin, "status" } }
+    local first = exec.worker_start("fixture", spec)
+    local second = exec.worker_start("fixture", spec)
+    assert(first.home_dir == second.home_dir)
+    return first
+end
+local consume = core.task({
+    inputs = { binary = binary, data = data, sh = core.native_tool("sh"), cat = core.native_tool("cat") },
+    outputs = { done = output.value() },
+    run = function(exec, inputs)
+        local worker = start(exec, inputs)
+        local dir = exec.tool_dir(inputs.data)
+        for _ = 1, 2 do
+            exec.action({ argv = { "sh", "-c", 'printf x >> "$DATA/value"; test "$(cat "$STARTS")" = x' }, env = { DATA = dir, STARTS = worker.home_dir .. "/starts" }, cache = false })
+        end
+        return { done = true }
+    end,
+})
+core.named_cache_details({
+    name = "luau-worker-fixture", inputs = { binary = binary, data = data },
+    caches = { binary = { name = "luau-worker-fixture", key = "binary", shared = false }, data = { name = "luau-worker-fixture", key = "data", shared = false } },
+    run = function(exec, inputs)
+        start(exec, inputs)
+        local result = exec.action({ argv = { exec.tool_dir(inputs.binary) .. "/fixture", "stats" }, env = { DATA = exec.tool_dir(inputs.data) }, cache = false, allow_failure = true })
+        return result.stdout
+    end,
+})
+return { consume = consume }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let exports = runtime
+            .evaluate("@workspace/BUILD")
+            .await
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            runtime
+                .named_cache_details("luau-worker-fixture")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(runtime.action_count(), 0);
+        runtime
+            .execute_task(&exports.get::<LuaAnyUserData>("consume").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .named_cache_details("luau-worker-fixture")
+                .await
+                .unwrap()
+                .as_deref()
+                .map(str::trim),
+            Some("xx")
+        );
+        // A fresh runtime has no acquisition results. Statistics must still
+        // use the existing directories without executing the install task.
+        let mut fresh = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        fresh.evaluate("@workspace/BUILD").await.unwrap();
+        assert_eq!(
+            fresh
+                .named_cache_details("luau-worker-fixture")
+                .await
+                .unwrap()
+                .as_deref()
+                .map(str::trim),
+            Some("xx")
+        );
+        assert_eq!(fresh.action_count(), 1);
+        assert_eq!(fresh.task_result_count(), 0);
+    }
+
     #[tokio::test]
     async fn luau_exec_tool_dir_returns_the_absolute_named_cache_directory() {
         let workspace_root = tempfile::tempdir().unwrap();

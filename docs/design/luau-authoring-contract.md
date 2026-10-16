@@ -782,3 +782,58 @@ In this example, `app` and `check` are graph roots because their values are
 opaque graph handles. `shared` is workspace-owned because the relative import
 inherits the importing module's `@workspace` namespace. Option-table keys use
 `snake_case`; the Luau closure is passed as a function value.
+
+### Rust toolchains and persistent workers
+
+`@imp/rules/rust/toolchain` declares Rust with
+`rust_toolchain(version, options)`. Versions must be exact `MAJOR.MINOR.PATCH`
+pins. `graph_toolchain(version)` returns `tool`, `cargo_home_tool`,
+`rustup_home`, `cargo_home`, `toolchain_id`, and `version`. Declare both tool
+handles as task inputs. `graph_tool_env(exec, rustup_tool, cargo_tool, id,
+version, kache_active)` returns an `env` table. Kache mode uses stable absolute
+named-cache paths. Options include `default`, `unverified`, `lockfile`,
+`link_driver`, `linker`, and `kache`.
+
+`@imp/rules/rust/kache` declares Kache with `kache_toolchain(version, options)`.
+Its graph value has `tool` and `data_tool`. Declare both as task inputs before
+calling `build_cache_env(exec, tool, data_tool, options)`. This function starts
+the persistent daemon and returns the Cargo environment. `cache_size` defaults
+to `4GiB`. The `kache.cache_executables` configuration field defaults to false.
+Both daemon and client use local caching only. The downloaded tool is shared;
+the mutable data cache belongs to the workspace. `script_preamble()` sets
+`KACHE_BASE_DIR` from the caller's `imp_sandbox_root` shell variable.
+
+`exec.worker_start(name, { argv, env, health_check_argv })` starts or reuses a
+worker through the execution service. Call it only in a task or cache-details
+callback. The executable and health-check executable must be absolute paths
+inside declared tool inputs. Worker names use ASCII letters, digits, `-`, and
+`_`. `env` maps names to strings. The result has `home_dir`, `tmp_dir`, and
+`port`. The worker uses stable workspace directories and can outlive Imp.
+Startup and health-check failures fail the caller.
+
+`core.named_cache_details({ name, inputs, caches, run })` registers statistics
+for `imp cache stats --details`. `inputs` maps names to acquired tool handles.
+For each input, `caches` gives `{ name, key, shared }`; `shared` defaults to true.
+These bindings permit a fresh runtime to inspect installed tools without
+executing acquisition tasks. Imp skips the callback if any bound cache is
+absent. `run(exec, inputs)` returns a string or `nil`. Its actions disable
+caching and permit failure, so the callback must check `exit_code`. Callback
+errors produce warnings. Kache starts its daemon before it queries statistics.
+
+The toolchain fake records `worker_start` calls in `calls`. Both run and
+toolchain fakes record them in `workers`; setting `worker_error` makes startup
+fail. `core.test.cache_details(name, seeded)` invokes a callback inside a
+running test with a toolchain fake. False simulates missing caches; true binds
+all inputs to fake cache directories. These fakes do not start a worker.
+
+`core.output.directory(path, { named_cache = { name, key, shared } })` accepts
+`shared = false` for workspace-owned mutable state. The default remains true.
+`core.builtin_files({ root, include, exclude })` captures files from the
+installed rules directory. Its paths are relative to that directory. Workspace
+files do not replace installed files. The Cargo input module uses this API for
+`builtin_cargo_manifest_sources`; ordinary `cargo_manifest_sources` reads the
+workspace. Cargo input bindings use one-based suffixes, for example `dep1`.
+
+These Luau modules omit local cache imports, legacy `run` tool descriptors,
+and `imp @tool` dispatch. The Rust graph rules and BUILD generator remain a
+separate migration task.

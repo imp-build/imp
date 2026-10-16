@@ -24,6 +24,7 @@ import {
     testWc,
     testXz,
     testChmod,
+    testSleep,
 } from "//";
 
 export const imp_engine = cargoPackage({
@@ -52,6 +53,7 @@ export const imp_engine = cargoPackage({
         testWc,
         testXz,
         testChmod,
+        testSleep,
     ],
     workspaceMember: true,
 });

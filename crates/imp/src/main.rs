@@ -785,7 +785,13 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
                 entry.count,
                 human_bytes(entry.bytes)
             );
-            if let Some(text) = spike::named_cache_details(&live, &entry.name).await? {
+            let text = if let Some(luau) = &live.luau {
+                let details = luau.borrow().named_cache_details(&entry.name);
+                details.await?
+            } else {
+                spike::named_cache_details(&live, &entry.name).await?
+            };
+            if let Some(text) = text {
                 for line in text.lines() {
                     println!("      {line}");
                 }

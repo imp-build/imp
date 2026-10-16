@@ -51,6 +51,7 @@ export const testCurl = nativeTool("curl");
 export const testWc = nativeTool("wc");
 export const testXz = nativeTool("xz");
 export const testChmod = nativeTool("chmod");
+export const testSleep = nativeTool("sleep");
 // rules/oci/index.js's composeImage() declares `cat` as one of its script's
 // tools — a real dependency this crate's own end-to-end "every ruleset
 // loads" test exercises (see spike.rs's own coverage of //rules/oci).
