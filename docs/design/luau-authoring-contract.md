@@ -24,10 +24,10 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. The `generate-build` goal of `@imp/rules/workflows/generate_build` writes and checks generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
-| Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `self_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `self_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | Workspace graph introspection remains outside this slice. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
 | Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/codegen`, `fmt`, `generate`, `generate_build`, `lint`, `lockfiles`, `publish`, and `run` register the `codegen`, `fmt` (with `--check`), `generate` (with `--check`), `generate-build` (with `--check`), `lint` (with `--fix`), `gen-lockfiles`, `publish`, and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
-| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/cmake`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as the C build generator, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/cmake`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `rust`, `rust/toolchain`, `rust/kache`, `rust/cargo_task_inputs`, `rust/workspace_expansion`, `rust/generate_build`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as the Odin build generator, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -274,7 +274,11 @@ return {
 
 A BUILD module exposes a root under a slot key in a target table, or as a bare
 handle for `BUILD`. A slot holds a task, task output, or expansion handle. A
-`TEST` slot can also hold `core.test_root()`. Other values, such as tool
+slot does not discover a table of named handles. Use one handle per slot;
+a task may return named outputs, and a TEST task may combine unit and
+doctest result lists. Named workflow-facet selection is tracked by
+`2026-10-17-add-luau-named-workflow-facets`.
+A `TEST` slot can also hold `core.test_root()`. Other values, such as tool
 handles, are not roots. A Luau workspace offers only the goals that its loaded
 modules register, so require each workflow module from `imp.workspace.luau` or
 from the rule module that uses its slot key. Imp resolves slot keys after it
@@ -651,8 +655,13 @@ Register a generator with
 have a `build_generate` boolean configuration field. Imp runs the generator
 only when that value is true. The callback returns a table keyed by
 workspace-relative `BUILD.luau` paths. Each value is an array of
-`{ name, rule, props }` targets. Imp merges targets from all enabled
-generators before it renders each file.
+`{ name, rule, props }` targets. A callback may instead return a task
+value-output handle. Imp resolves that output through the task executor and
+uses its value as the same declaration table. This lets a generator use
+sandboxed discovery tools with declared toolchains and inputs. A task handle,
+artifact output, or other handle fails before rendering. A failed discovery
+task stops generation before any BUILD file is written. Imp merges targets
+from all enabled generators before it renders each file.
 
 Require `@imp/rules/workflows/generate_build` from `imp.workspace.luau` to
 register the `generate-build` goal. Run `imp goal generate-build` to write

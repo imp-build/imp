@@ -1,206 +1,161 @@
-The Rust rules expose Cargo packages as selectable imp labels without
-replacing Cargo's package model. A label can build one or more binaries, run the package's test
-suite, publish binaries under `dist/`, and participate in workspace-wide
-formatting and linting. Rust, Cargo, the C link driver, linker, and optional
-compiler cache are all declared tool dependencies rather than ambient host
-requirements.
+The Rust rules let rule authors declare Cargo packages as Imp targets. Each
+target can build named binaries, run tests, format sources, report Clippy
+results, and publish binaries. Cargo keeps its package model. The actions use
+declared Rust, linker, compiler-cache, and test-tool dependencies.
 
-## Available goals
+## Set up a Luau workspace
 
-| Goal | Integration | Module |
-| --- | --- | --- |
-| `imp build` | Cargo | `//rules/rust` |
-| `imp test` | Cargo | `//rules/rust` |
-| `imp package` | Cargo | `//rules/rust` |
-| `imp fmt` | rustfmt | `//rules/rust` |
-| `imp lint` | Clippy | `//rules/rust` |
+From a workspace that contains Cargo manifests, create `imp.workspace.luau`:
+
+```luau
+require("@imp/rules/rust")
+require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/package")
+require("@imp/rules/workflows/test")
+require("@imp/rules/workflows/fmt")
+require("@imp/rules/workflows/lint")
+return {}
+```
+
+During the runtime migration, set `IMP_RUNTIME=luau` for these commands. The
+JavaScript runtime and modules remain available separately. One invocation
+uses one runtime.
+
+The Rust toolchain module declares a pinned default. To select another pinned
+version and a workspace lockfile, import the toolchain in the workspace file:
+
+```luau
+local rust = require("@imp/rules/rust/toolchain")
+rust.rust_toolchain("1.98.1", {
+    default = true,
+    lockfile = "@workspace/locks/rust.lock",
+})
+```
+
+The lockfile must contain the version and platform. Tool downloads retain
+checksum verification. Export the toolchain declaration from a BUILD module
+to select its `gen-lockfiles` root.
 
 ## Public API
 
-Use `cargoPackage()` for Cargo package and workspace targets. The Rust
-toolchain and kache modules provide configuration declarations and cache
-integration. Cargo expansion, manifest, and linker helpers are implementation
-details even though they appear in the developer reference.
+Use `cargo_package()` to declare a Cargo package. The expansion and
+registry helpers are internal rule interfaces.
 
-## Set up the workspace
+### Declare a Cargo package
 
-Import the Rust rules in `imp.workspace.js`. They provide the default Rust
-toolchain and C link driver; workflow modules enable their high-level commands
-and load the formatter and linter integrations:
+Add a `BUILD.luau` beside a package's `Cargo.toml`:
 
-```js
-import "//rules/rust";
-import "//rules/workflows/fmt";
-import "//rules/workflows/lint";
-import "//rules/workflows/package";
-import "//rules/workflows/test";
-
+```luau
+local rust = require("@imp/rules/rust")
+return { server = rust.cargo_package({ bin = "server" }) }
 ```
 
-Toolchains may also select an explicit C link driver, linker, and kache
-tool handle. Pinning them in the workspace file makes the same tool graph available
-to build, test, and Clippy instead of letting those commands drift apart.
+This declares `//path/to/package:server`. `path` defaults to the BUILD module's
+directory. `bin` accepts a name or a list of names. It does not infer binary
+names from Cargo.toml. Omit `bin` for a library: it still has format, lint, and
+test roots, but no build or package root.
 
-When a kache target is set, `KACHE_BASE_DIR` and rustc's
-`--remap-path-prefix` are wired up automatically so cache hits survive
-imp's per-run sandbox paths, and `KACHE_MAX_SIZE` caps the on-disk object
-cache at `4GiB` by default — override it via
-`kacheToolchain(version, { cacheSize: "8GiB" })`. Caching stays strictly
-local: `KACHE_LOCAL_ONLY=1` is always set, so no S3/remote cache config kache
-supports is ever reached. Once kache has been used at least once, `imp
-cache stats --details` also prints its own `kache stats` output (hit rate,
-compile counts, …) alongside the on-disk size for the `kache-data` cache —
-this starts kache's background daemon if it isn't already running, since
-kache (unlike sccache) needs the daemon up to report stats at all.
+Use `workspace_member = true` for a package in a Cargo workspace rooted at
+".". Its directory name must equal its Cargo package name. Each workspace
+shares Cargo compile, Clippy, rustfmt, and doctest actions; the rule attributes
+results to each member. Standalone packages use their own actions. Cargo input
+capture is recursive and excludes ignored files and `target/` directories.
 
-Kache does not cache user-facing executable links by default. Enable that
-workspace-wide when those links dominate builds:
+The public options are:
 
-```js
-export const kacheConfig = { cacheExecutables: true };
+| Option | Effect |
+| --- | --- |
+| `path`, `bin` | Select the manifest directory and binary outputs. |
+| `release` | Build binaries with Cargo's release profile. Default: false. |
+| `toolchain` | Select a Luau toolchain declaration, graph toolchain, or version. Omit to use the default. |
+| `cargo_args` | Append arguments to `cargo build`. |
+| `test_args` | Append arguments to the compiled test programs. |
+| `deps` | Stage extra graph inputs for compilation and test execution. |
+| `test_deps` | Stage extra graph inputs for test execution and doctests. |
+| `test_tools` | Put declared tools on PATH for test execution and doctests. |
+| `generated_srcs` | Stage generated artifacts for compilation. |
+| `workspace_member` | Use the root Cargo workspace. Default: false. |
+| `builtin` | Capture package sources from the installed rules tree. Default: false. |
+
+Mode profiles and per-package doctest overrides are outside this port.
+
+## Declare generated sources
+
+`generated_srcs` accepts `codegen()` results or explicit
+`{ artifact, path }` entries. An explicit `path` is relative to the package.
+Codegen output paths are workspace-relative:
+
+```luau
+local core = require("@imp/core")
+local codegen = require("@imp/rules/imp/codegen")
+local rust = require("@imp/rules/rust")
+local generated = codegen.codegen({
+    tools = { sh = core.native_tool("sh") },
+    output_paths = { "app/src/generated.rs" },
+    argv = function()
+        return { "sh", "-c", 'printf "pub const VALUE: u32 = 42;\\n" > "$1"',
+            "generate", "app/src/generated.rs" }
+    end,
+})
+return { app = rust.cargo_package({ path = "app", bin = "app", generated_srcs = { generated } }) }
 ```
 
-This repository's workspace also imports `//rules/imp/mode`, which declares
-the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo
-builds follow the selected profile:
+The artifact must have the declared path. Different artifacts cannot claim
+one path. Generated files stay in the graph. They are not written into the
+workspace. Workspace compilation also stages sibling members' generated
+sources.
+
+## Run the goals
+
+From the workspace root, after declaring the target:
 
 ```sh
-imp build --profile release //path/to/package:server
+IMP_RUNTIME=luau imp build //path/to/package:server
+IMP_RUNTIME=luau imp test //path/to/package:server
+IMP_RUNTIME=luau imp fmt --check //path/to/package:server
+IMP_RUNTIME=luau imp lint //path/to/package:server
+IMP_RUNTIME=luau imp package //path/to/package:server
 ```
 
-`release: true` on an individual `cargoPackage()` remains an unconditional
-opt-in to Cargo's release profile.
+Each workflow slot holds one graph handle. BUILD resolves to named binary
+outputs. PACKAGE resolves to one binary artifact, or a directory that contains
+all named binaries. The package goal publishes that artifact below `dist/`.
+TEST combines unit-test and doctest results. Named workflow-facet selection
+is deferred to `2026-10-17-add-luau-named-workflow-facets`.
 
-### Select a workspace lockfile
+Test programs and doctests run without a successful-action cache; compilation
+can use the normal cache. Formatting without `--check` writes the formatted
+sources at the workflow boundary.
 
-The Rust toolchain and its kache sidecar each ship a lockfile pinning the
-download URL, size, and SHA-256 of every release artifact they know. To pin a
-version the shipped lockfile does not know, give the toolchain the address of
-a lockfile this workspace owns; the shipped lockfile stays the default.
-
-```js
-import { rustToolchain } from "//rules/rust/toolchain";
-
-export const rust = rustToolchain("1.90.0", {
-	default: true,
-	lockfile: "//locks/rust.lock",
-});
-```
-
-The toolchain handle is also the lockfile generation root:
-
-```sh
-imp goal gen-lockfiles //:rust
-```
-
-The generation root writes to the address the toolchain declares, so the
-address is given one time only. Downloads stay verified: an address with no
-file, or a lockfile with no entry for the selected version and platform, makes
-the acquire fail and points at `imp goal gen-lockfiles`.
-
-## Declare a Cargo package
-
-In the directory containing `Cargo.toml`, add a `BUILD.js`:
-
-```js
-import { cargoPackage } from "//rules/rust";
-
-export const server = cargoPackage({
-    bin: "server",
-    release: true,
-});
-```
-
-The export name forms the label address, so this declaration is selected as
-`//path/to/package:server`. Set `path` when the manifest is below the declaring
-`BUILD.js`. `bin` accepts a string or a list and explicitly names the binaries
-Cargo produces — it is not derived from `Cargo.toml`. Omit it for a
-library-only crate: it can still be formatted, linted, and tested, but has no
-binary artifact for `build` or `package`.
-
-For a package declared inside an enclosing Cargo workspace, set
-`workspaceMember: true`. That stages the workspace root and sibling path
-dependencies so Cargo can resolve the outer `[workspace]`. Leave it false for
-a standalone crate or for the target representing the workspace root itself.
-
-Cargo source discovery is an explicit recursive exception. Cargo manifests can
-refer to nested modules, build scripts, and path dependencies without listing
-them in `BUILD.js`, so the Rust rules capture the package tree recursively.
-Ignored files remain excluded from the captured inputs.
-
-### Generated sources
-
-`generatedSrcs` accepts a `codegen()` result from `//rules/imp/codegen` and
-stages its outputs at their declared workspace paths for Cargo build, lint,
-test-build, and doctest actions. The explicit form,
-`{ artifact, path }`, uses a path relative to the Cargo package:
-
-```js
-import { cargoPackage } from "//rules/rust";
-import { codegen } from "//rules/imp/codegen";
-import { nativeTool } from "//rules/imp/native-tool";
-
-const generated = codegen({
-    tools: { sh: nativeTool("sh") },
-    outputPaths: ["app/src/generated.rs"],
-    argv: (exec, { sh }) => [
-        exec.tool(sh, "sh"),
-        "-c",
-        'printf "pub const VALUE: u32 = 42;\\n" > "$1"',
-        "generate",
-        "app/src/generated.rs",
-    ],
-});
-
-export const app = cargoPackage({
-    path: "app",
-    bin: "app",
-    generatedSrcs: [generated],
-});
-```
-
-The artifact must land at the path declared by the entry. Two different
-artifacts cannot claim the same path. Generated files stay in the graph and do
-not get written into the workspace.
-
-## Run goals
-
-```sh
-imp build //path/to/package:server
-imp test //path/to/package:server
-imp fmt --check //path/to/package:server
-imp lint //path/to/package:server
-imp package //path/to/package:server
-```
-
-`build` captures Cargo's selected binaries in the task result. `package`
-publishes the build output to `dist/path/to/package/server`. Tests are always
-executed rather than replaying a cached successful run; compilation work below
-the test invocation can still use the normal task and compiler caches.
-
-`cargoArgs` and `testArgs` append arguments to the corresponding Cargo command.
-Use `testTools` for host programs that tests invoke: they are resolved
-imperatively and placed on the sandbox's `PATH`. Use `deps`/`testDeps` for
-additional graph-native input handles the build/test run needs (e.g. a
-`resourcePackage()`'s `.files`, for files referenced by `include_str!` or
-`include_bytes!`). Set `rustConfig.doctest: false` to disable Cargo doc-tests
-workspace-wide; there is no per-package override yet.
+On non-Windows hosts, compilation uses the declared GCC link driver. A Rust
+toolchain declaration can set `link_driver`, `linker`, and `kache` to Luau
+toolchain values. Kache uses stable absolute cache paths, a persistent worker,
+and local-only storage. Its declaration accepts `cache_size` (default
+`"4GiB"`). The `kache.cache_executables` workspace setting enables executable
+link caching. These settings use the existing Luau toolchain APIs.
 
 ## Generate missing BUILD files
 
-The Rust build generator can declare packages for otherwise unowned
-`Cargo.toml` files. Enable it explicitly in `imp.workspace.js`:
+Require the generator explicitly in `imp.workspace.luau` and enable it:
 
-```js
-import "//rules/rust/generate_build";
-
-export const rustConfig = {
-    buildGenerate: true,
-    // Defaults to true; turn it off for a workspace with no Rust doc-tests.
-    doctest: false,
-};
+```luau
+require("@imp/rules/rust/generate_build")
+require("@imp/rules/workflows/generate_build")
+return { rust = { build_generate = true, doctest = true } }
 ```
 
-Then run `imp goal generate-build`. The generator uses `cargo metadata` to
-identify package names, binaries, workspace roots, and workspace members. It is
-off by default and does not rewrite declarations that already own a manifest.
+Then run `IMP_RUNTIME=luau imp goal generate-build`. This writes generated
+`BUILD.luau` files. Use `--check` to report stale files without writing them.
+The generator uses sandboxed `cargo metadata` tasks with the declared Rust
+toolchain. It skips owned manifests and declared package paths, and excludes
+build, vendor, hidden, and distribution directories. It emits binary names
+and workspace-member flags from Cargo metadata. Imp refuses to replace a
+hand-written BUILD file.
+
+Generation is disabled by default. `rust.doctest` defaults to true and can
+disable doctests for the workspace. Import the generator to register these
+Rust settings even when generation stays disabled.
+
+Generated Luau API references are deferred to separate documentation work.
+This guide is the Luau API documentation for this port. The existing
+JavaScript reference continues to describe the compatibility modules.

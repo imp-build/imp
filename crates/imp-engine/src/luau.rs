@@ -2982,6 +2982,7 @@ fn create_core(
             let rules = generation_host.borrow().build_rules.clone();
             let configuration = generation_configuration.borrow().values.clone();
             let workspace_root = generation_root.clone();
+            let host = Rc::clone(&generation_host);
             async move {
                 let mut edits = BTreeMap::<String, Vec<GeneratedLuauBuildTarget>>::new();
                 for generator in generators {
@@ -2993,7 +2994,37 @@ fn create_core(
                     if !enabled {
                         continue;
                     }
-                    let value = generator.generate.call_async::<LuaValue>(()).await?;
+                    let mut value = generator.generate.call_async::<LuaValue>(()).await?;
+                    if let LuaValue::UserData(userdata) = &value {
+                        let id = {
+                            let handle = userdata.borrow::<GraphHandle>().map_err(|_| {
+                                LuaError::external("BUILD generator requires a declaration table or task value-output handle")
+                            })?;
+                            if handle.kind != "task_output" {
+                                return Err(LuaError::external("BUILD generator requires a declaration table or task value-output handle"));
+                            }
+                            let state = host.borrow();
+                            let valid = match state.nodes.get(&handle.id) {
+                                Some(GraphNode::TaskOutput { task_id, name }) => state
+                                    .tasks
+                                    .get(task_id)
+                                    .and_then(|task| task.outputs.get(name))
+                                    .is_some_and(|kind| matches!(kind, TaskOutputKind::Value)),
+                                _ => false,
+                            };
+                            if !valid {
+                                return Err(LuaError::external(
+                                    "BUILD generator requires a task value-output handle",
+                                ));
+                            }
+                            handle.id
+                        };
+                        let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+                        value = execute.call_async::<LuaValue>(id).await?;
+                    }
+                    if !matches!(value, LuaValue::Table(_)) {
+                        return Err(LuaError::external("BUILD generator must produce a declaration table"));
+                    }
                     let generated: BTreeMap<String, Vec<GeneratedLuauBuildTarget>> =
                         lua.from_value(value)?;
                     for (file, targets) in generated {
@@ -8056,6 +8087,128 @@ return {
             fs::read_to_string(path).unwrap(),
             "return { hand_written = true }\n"
         );
+    }
+
+    #[tokio::test]
+    async fn luau_build_generator_resolves_value_outputs_and_rejects_other_handles() {
+        for (body, expected) in [
+            (r#"return core.task({
+                inputs = { source = core.task({ outputs = { value = core.output.value() }, run = function() return { value = 7 } end }).outputs.value },
+                outputs = { declarations = core.output.value() },
+                run = function(_exec, input)
+                    assert(input.source == 7)
+                    return { declarations = { ["generated/BUILD.luau"] = { { name = "generated", rule = "sample" } } } }
+                end,
+            }).outputs.declarations"#, "1 file(s) written"),
+            ("return core.native_tool('sh')", "task value-output handle"),
+            ("return core.task({ run = function() end })", "task value-output handle"),
+            ("return core.task({ outputs = { file = core.output.artifact() }, run = function() error('must not execute') end }).outputs.file", "task value-output handle"),
+            ("return core.task({ outputs = { value = core.output.value() }, run = function() error('metadata failed') end }).outputs.value", "metadata failed"),
+            ("return core.task({ outputs = { value = core.output.value() }, run = function() return { value = 42 } end }).outputs.value", "must produce a declaration table"),
+        ] {
+            let workspace = tempfile::tempdir().unwrap();
+            let rules = rules_tempdir();
+            fs::write(rules.path().join("sample.luau"), "return { sample = function() return {} end }").unwrap();
+            fs::write(workspace.path().join("imp.workspace.luau"), format!(r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/generate_build")
+core.define_config_schema("sample", {{ build_generate = core.field.bool({{ default = false }}) }})
+core.register_build_rule({{ rule = "sample", module = "@imp/rules/sample" }})
+core.register_build_generator({{ namespace = "sample", generate = function() {body} end }})
+return {{ sample = {{ build_generate = true }} }}
+"#)).unwrap();
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            runtime.load_modules().await.unwrap();
+            let result = generate_build(&mut runtime, false).await;
+            let text = match result { Ok(report) => report.unwrap_or_default(), Err(error) => format!("{error:#}") };
+            assert!(text.contains(expected), "expected {expected}: {text}");
+            if expected == "1 file(s) written" {
+                let report = generate_build(&mut runtime, true).await.unwrap().unwrap();
+                assert!(report.contains("0 out of date"), "{report}");
+                let mut reloaded = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+                reloaded.load_modules().await.unwrap();
+            } else {
+                assert!(!workspace.path().join("generated/BUILD.luau").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn luau_rust_generator_uses_declared_metadata_tasks_and_skips_owned_manifests() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = crate::loader::RulesSource::discover();
+        let rules = rules.root().unwrap();
+        for package in ["app", "owned", "vendor/ignored"] {
+            let path = workspace.path().join(package);
+            fs::create_dir_all(path.join("src")).unwrap();
+            fs::write(
+                path.join("Cargo.toml"),
+                "[package]\nname = 'app'\nversion = '0.1.0'\n",
+            )
+            .unwrap();
+            fs::write(path.join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        fs::write(
+            workspace.path().join("imp.workspace.luau"),
+            r#"
+require("@imp/rules/rust/generate_build")
+return {}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
+return { tests = { [test.TEST] = core.test_root() } }
+"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("generator.test.luau"), r#"
+local core = require("@imp/core")
+local rust = require("@imp/rules/rust")
+local generator = require("@imp/rules/rust/generate_build")
+return { core.test.case("metadata tasks", function()
+    core.test.with_fake_toolchain_host(function(host)
+        rust.cargo_package({ path = "owned", bin = "app" })
+        host.set_run_stdout("cargo metadata (generate-build) app/Cargo.toml", '{"workspace_root":"/sandbox/app","packages":[{"name":"app","manifest_path":"/sandbox/app/Cargo.toml","targets":[{"name":"app","kind":["bin"]}]}]}')
+        local declarations = core.test.resolve(generator.generate_build())
+        assert(declarations["app/BUILD.luau"][1].props.bin == "app")
+        assert(declarations["owned/BUILD.luau"] == nil and declarations["vendor/ignored/BUILD.luau"] == nil)
+        local metadata_runs = 0
+        for _, action in ipairs(host.runs) do
+            if action.display == "cargo metadata (generate-build) app/Cargo.toml" then
+                metadata_runs += 1
+                assert(action.input_count == 1 and action.env.CARGO_HOME and action.env.RUSTUP_HOME)
+                assert(table.find(action.tools, "rustup-home") and table.find(action.tools, "cargo-home"))
+            end
+        end
+        assert(metadata_runs == 1)
+    end)
+end) }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(report.contains("1/1 unit(s) passed"), "{report}");
+        // The configuration default must keep the registered generator idle.
+        runtime
+            .evaluate("@imp/rules/workflows/generate_build")
+            .await
+            .unwrap();
+        assert!(generate_build(&mut runtime, false).await.unwrap().is_none());
+        assert!(!workspace.path().join("app/BUILD.luau").exists());
     }
 
     #[tokio::test]
