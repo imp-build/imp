@@ -311,13 +311,37 @@ export const cConfig = {
 Then run `imp goal generate-build`. Generation is opt-in so repositories with
 custom ownership or mixed build layouts are not rewritten unexpectedly.
 
+In a Luau workspace, require `@imp/rules/c/generate_build` and
+`@imp/rules/workflows/generate_build` from `imp.workspace.luau`, and set the
+`build_generate` field of the `c` namespace:
+
+```luau
+require("@imp/rules/c/generate_build")
+require("@imp/rules/workflows/generate_build")
+
+return {
+	c = { build_generate = true },
+}
+```
+
+The Luau generator writes `BUILD.luau` files with `cc_library`, `cc_binary`,
+and `cmake_project` targets. It changes each directory name to a Luau
+identifier: it replaces each character that is not a letter, digit, or `_`
+with `_`, and adds a `_` prefix to a name that starts with a digit or is a
+Luau keyword. For example, `1-bad` gives `_1_bad`, and `end` gives `_end`.
+
+The Luau ownership check is different from the JavaScript check. A Luau file
+is owned only when a graph value of a loaded BUILD module uses it.
+`core.test_root()` does not own the files of its package, so the generator
+also finds test data that only test cases use.
+
 ## Luau modules
 
 **Verified:** on 2026-10-13, `@imp/rules/c`, `@imp/rules/c/toolchain`,
 `@imp/rules/c/gcc`, `@imp/rules/c/zig`, `@imp/rules/c/msvc`,
-`@imp/rules/c/mold`, and `@imp/rules/c/cmake` have Luau modules beside the
-JavaScript modules. `//rules/c/cmake`'s own docs describe the CMake modules.
-The C build generator stays JavaScript. Select the Luau
+`@imp/rules/c/mold`, `@imp/rules/c/cmake`, and `@imp/rules/c/generate_build`
+have Luau modules beside the JavaScript modules. `//rules/c/cmake`'s own docs
+describe the CMake modules. Select the Luau
 workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
 

@@ -36,7 +36,7 @@
 --   - The Luau host runs one action at a time, so the compile actions of a
 --     target run one after another.
 --   - BUILD generation from CMakeLists.txt and main() detection is in
---     @imp/rules/c/generate_build, which is not in Luau yet.
+--     @imp/rules/c/generate_build.
 local core = require("@imp/core")
 local build = require("@imp/rules/workflows/build")
 local package = require("@imp/rules/workflows/package")
