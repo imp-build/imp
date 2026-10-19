@@ -846,3 +846,27 @@ workspace. Cargo input bindings use one-based suffixes, for example `dep1`.
 These Luau modules omit local cache imports, legacy `run` tool descriptors,
 and `imp @tool` dispatch. The Rust graph rules and BUILD generator remain a
 separate migration task.
+
+## Graph-backed programs
+
+For rule authors, `core.program({ inputs, describe })` declares an interactive
+program for a `RUN` slot. The host resolves its input tasks before it calls
+`describe(exec, inputs)` with the captured package context. The callback returns
+`{ argv, env?, display?, inputs?, tools? }`. `argv` is non-empty; `env` maps
+names to strings; description `inputs` contains digest strings. `tools` contains
+live tool handles declared in the program inputs. Omitted description `inputs`
+and `tools` default to empty lists. The host rejects a missing or empty `argv`
+and invalid field types before the run goal can launch the program. Handles do not pass
+through JSON task outputs.
+
+The callback can use `exec.path`, `exec.paths`, `exec.digest`, and
+`exec.tool_dir` to inspect resolved inputs. It cannot execute actions, start
+workers, declare graph nodes, or launch a program. A program is a run root;
+it cannot be an ordinary task input or another workflow root. It has no named
+outputs. `core.test.resolve(program)` returns its description without launching
+it, for focused tests.
+
+The run goal launches the program after description resolution. It stages all
+input digests, mounts the declared tools, streams output, passes CLI arguments,
+and propagates failure. The interactive program is not action-cached. Existing
+executable artifacts and single-digest descriptions remain valid run roots.

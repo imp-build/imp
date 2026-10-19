@@ -5,11 +5,12 @@
 --
 -- A `RUN` root resolves to one of these shapes:
 --
---   { argv, env?, display?, tools?, digest }   a full program description
+--   { argv, env?, display?, tools?, inputs }   a core.program description
+--   { argv, env?, display?, tools?, digest }   a legacy single-digest description
 --   { digest, path }                           one built executable artifact
 --   { executable, executable_path? }           one executable with its path
 --
--- Each shape has a digest. The goal stages the digest as a sandbox input. It
+-- The goal stages the description inputs or the artifact digest. It
 -- does not write the program into the workspace.
 local core = require("@imp/core")
 
@@ -29,14 +30,14 @@ local function program_for(address, result)
 	-- A full program description owns its argv. Its argv refers to workspace
 	-- paths or to staged paths under `$IMP_SANDBOX_ROOT`.
 	if type(result.argv) == "table" then
-		if type(result.digest) ~= "string" then
-			core.goal_error(`{address}: a run graph root that describes a program must supply a digest to stage`)
+		if type(result.digest) ~= "string" and type(result.inputs) ~= "table" then
+			core.goal_error(`{address}: a run graph root that describes a program must supply inputs or a digest to stage`)
 		end
 		return {
 			argv = result.argv,
 			env = result.env,
 			tools = result.tools,
-			inputs = { result.digest },
+			inputs = result.inputs or { result.digest },
 			display = result.display or `run {address}`,
 		}
 	end

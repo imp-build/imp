@@ -128,6 +128,14 @@ struct Task {
 }
 
 #[derive(Clone)]
+struct Program {
+    inputs: LuaTable,
+    describe: LuaFunction,
+    loader: ModuleLoader,
+    stack: Vec<String>,
+}
+
+#[derive(Clone)]
 struct Expansion {
     inputs: LuaTable,
     create: LuaFunction,
@@ -241,6 +249,7 @@ enum GraphNode {
         owner_package: String,
     },
     Task,
+    Program(Program),
     TestRoot {
         package: String,
     },
@@ -296,6 +305,7 @@ struct HostState {
     task_failure: Option<String>,
     test_case_active: bool,
     graph_callback_depth: usize,
+    program_describing: bool,
     fakes: TestFakes,
 }
 
@@ -386,6 +396,7 @@ impl LuauWorkspace {
             task_failure: None,
             test_case_active: false,
             graph_callback_depth: 0,
+            program_describing: false,
             fakes: TestFakes::default(),
         }));
         let configuration = Rc::new(RefCell::new(ConfigurationState::default()));
@@ -685,6 +696,12 @@ impl LuauWorkspace {
                             | GraphNode::ExpansionGet { .. }
                             | GraphNode::ExpansionAll { .. },
                         ) => true,
+                        Some(GraphNode::Program(_)) => {
+                            if slot != "RUN" {
+                                bail!("program root {address} must use the RUN slot");
+                            }
+                            true
+                        }
                         Some(GraphNode::TestRoot { .. }) => slot == "TEST",
                         _ => false,
                     };
@@ -830,7 +847,15 @@ impl LuauWorkspace {
                 Some(GraphNode::TestRoot { package }) => Some(package.clone()),
                 _ => None,
             };
-            let result = if let Some(package) = package {
+            let program = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
+                Some(GraphNode::Program(program)) => Some(program.clone()),
+                _ => None,
+            };
+            let result = if let Some(program) = program {
+                describe_program(&lua, &self.host, &self.configuration, program)
+                    .await
+                    .map_err(lua_err)?
+            } else if let Some(package) = package {
                 let units = self
                     .run_test_root(&package, case_filter, suite_filter)
                     .await?;
@@ -1881,6 +1906,144 @@ fn single_output_value(host: &HostState, handle_id: u64, value: LuaValue) -> Lua
     }
 }
 
+fn require_graph_declaration(host: &Rc<RefCell<HostState>>) -> LuaResult<()> {
+    if host.borrow().program_describing {
+        return Err(LuaError::external(
+            "a program description cannot declare graph nodes",
+        ));
+    }
+    Ok(())
+}
+
+async fn describe_program(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    configuration: &Rc<RefCell<ConfigurationState>>,
+    program: Program,
+) -> LuaResult<LuaValue> {
+    let roots = input_task_roots(&host.borrow(), &program.inputs).map_err(LuaError::external)?;
+    let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+    for root in roots {
+        execute.call_async::<()>(root).await?;
+    }
+    resolve_projection_inputs(lua, host, &program.inputs).await?;
+    let inputs = resolve_task_inputs(lua, host, &program.inputs)?;
+    let exec = create_task_exec(lua, host, configuration, &inputs, true)?;
+    exec.set("action", LuaValue::Nil)?;
+    exec.set("worker_start", LuaValue::Nil)?;
+    let previous = program.loader.stack.replace(program.stack);
+    host.borrow_mut().program_describing = true;
+    host.borrow_mut().graph_callback_depth += 1;
+    let result = program
+        .describe
+        .call_async::<LuaTable>((exec, inputs.clone()))
+        .await;
+    host.borrow_mut().graph_callback_depth -= 1;
+    host.borrow_mut().program_describing = false;
+    program.loader.stack.replace(previous);
+    let described = result?;
+    let result = lua.create_table()?;
+    for pair in described.pairs::<String, LuaValue>() {
+        let (key, value) = pair?;
+        result.set(key, value)?;
+    }
+    for field in ["argv", "inputs", "tools"] {
+        let value = result.get::<LuaValue>(field)?;
+        let values = match value {
+            LuaValue::Nil if field != "argv" => lua.create_table()?,
+            LuaValue::Table(values) => values,
+            _ => {
+                return Err(LuaError::external(format!(
+                    "program description {field} must be a list of {}",
+                    if field == "tools" {
+                        "tool handles"
+                    } else {
+                        "strings"
+                    }
+                )))
+            }
+        };
+        let length = values.raw_len();
+        let mut count = 0;
+        for pair in values.clone().pairs::<LuaValue, LuaValue>() {
+            let (key, value) = pair?;
+            let valid_value = if field == "tools" {
+                matches!(value, LuaValue::UserData(_))
+            } else {
+                matches!(value, LuaValue::String(_))
+            };
+            if !matches!(key, LuaValue::Integer(index) if index >= 1 && index as usize <= length)
+                || !valid_value
+            {
+                return Err(LuaError::external(format!(
+                    "program description {field} must be a list of {}",
+                    if field == "tools" {
+                        "tool handles"
+                    } else {
+                        "strings"
+                    }
+                )));
+            }
+            count += 1;
+        }
+        if count != length
+            || (field == "argv" && (length == 0 || values.get::<String>(1)?.is_empty()))
+        {
+            return Err(LuaError::external(format!(
+                "program description {field} must be a {}list of strings",
+                if field == "argv" {
+                    "non-empty "
+                } else {
+                    "dense "
+                }
+            )));
+        }
+        result.set(field, values)?;
+    }
+    if !matches!(
+        result.get::<LuaValue>("display")?,
+        LuaValue::Nil | LuaValue::String(_)
+    ) {
+        return Err(LuaError::external(
+            "program description display must be a string",
+        ));
+    }
+    if let Some(env) = result.get::<Option<LuaTable>>("env")? {
+        for pair in env.clone().pairs::<LuaValue, LuaValue>() {
+            let (key, value) = pair?;
+            if !matches!(key, LuaValue::String(_)) || !matches!(value, LuaValue::String(_)) {
+                return Err(LuaError::external(
+                    "program description env must map names to strings",
+                ));
+            }
+        }
+        action_env_entries(Some(&env))
+            .map_err(|error| LuaError::external(format!("program description env: {error}")))?;
+    }
+    for pair in result.clone().pairs::<String, LuaValue>() {
+        let (key, _) = pair?;
+        if !["argv", "env", "display", "inputs", "tools"].contains(&key.as_str()) {
+            return Err(LuaError::external(format!(
+                "program description does not accept '{key}'"
+            )));
+        }
+    }
+    if let Some(tools) = result.get::<Option<LuaTable>>("tools")? {
+        for tool in tools.sequence_values::<LuaAnyUserData>() {
+            let tool = tool?;
+            let handle = tool.borrow::<GraphHandle>()?;
+            require_declared_input(&inputs, handle.id, "program tools")?;
+            if !matches!(
+                host.borrow().nodes.get(&handle.id),
+                Some(GraphNode::Tool { .. } | GraphNode::NativeTool(_) | GraphNode::SelfTool)
+            ) {
+                return Err(LuaError::external("program tools must be tool handles"));
+            }
+        }
+    }
+    Ok(LuaValue::Table(result))
+}
+
 /// Report whether a Luau error comes from a host function, such as a failed
 /// action, and not from an `error` call in Luau code.
 fn is_host_error(error: &LuaError) -> bool {
@@ -1969,6 +2132,9 @@ fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
                 continue;
             };
             match host.nodes.get(&handle.id) {
+                Some(GraphNode::Program(_)) => {
+                    return Err(LuaError::external("a program cannot be a task input"));
+                }
                 Some(GraphNode::TaskOutput { task_id, .. }) => {
                     visit(host, *task_id, visiting, visited, order)?;
                 }
@@ -2273,6 +2439,9 @@ fn input_task_roots(host: &HostState, inputs: &LuaTable) -> LuaResult<Vec<u64>> 
             continue;
         };
         match host.nodes.get(&handle.id) {
+            Some(GraphNode::Program(_)) => {
+                return Err(LuaError::external("a program cannot be a graph input"))
+            }
             Some(GraphNode::Task) => {
                 roots.insert(handle.id);
             }
@@ -2306,6 +2475,7 @@ fn create_core(
     core.set(
         "expand",
         lua.create_function(move |lua, options: LuaTable| {
+            require_graph_declaration(&expansion_host)?;
             let create = options.get::<LuaFunction>("create")?;
             let inputs = options
                 .get::<Option<LuaTable>>("inputs")?
@@ -2344,6 +2514,7 @@ fn create_core(
     core.set(
         "test_root",
         lua.create_function(move |lua, ()| {
+            require_graph_declaration(&graph_host)?;
             let package = current_package_path(&test_loader);
             let handle = allocate_handle(&graph_host, "test_root");
             graph_host
@@ -2427,7 +2598,7 @@ fn create_core(
             Ok(suite)
         })?,
     )?;
-    install_test_host_api(lua, &test_api, Rc::clone(&host))?;
+    install_test_host_api(lua, &test_api, Rc::clone(&host), Rc::clone(&configuration))?;
     core.set("test", test_api)?;
 
     let platform_host = Rc::clone(&host);
@@ -2467,6 +2638,7 @@ fn create_core(
     core.set(
         "path",
         lua.create_function(move |lua, source: LuaAnyUserData| {
+            require_graph_declaration(&path_host)?;
             let source_id = artifact_output_source(&path_host, &source)?;
             let owner_package = current_package_path(&path_loader);
             let fingerprint = format!("{owner_package}\n{source_id}");
@@ -2497,6 +2669,7 @@ fn create_core(
     core.set(
         "tool",
         lua.create_function(move |lua, (source, options): (LuaAnyUserData, LuaTable)| {
+            require_graph_declaration(&tool_host)?;
             let source_id = artifact_output_source(&tool_host, &source)?;
             for pair in options.pairs::<String, LuaValue>() {
                 let (key, _) = pair?;
@@ -2782,10 +2955,41 @@ fn create_core(
             Ok(result)
         })?,
     )?;
+    let program_host = Rc::clone(&host);
+    let program_loader = loader.clone();
+    core.set(
+        "program",
+        lua.create_function(move |lua, options: LuaTable| {
+            require_graph_declaration(&program_host)?;
+            for pair in options.clone().pairs::<String, LuaValue>() {
+                let (key, _) = pair?;
+                if key != "inputs" && key != "describe" {
+                    return Err(LuaError::external(format!(
+                        "program options do not accept '{key}'"
+                    )));
+                }
+            }
+            let program = Program {
+                inputs: options
+                    .get::<Option<LuaTable>>("inputs")?
+                    .unwrap_or(lua.create_table()?),
+                describe: options.get("describe")?,
+                loader: program_loader.clone(),
+                stack: program_loader.stack.borrow().clone(),
+            };
+            let handle = allocate_handle(&program_host, "program");
+            program_host
+                .borrow_mut()
+                .nodes
+                .insert(handle.id, GraphNode::Program(program));
+            lua.create_userdata(handle)
+        })?,
+    )?;
     let graph_host = Rc::clone(&host);
     core.set(
         "task",
         lua.create_function(move |lua, options: LuaTable| {
+            require_graph_declaration(&graph_host)?;
             let run = options.get::<LuaFunction>("run")?;
             let inputs = options
                 .get::<Option<LuaTable>>("inputs")?
@@ -2852,6 +3056,7 @@ fn create_core(
     core.set(
         "native_tool",
         lua.create_function(move |lua, name: String| {
+            require_graph_declaration(&graph_host)?;
             if name.trim().is_empty() {
                 return Err(LuaError::external(
                     "native_tool(name) requires a non-empty name",
@@ -2869,6 +3074,7 @@ fn create_core(
     core.set(
         "self_tool",
         lua.create_function(move |lua, ()| {
+            require_graph_declaration(&graph_host)?;
             let handle = allocate_handle(&graph_host, "self_tool");
             graph_host
                 .borrow_mut()
@@ -3518,12 +3724,15 @@ fn install_test_host_api(
     lua: &Lua,
     test_api: &LuaTable,
     host: Rc<RefCell<HostState>>,
+    configuration: Rc<RefCell<ConfigurationState>>,
 ) -> LuaResult<()> {
     let resolve_host = Rc::clone(&host);
+    let resolve_configuration = Rc::clone(&configuration);
     test_api.set(
         "resolve",
         lua.create_async_function(move |lua, handle: LuaAnyUserData| {
             let host = Rc::clone(&resolve_host);
+            let configuration = Rc::clone(&resolve_configuration);
             async move {
                 require_active_test_case(&host.borrow(), "core.test.resolve")?;
                 let id = {
@@ -3532,7 +3741,10 @@ fn install_test_host_api(
                             "core.test.resolve requires a task or task output handle",
                         )
                     })?;
-                    if handle.kind != "task" && handle.kind != "task_output" {
+                    if handle.kind != "task"
+                        && handle.kind != "task_output"
+                        && handle.kind != "program"
+                    {
                         return Err(LuaError::external(format!(
                             "core.test.resolve requires a task or task output handle, got {}",
                             handle.kind
@@ -3540,8 +3752,16 @@ fn install_test_host_api(
                     }
                     handle.id
                 };
+                let program = match host.borrow().nodes.get(&id) {
+                    Some(GraphNode::Program(program)) => Some(program.clone()),
+                    _ => None,
+                };
                 let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
-                let result = execute.call_async::<LuaValue>(id).await;
+                let result = if let Some(program) = program {
+                    describe_program(&lua, &host, &configuration, program).await
+                } else {
+                    execute.call_async::<LuaValue>(id).await
+                };
                 host.borrow_mut().task_failure = None;
                 result
             }
@@ -3698,6 +3918,7 @@ fn create_files_handle(
     options: LuaTable,
     source_root: Option<PathBuf>,
 ) -> LuaResult<LuaAnyUserData> {
+    require_graph_declaration(host)?;
     let spec = FileSetSpec {
         source_root,
         root: options
@@ -3788,6 +4009,16 @@ fn collect_luau_owned_files(
             )
             .with_context(|| format!("expand loaded Luau sources rooted at '{}'", spec.root))?;
             owned.extend(files);
+        }
+        Some(GraphNode::Program(program)) => {
+            collect_luau_owned_files_in_value(
+                workspace_root,
+                host,
+                &LuaValue::Table(program.inputs.clone()),
+                owned,
+                visited_nodes,
+                visited_tables,
+            )?;
         }
         Some(GraphNode::Task) => {
             if let Some(task) = host.tasks.get(&node_id) {
@@ -4034,6 +4265,7 @@ fn create_expansion_projection(
     facet: Option<String>,
     all: bool,
 ) -> LuaResult<LuaAnyUserData> {
+    require_graph_declaration(host)?;
     if !is_slot_key(&workflow) {
         return Err(LuaError::external(format!(
             "expansion workflow must be a goal slot key such as BUILD or TEST; got '{workflow}'"
@@ -4091,6 +4323,7 @@ fn validate_expansion_child(
             | GraphNode::ExpansionGet { .. }
             | GraphNode::ExpansionAll { .. },
         ) => true,
+        Some(GraphNode::Program(_)) => workflow == "RUN",
         Some(GraphNode::TestRoot { .. }) => workflow == "TEST",
         _ => false,
     };
@@ -4858,6 +5091,9 @@ async fn run_program(
     configuration: Rc<RefCell<ConfigurationState>>,
     options: LuaTable,
 ) -> Result<LuaTable> {
+    if host.borrow().program_describing {
+        bail!("a program description cannot launch a program");
+    }
     let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
     for pair in options.pairs::<String, LuaValue>() {
         let (key, _) = pair.map_err(lua_error)?;
@@ -5451,6 +5687,187 @@ mod tests {
             panic!("test module must return a task handle");
         };
         runtime.execute_task(&handle).await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn luau_program_description_checks_inputs_and_has_no_execution_effects() {
+        let (_, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+local function fails(fn, part)
+    local ok, err = pcall(fn)
+    assert(not ok and string.find(tostring(err), part, 1, true), tostring(err))
+end
+return { core.test.case("program description", function()
+    local tool = core.native_tool("sh")
+    local other = core.native_tool("cat")
+    local program = core.program({ inputs = { sh = tool }, describe = function(exec, input)
+        assert(exec.action == nil and exec.worker_start == nil)
+        fails(function() core.task({ run = function() end }) end, "cannot declare graph nodes")
+        fails(function() core.files({ include = { "*" } }) end, "cannot declare graph nodes")
+        fails(function() core.run_program({ argv = { "false" } }) end, "cannot launch a program")
+        return { argv = { "sh", "-c", "true" }, tools = { input.sh }, inputs = {} }
+    end })
+    core.test.with_fake_run(function(host)
+        local description = core.test.resolve(program)
+        assert(description.tools[1] == tool)
+        assert(#host.runs == 0)
+        local tool_only = core.test.resolve(core.program({ inputs = { sh = tool }, describe = function(_, input)
+            return table.freeze({ argv = { "sh", "-c", "true" }, tools = { input.sh } })
+        end }))
+        assert(type(tool_only.inputs) == "table" and next(tool_only.inputs) == nil)
+        for _, description in ipairs({ {}, { argv = {} }, { argv = { "" } }, { argv = { 42 } },
+            { argv = { "sh" }, inputs = { 42 } }, { argv = { "sh" }, env = { BAD = true } },
+            { argv = { "sh" }, display = 42 }, { argv = { [1] = "sh", [3] = "true" } },
+            { argv = { "sh" }, tools = { extra = other } }, { argv = { "sh" }, env = { ["BAD=NAME"] = "x" } } }) do
+            fails(function() core.test.resolve(core.program({ describe = function() return description end })) end, "program description")
+        end
+        fails(function() core.test.resolve(core.program({ describe = function()
+            return { argv = { "cat" }, tools = { other } }
+        end })) end, "requires a declared task input")
+        fails(function() core.test.resolve(core.task({ inputs = { p = program }, run = function() end })) end, "program cannot be a task input")
+        fails(function() core.test.resolve(core.program({ describe = function() error("describe failed") end })) end, "describe failed")
+        -- A failed description restores declaration state.
+        assert(type(core.native_tool("sh")) == "userdata")
+    end)
+end) }
+"#).await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_program_acquires_tools_stages_inputs_and_forwards_arguments() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::create_dir(workspace.path().join("pkg")).unwrap();
+        fs::write(workspace.path().join("pkg/one.txt"), "one").unwrap();
+        fs::write(workspace.path().join("pkg/two.txt"), "two").unwrap();
+        fs::write(workspace.path().join("BUILD.luau"), "return {}\n").unwrap();
+        fs::write(workspace.path().join("pkg/BUILD.luau"), r#"
+local core = require("@imp/core")
+local run = require("@imp/rules/workflows/run")
+local sh, mkdir, chmod, cat = core.native_tool("sh"), core.native_tool("mkdir"), core.native_tool("chmod"), core.native_tool("cat")
+local acquire = core.task({ inputs = { sh = sh, mkdir = mkdir, chmod = chmod }, outputs = { dir = core.output.artifact() },
+    run = function(exec)
+        local result = exec.action({ argv = { "sh", "-c", "mkdir -p runtime; printf '#!/bin/sh\ncat \"$IMP_SANDBOX_ROOT/pkg/one.txt\" \"$IMP_SANDBOX_ROOT/pkg/two.txt\"; printf \"%%s,\" \"$@\"\n' > runtime/run; chmod +x runtime/run" },
+            outputs = { dir = core.output.directory("runtime", { named_cache = { name = "program-test", key = "v1" } }) } })
+        return { dir = result.outputs.dir }
+    end })
+local runtime = core.tool(acquire.outputs.dir, { name = "runtime", bin_dirs = { "." } })
+local one = core.files({ root = "pkg", include = { "one.txt" } })
+local two = core.files({ root = "pkg", include = { "two.txt" } })
+return { app = { [run.RUN] = core.program({ inputs = { runtime = runtime, sh = sh, cat = cat, one = one, two = two },
+    describe = function(exec, input)
+        assert(core.package_path() == "pkg")
+        return { argv = { "sh", "-c", 'runtime=$1; shift; "$runtime" "$@" > result.txt', "launch", exec.tool_dir(input.runtime) .. "/run" },
+            tools = { input.sh, input.cat, input.runtime }, inputs = { exec.digest(input.one), exec.digest(input.two) } }
+    end }) } }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        for _ in 0..2 {
+            execute_workflow(
+                &mut runtime,
+                &roots,
+                "run",
+                &["//pkg:app"],
+                serde_json::json!({}),
+                &["first".into(), "two words".into()],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(workspace.path().join("result.txt")).unwrap(),
+                "onetwofirst,two words,"
+            );
+            fs::remove_file(workspace.path().join("result.txt")).unwrap();
+        }
+        let source = fs::read_to_string(workspace.path().join("pkg/BUILD.luau")).unwrap();
+        fs::write(
+            workspace.path().join("pkg/BUILD.luau"),
+            source.replace(" > result.txt'", "; exit 7'"),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let err = execute_workflow(
+            &mut runtime,
+            &roots,
+            "run",
+            &["//pkg:app"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("exit code 7"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_program_runs_through_expansion_get_and_all() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+local run = require("@imp/rules/workflows/run")
+local sh = core.native_tool("sh")
+local children = core.expand({ create = function()
+    return { app = { [run.RUN] = core.program({ inputs = { sh = sh }, describe = function(_, input)
+        return { argv = { "sh", "-c", 'printf "%s" "$1" > expanded.txt', "expanded", "ran" }, tools = { input.sh } }
+    end }) } }
+end })
+return {
+    picked = { [run.RUN] = children:get("app", run.RUN) },
+    group = { [run.RUN] = children:all(run.RUN) },
+}
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        for selector in ["//:picked", "//:group"] {
+            let cancellation = Arc::new(AtomicBool::new(false));
+            runtime.begin_graph_run(Arc::clone(&cancellation));
+            let projection = roots.iter().find(|root| root.address == selector).unwrap();
+            let selected = runtime.resolve_expansion_root(projection).await.unwrap();
+            runtime
+                .execute_graph("run", &selected, cancellation, &serde_json::json!({}), &[])
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(workspace.path().join("expanded.txt")).unwrap(),
+                "ran"
+            );
+            fs::remove_file(workspace.path().join("expanded.txt")).unwrap();
+        }
+        let program_id = runtime
+            .host
+            .borrow()
+            .nodes
+            .iter()
+            .find_map(|(id, node)| matches!(node, GraphNode::Program(_)).then_some(*id))
+            .unwrap();
+        assert!(
+            validate_expansion_child(&runtime.host.borrow(), program_id, "BUILD", "app").is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn luau_program_rejects_other_root_slots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return { bad = core.program({ describe = function() return { argv = { "true" } } end }) }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let err = runtime.load_modules().await.unwrap_err();
+        assert!(err.to_string().contains("must use the RUN slot"), "{err:#}");
     }
 
     #[tokio::test]
