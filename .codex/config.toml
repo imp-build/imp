@@ -1,12 +1,1 @@
-default_permissions = "kache-local"
-
-[permissions.kache-local]
-extends = ":workspace"
-
-[permissions.kache-local.network]
-enabled = true
-allow_local_binding = true
-
-[permissions.kache-local.network.domains]
-"localhost" = "allow"
-"127.0.0.1" = "allow"
+default_permissions = "default"
