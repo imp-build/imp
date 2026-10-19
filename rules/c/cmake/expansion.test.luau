@@ -313,7 +313,12 @@ return {
 		end),
 
 		core.test.case("recognizes Ninja's MSVC dependency mode", function()
-			assert(replay.is_cmake_compiler_edge({ rule = "msvc_compile" }, { msvc_compile = { deps = "msvc" } }))
+			assert(replay.is_cmake_compiler_edge({ rule = "CXX_COMPILER__app" }, { CXX_COMPILER__app = { deps = "msvc" } }))
+		end),
+
+		core.test.case("linker dependency mode does not make it a compiler edge", function()
+			local rules = { C_EXECUTABLE_LINKER__app = { deps = "gcc" } }
+			assert(not replay.is_cmake_compiler_edge({ rule = "C_EXECUTABLE_LINKER__app" }, rules))
 		end),
 
 		core.test.case("parses Ninja dependency records", function()
@@ -337,16 +342,18 @@ return {
 			assert(manifest["libhello_cmake.so"] == nil)
 		end),
 
-		core.test.case("scan_manifest falls back when Ninja reports no record", function()
-			local manifest = replay.scan_manifest(fixture_graph(), SOURCE_PATHS, BUILD_DIR, "")
-			assert(manifest[HELLO_OBJ].fallback == "Ninja did not report compiler dependencies")
+		core.test.case("scan_manifest rejects a missing Ninja record", function()
+			local text = error_text(replay.scan_manifest, fixture_graph(), SOURCE_PATHS, BUILD_DIR, "")
+			assert(contains(text, HELLO_OBJ), text)
+			assert(contains(text, "Ninja did not report compiler dependencies"), text)
 		end),
 
-		core.test.case("scan_manifest falls back when the record omits the direct source", function()
+		core.test.case("scan_manifest rejects a record that omits the direct source", function()
 			local deps = "CMakeFiles/hello_cmake.dir/hello.c.o: #deps 1, deps mtime 0 (STALE)\n"
 				.. "    ../../../../../rules/c/cmake/example/hello.h\n"
-			local manifest = replay.scan_manifest(fixture_graph(), SOURCE_PATHS, BUILD_DIR, deps)
-			assert(manifest[HELLO_OBJ].fallback == "Ninja dependency record omitted the direct source")
+			local text = error_text(replay.scan_manifest, fixture_graph(), SOURCE_PATHS, BUILD_DIR, deps)
+			assert(contains(text, HELLO_OBJ), text)
+			assert(contains(text, "Ninja dependency record omitted the direct source"), text)
 		end),
 	}),
 
@@ -505,7 +512,7 @@ return {
 				assert(same_list(ctest.argv, {
 					"sh",
 					"-c",
-					'bdir=$1; shift; ctest --test-dir "$bdir" "$@"',
+					'bdir=$1; shift; ctest --output-on-failure --test-dir "$bdir" "$@"',
 					"cmake-ctest",
 					BUILD_DIR,
 					"-R",

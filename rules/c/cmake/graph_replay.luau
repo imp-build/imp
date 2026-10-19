@@ -366,10 +366,13 @@ local function correlate_ctest_entries(ninja_graph)
 end
 
 --- True for a C or C++ compiler edge. CMake writes `deps = gcc` for
---- GCC-like compilers and `deps = msvc` for cl.exe.
+--- GCC-like compilers and `deps = msvc` for cl.exe. Linker rules can also
+--- have `deps = gcc`, so the dependency mode alone is not sufficient.
 local function is_cmake_compiler_edge(edge, rules)
 	local rule = rules[edge.rule]
-	return rule ~= nil and (rule.deps == "gcc" or rule.deps == "msvc")
+	return rule ~= nil
+		and (string.match(edge.rule, "^C_COMPILER") ~= nil or string.match(edge.rule, "^CXX_COMPILER") ~= nil)
+		and (rule.deps == "gcc" or rule.deps == "msvc")
 end
 
 --- The workspace sources that a compiler edge reads directly, sorted. Only
@@ -459,8 +462,9 @@ local function scan_path_to_workspace_path(path, build_dir_path, source_set)
 end
 
 --- The header plan of each compiler edge, from the output of
---- `ninja -t deps`: `{ [edge key] = { headers } }`, or
---- `{ fallback = reason, headers = {} }` when the record is not complete.
+--- `ninja -t deps`: `{ [edge key] = { headers } }`.
+--- Reject a missing record or a GCC record that omits its direct source.
+--- MSVC records contain only the headers from /showIncludes.
 local function scan_manifest(ninja_graph, source_paths, build_dir_path, deps_text)
 	local source_set = set_of(source_paths)
 	local deps = parse_ninja_deps(deps_text or "")
@@ -472,8 +476,7 @@ local function scan_manifest(ninja_graph, source_paths, build_dir_path, deps_tex
 		local key = compiler_edge_key(edge)
 		local recorded = deps[key]
 		if recorded == nil then
-			manifest[key] = { fallback = "Ninja did not report compiler dependencies", headers = {} }
-			continue
+			error(`cmake dependency scan failed for '{key}': Ninja did not report compiler dependencies`, 0)
 		end
 		local direct = compiler_workspace_sources(edge, ninja_graph.rules, ninja_graph.sandbox_root, source_paths)
 		local recorded_set = {}
@@ -484,15 +487,16 @@ local function scan_manifest(ninja_graph, source_paths, build_dir_path, deps_tex
 			end
 		end
 		local complete = true
-		for _, path in ipairs(direct) do
-			if not recorded_set[path] then
-				complete = false
-				break
+		if ninja_graph.rules[edge.rule].deps == "gcc" then
+			for _, path in ipairs(direct) do
+				if not recorded_set[path] then
+					complete = false
+					break
+				end
 			end
 		end
 		if not complete then
-			manifest[key] = { fallback = "Ninja dependency record omitted the direct source", headers = {} }
-			continue
+			error(`cmake dependency scan failed for '{key}': Ninja dependency record omitted the direct source`, 0)
 		end
 		local direct_set = set_of(direct)
 		local headers = {}
@@ -518,14 +522,20 @@ end
 -- parser, and one Ninja run schedules all compiler scans. The build output
 -- goes to stderr.
 local SCAN_SCRIPT = table.concat({
-	'bdir=$1 oldroot=$2 up=$3 mode=$4; ',
-	'cd "$bdir" || exit 0; ',
-	'[ -z "$oldroot" ] || sed -i "s|$oldroot|$up|g" build.ninja CMakeFiles/rules.ninja 2>/dev/null; ',
+	'set -eu; bdir=$1 oldroot=$2 up=$3 mode=$4; ',
+	'cd "$bdir"; ',
+	-- Configure is a separate task. Do not regenerate its graph in this copy.
+	'sed -i "/^build build[.]ninja.*: RERUN_CMAKE/,/^$/d" build.ninja; ',
+	'if [ -n "$oldroot" ]; then sed -i "s|$oldroot|$up|g" build.ninja CMakeFiles/rules.ninja; fi; ',
 	'if [ "$mode" = msvc ]; then flag=/Zs; else flag=-fsyntax-only; fi; ',
-	'sed -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s/$/ $flag/ }" CMakeFiles/rules.ninja; ',
-	'set -- $(ninja -f build.ninja -t targets all | sed -n -E "s/: (C|CXX)_COMPILER.*$//p"); ',
-	'[ "$#" -eq 0 ] || ninja -f build.ninja -k 0 "$@" >&2; ',
-	"ninja -f build.ninja -t deps > .imp-cmake-deps.txt 2>/dev/null; exit 0",
+	'sed -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s|$| $flag| }" CMakeFiles/rules.ninja; ',
+	-- Keep Ninja out of a pipeline so that its failure reaches the action.
+	'ninja -f build.ninja -t targets all > .imp-cmake-targets.txt; ',
+	'targets=$(sed -n -E "s/: (C|CXX)_COMPILER.*$//p" .imp-cmake-targets.txt); ',
+	'set -- $targets; ',
+	'[ "$#" -gt 0 ] || { echo "cmake dependency scan found no compiler targets" >&2; exit 1; }; ',
+	'ninja -f build.ninja -k 0 "$@" >&2; ',
+	"ninja -f build.ninja -t deps > .imp-cmake-deps.txt",
 })
 
 --- Declare the task that runs the compiler rules of CMake in syntax-only
@@ -565,9 +575,7 @@ local function scan_cmake_compiler_inputs(spec, configured)
 			append(action_inputs, dir_input_values(spec, input))
 			append(action_inputs, dep_input_values(spec, input, "dep"))
 			local deps_path = `{spec.build_dir_path}/.imp-cmake-deps.txt`
-			-- A failing scanner does not stop the scan. When the action fails
-			-- before it writes its output, each edge gets a broad fallback.
-			local ok, scan = pcall(exec.action, {
+			local scan = exec.action({
 				argv = {
 					"sh",
 					"-c",
@@ -582,15 +590,8 @@ local function scan_cmake_compiler_inputs(spec, configured)
 				env = spec.toolchain.edge_env(state),
 				outputs = { scan = output.file(deps_path) },
 				display = `cmake scan {spec.path}`,
-				allow_failure = true,
 			})
-			local deps_text = ""
-			if ok then
-				local read_ok, text = pcall(core.read_file_in_digest, exec.digest(scan.outputs.scan), deps_path)
-				if read_ok then
-					deps_text = text
-				end
-			end
+			local deps_text = core.read_file_in_digest(exec.digest(scan.outputs.scan), deps_path)
 			return {
 				manifest = scan_manifest(input.ninja_graph, input.source_paths, spec.build_dir_path, deps_text),
 			}
@@ -1004,7 +1005,7 @@ local function run_ctest_task(
 			local argv = {
 				"sh",
 				"-c",
-				'bdir=$1; shift; ctest --test-dir "$bdir" "$@"',
+				'bdir=$1; shift; ctest --output-on-failure --test-dir "$bdir" "$@"',
 				"cmake-ctest",
 				spec.build_dir_path,
 			}
