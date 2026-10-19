@@ -233,8 +233,17 @@ describe("cmakeProjectExpansion", () => {
 	});
 
 	test("recognizes Ninja's MSVC dependency mode", () => {
-		const rules = { msvc_compile: { deps: "msvc" } };
-		expect(isCmakeCompilerEdge({ rule: "msvc_compile" }, rules)).toBe(true);
+		const rules = { CXX_COMPILER__app: { deps: "msvc" } };
+		expect(isCmakeCompilerEdge({ rule: "CXX_COMPILER__app" }, rules)).toBe(
+			true,
+		);
+	});
+
+	test("linker dependency mode does not make it a compiler edge", () => {
+		const rules = { C_EXECUTABLE_LINKER__app: { deps: "gcc" } };
+		expect(
+			isCmakeCompilerEdge({ rule: "C_EXECUTABLE_LINKER__app" }, rules),
+		).toBe(false);
 	});
 
 	test("parses Ninja dependency records", () => {

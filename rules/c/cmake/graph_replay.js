@@ -384,11 +384,14 @@ const INCLUDE_LIKE_SUFFIXES = [
 ];
 
 // CMake emits `deps = gcc` for GCC-like compilers and `deps = msvc` for
-// cl.exe. Other edges keep the full project source set because their true
+// cl.exe. Linker rules can also have `deps = gcc`; check the rule name.
+// Other edges keep the full project source set because their true
 // runtime inputs are not recoverable from build.ninja alone.
 export function isCmakeCompilerEdge(edge, rules) {
 	const deps = rules[edge.rule]?.deps;
-	return deps === "gcc" || deps === "msvc";
+	return (
+		/^(C|CXX)_COMPILER/.test(edge.rule) && (deps === "gcc" || deps === "msvc")
+	);
 }
 
 // The path list comes from configure's captured `srcs` input, so generated
@@ -458,30 +461,18 @@ function scanPathToWorkspacePath(path, buildDirPath, sourcePaths) {
 	return sourcePaths.has(workspacePath) ? workspacePath : null;
 }
 
-function scanManifest(
-	ninjaGraph,
-	sourcePaths,
-	buildDirPath,
-	depsText,
-	skipped,
-) {
+function scanManifest(ninjaGraph, sourcePaths, buildDirPath, depsText) {
 	const sourceSet = new Set(sourcePaths);
 	const deps = parseNinjaDeps(depsText || "");
 	const manifest = {};
 	for (const edge of ninjaGraph.edges) {
 		if (!isCmakeCompilerEdge(edge, ninjaGraph.rules)) continue;
 		const key = compilerEdgeKey(edge);
-		if (skipped.has(key)) {
-			manifest[key] = { fallback: skipped.get(key), headers: [] };
-			continue;
-		}
 		const recorded = deps.get(key);
 		if (!recorded) {
-			manifest[key] = {
-				fallback: "Ninja did not report compiler dependencies",
-				headers: [],
-			};
-			continue;
+			throw new Error(
+				`cmake dependency scan failed for '${key}': Ninja did not report compiler dependencies`,
+			);
 		}
 		const directSources = new Set(
 			compilerWorkspaceSources(
@@ -496,12 +487,14 @@ function scanManifest(
 				.map((path) => scanPathToWorkspacePath(path, buildDirPath, sourceSet))
 				.filter(Boolean),
 		);
-		if (Array.from(directSources).some((path) => !recordedSources.has(path))) {
-			manifest[key] = {
-				fallback: "Ninja dependency record omitted the direct source",
-				headers: [],
-			};
-			continue;
+		// MSVC records contain only the headers from /showIncludes.
+		if (
+			ninjaGraph.rules[edge.rule].deps === "gcc" &&
+			Array.from(directSources).some((path) => !recordedSources.has(path))
+		) {
+			throw new Error(
+				`cmake dependency scan failed for '${key}': Ninja dependency record omitted the direct source`,
+			);
 		}
 		manifest[key] = {
 			headers: Array.from(recordedSources)
@@ -572,8 +565,8 @@ export function scanCmakeCompilerInputs(spec, configured) {
 			const tools = (
 				await scannerToolsForEdges(spec, state, input.ninjaGraph)
 			).filter(Boolean);
-			const ninjaExe = exec.path(input.ninja);
-			const sedExe = exec.path(input.sed);
+			const ninjaExe = exec.tool(input.ninja, "ninja");
+			const sedExe = exec.tool(input.sed, "sed");
 			const scan = await exec.action({
 				argv: [
 					"sh",
@@ -581,17 +574,20 @@ export function scanCmakeCompilerInputs(spec, configured) {
 					// Patch only CMake's compiler rules in this action's private copy
 					// of the configured tree. Ninja retains its normal depfile or
 					// showIncludes parser, and no object file is written.
-					"bdir=$1 oldroot=$2 up=$3 ninja=$4 sed=$5 mode=$6; " +
-						'cd "$bdir" || exit 0; ' +
-						'"$sed" -i "s|$oldroot|$up|g" build.ninja CMakeFiles/rules.ninja 2>/dev/null; ' +
+					"set -eu; bdir=$1 oldroot=$2 up=$3 ninja=$4 sed=$5 mode=$6; " +
+						'cd "$bdir"; ' +
+						// Configure is a separate task. Do not regenerate its graph here.
+						'"$sed" -i "/^build build[.]ninja.*: RERUN_CMAKE/,/^$/d" build.ninja; ' +
+						'if [ -n "$oldroot" ]; then "$sed" -i "s|$oldroot|$up|g" build.ninja CMakeFiles/rules.ninja; fi; ' +
 						'if [ "$mode" = msvc ]; then flag=/Zs; else flag=-fsyntax-only; fi; ' +
-						'"$sed" -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s/$/ $flag/ }" CMakeFiles/rules.ninja; ' +
-						// Let one Ninja invocation schedule all compiler scans. `sed`
-						// is already a configure dependency, so this does not add a
-						// host-tool requirement to replay.
-						'set -- $("$ninja" -f build.ninja -t targets all | "$sed" -n -E "s/: (C|CXX)_COMPILER.*$//p"); ' +
-						'[ "$#" -eq 0 ] || "$ninja" -f build.ninja -k 0 "$@"; ' +
-						'"$ninja" -f build.ninja -t deps > .imp-cmake-deps.txt 2>/dev/null; exit 0',
+						'"$sed" -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s|$| $flag| }" CMakeFiles/rules.ninja; ' +
+						// Keep Ninja out of a pipeline so its failure reaches the action.
+						'"$ninja" -f build.ninja -t targets all > .imp-cmake-targets.txt; ' +
+						'targets=$("$sed" -n -E "s/: (C|CXX)_COMPILER.*$//p" .imp-cmake-targets.txt); ' +
+						"set -- $targets; " +
+						'[ "$#" -gt 0 ] || { echo "cmake dependency scan found no compiler targets" >&2; exit 1; }; ' +
+						'"$ninja" -f build.ninja -k 0 "$@" >&2; ' +
+						'"$ninja" -f build.ninja -t deps > .imp-cmake-deps.txt',
 					"cmake-dependency-scan",
 					spec.buildDirPath,
 					input.ninjaGraph.sandboxRoot,
@@ -613,25 +609,17 @@ export function scanCmakeCompilerInputs(spec, configured) {
 					scan: output.file(`${spec.buildDirPath}/.imp-cmake-deps.txt`),
 				},
 				display: `cmake scan ${spec.path}`,
-				allowFailure: true,
 			});
-			let depsText = "";
-			try {
-				depsText = readFileInDigest(
-					scan.outputs.scan.digest,
-					`${spec.buildDirPath}/.imp-cmake-deps.txt`,
-				);
-			} catch (_) {
-				// The action deliberately completes after an individual scanner
-				// failure. Missing output becomes an edge-local broad fallback.
-			}
+			const depsText = readFileInDigest(
+				scan.outputs.scan.digest,
+				`${spec.buildDirPath}/.imp-cmake-deps.txt`,
+			);
 			return {
 				manifest: scanManifest(
 					input.ninjaGraph,
 					input.sourcePaths,
 					spec.buildDirPath,
 					depsText,
-					new Map(),
 				),
 			};
 		},
@@ -1164,7 +1152,7 @@ export function runCTestTask(
 				argv: [
 					"sh",
 					"-c",
-					'bdir=$1; shift; ctest --test-dir "$bdir" "$@"',
+					'bdir=$1; shift; ctest --output-on-failure --test-dir "$bdir" "$@"',
 					"cmake-ctest",
 					spec.buildDirPath,
 					...ctestNameFilterArgs(testNames),
