@@ -13,6 +13,68 @@ identify one member project. Use `pythonApp()`, `pythonTest()`, and
 toolchain modules expose configuration declarations; their download and cache
 helpers are implementation details.
 
+## Use the Luau toolchains
+
+Rule authors on the migration branch can use the PEX and uv toolchains from
+Luau. The Python application, runtime, and Ruff examples below still use
+JavaScript. These APIs are separate until their migration tasks are complete.
+
+In `imp.workspace.luau`, declare and export the lockfile generation targets:
+
+```lua
+local pex = require("@imp/rules/python/pex_toolchain")
+local uv = require("@imp/rules/python/uv_toolchain")
+
+return {
+    pex = pex.pex_toolchain("2.102.0", { default = true }),
+    uv = uv.uv_toolchain("0.12.13", { default = true }),
+}
+```
+
+Each declaration returns `version`, `lockfile`, and a `GEN_LOCKFILES` root.
+Options are `default`, `lockfile`, and `unverified`. The default lockfiles
+ship with Imp. Use an explicit `@workspace/locks/uv.lock` or
+`@workspace/locks/pex.lock` address to select a workspace-owned file. A
+workspace file does not replace a shipped `@imp/rules/` file. Missing files
+or entries fail acquisition with a regeneration command. `unverified = true`
+permits an unverified download and logs a warning.
+
+**Warning:** This command writes the selected lockfiles into the workspace.
+
+From that workspace root, generate the declared lockfiles with:
+
+```sh
+IMP_RUNTIME=luau imp goal gen-lockfiles //:pex //:uv
+```
+
+For execution, `graph_toolchain(version)` returns `tool`, `cache_tool`, and
+`version`. With no version, it selects the declared default. Declare both
+handles as task inputs. Within the task, `pex_bin(exec, inputs.tool)` or
+`uv_bin(exec, inputs.tool)` returns the absolute executable path.
+`cache_env(exec, inputs.cache_tool)` returns an environment table. Pass the
+tool and cache tool to the action. PEX is a Python zipapp: invoke its path
+through a separately declared Python interpreter.
+
+The cache tool uses empty `bin_dirs`, so its directory does not enter `PATH`.
+It has a seed task, so the directory exists before its first
+mount. PEX sets `PEX_ROOT`; uv sets `UV_CACHE_DIR` and
+`UV_PYTHON_INSTALL_DIR`. These paths are absolute and refer to persistent
+shared named caches. Reusing a seed preserves existing cache contents. PEX
+acquisition uses a version-only key and one platform-independent artifact.
+uv acquisition uses version/platform keys and supports Linux and macOS on
+x86_64 and aarch64, plus Windows on x86_64.
+
+`@imp/rules/python/lock` exports
+`python_workspace_lock({ workspace, sources, uv, python_version })`.
+`workspace` is a workspace-relative directory, or `"."`. `sources` supplies
+the workspace metadata and existing lock. `uv` is the graph tool handle.
+The result is a task handle for a `GEN_LOCKFILES` slot. This uncached task
+runs `uv lock` with managed Python and captures only `uv.lock`. The goal
+publishes that artifact; the task does not write workspace files directly.
+
+The generated references still describe the JavaScript APIs. Luau reference
+extraction belongs to the workspace and documentation integration task.
+
 ## Set up the workspace
 
 Import the Python rules in `imp.workspace.js`; they provide default uv, PEX,

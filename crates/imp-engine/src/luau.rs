@@ -2513,9 +2513,6 @@ fn create_core(
             if name.trim().is_empty() {
                 return Err(LuaError::external("tool({ source, name }) requires a name"));
             }
-            if bin_dirs.is_empty() {
-                return Err(LuaError::external("tool.bin_dirs must not be empty"));
-            }
             for directory in &bin_dirs {
                 validate_tool_bin_dir(directory)?;
             }
@@ -7605,14 +7602,18 @@ local tool = core.tool(producer.outputs.tool, {
     name = "fixture-tool",
     bin_dirs = { "." },
 })
+-- A cache-only tool still mounts its directory, without adding it to PATH.
+local data = core.tool(producer.outputs.tool, { name = "fixture-data", bin_dirs = {} })
 local consumer = core.task({
-    inputs = { tool = tool, path = path },
+    inputs = { tool = tool, path = path, data = data, shell = core.native_tool("sh") },
     run = function(exec, inputs)
         assert(exec.path(inputs.path) == "staged")
+        local data_dir = exec.tool_dir(inputs.data)
+        assert(string.sub(data_dir, 1, 1) == "/")
         exec.action({
-            argv = { "fixture-tool" },
+            argv = { "sh", "-c", 'case ":$PATH:" in *"/.imp/tools/fixture-data:"*) exit 1 ;; esac; test -d "$DATA_DIR" && fixture-tool' },
             inputs = { inputs.path },
-            env = { TOOL_SETTING = "set" },
+            env = { TOOL_SETTING = "set", DATA_DIR = data_dir },
         })
     end,
 })

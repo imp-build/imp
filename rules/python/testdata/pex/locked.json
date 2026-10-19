@@ -1,0 +1,13 @@
+{
+  "tool": "pex-toolchain",
+  "versions": {
+    "2.102.0": {
+      "any/any": {
+        "url": "https://locked.example/pex",
+        "artifact": "pex",
+        "size": 42,
+        "sha256": "deadbeef"
+      }
+    }
+  }
+}

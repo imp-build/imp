@@ -1,0 +1,19 @@
+{
+  "tool": "uv-toolchain",
+  "versions": {
+    "0.12.13": {
+      "linux/x86_64": {
+        "url": "https://locked.example/uv",
+        "artifact": "uv",
+        "size": 42,
+        "sha256": "deadbeef"
+      },
+      "windows/x86_64": {
+        "url": "https://locked.example/uv",
+        "artifact": "uv",
+        "size": 42,
+        "sha256": "deadbeef"
+      }
+    }
+  }
+}
