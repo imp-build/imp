@@ -40,6 +40,29 @@ export const bindings = codegen({
 });
 ```
 
+For a Luau workspace, return the declaration from `BUILD.luau`. Require
+`@imp/rules/workflows/codegen` in `imp.workspace.luau` to register the goal.
+
+**Illustrative example**
+
+```lua
+local core = require("@imp/core")
+local codegen = require("@imp/rules/imp/codegen").codegen
+
+return {
+    bindings = codegen({
+        tools = { generator = core.native_tool("my-generator") },
+        output_paths = { "app/generated/bindings.odin" },
+        argv = function()
+            return { "my-generator", "--output", "app/generated/bindings.odin" }
+        end,
+    }),
+}
+```
+
+Replace `my-generator` and its arguments with your generator command. If the
+workspace has both runtime configuration files, set `IMP_RUNTIME=luau`.
+
 From the workspace root, select that exported value:
 
 **Illustrative example**
