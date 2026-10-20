@@ -25,12 +25,15 @@ use lune::Runtime;
 use mlua::prelude::*;
 use mlua::{LuaSerdeExt, MetaMethod, UserDataFields, UserDataMethods};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ConfigurationState {
     schemas: BTreeMap<String, serde_json::Value>,
     values: BTreeMap<String, serde_json::Value>,
     declarations: BTreeMap<String, serde_json::Value>,
     sources: BTreeMap<String, String>,
+    mode_axes: BTreeMap<String, serde_json::Value>,
+    mode_profiles: BTreeMap<String, serde_json::Value>,
+    invocation_values: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Clone)]
@@ -234,6 +237,11 @@ struct FileSetSpec {
 
 #[derive(Clone)]
 enum GraphNode {
+    Mode(String),
+    Configured {
+        source_id: u64,
+        overrides: ModeScope,
+    },
     Files(FileSetSpec),
     NativeTool(String),
     /// The running Imp executable, available to actions as the `imp` tool.
@@ -278,12 +286,12 @@ struct HostState {
     next_expansion_id: u64,
     tasks: HashMap<u64, Task>,
     expansions: HashMap<u64, Expansion>,
-    expansion_results: HashMap<u64, LuaTable>,
+    expansion_results: HashMap<(u64, String), LuaTable>,
     graph_run_active: bool,
-    task_results: HashMap<u64, LuaTable>,
-    /// The resolved value of each `expansion:get()` handle that a task
-    /// declares as an input, by handle id.
-    projection_values: HashMap<u64, LuaValue>,
+    task_results: HashMap<(u64, String), LuaTable>,
+    invocation_mode: ModeScope,
+    resolved_inputs: HashMap<(u64, ModeScope), ResolvedInput>,
+    configured_handles: BTreeMap<(u64, ModeScope), GraphHandle>,
     nodes: HashMap<u64, GraphNode>,
     filesets: HashMap<String, u64>,
     loaded_roots: Vec<u64>,
@@ -374,7 +382,9 @@ impl LuauWorkspace {
             expansion_results: HashMap::new(),
             graph_run_active: false,
             task_results: HashMap::new(),
-            projection_values: HashMap::new(),
+            invocation_mode: ModeScope::new(),
+            resolved_inputs: HashMap::new(),
+            configured_handles: BTreeMap::new(),
             nodes: HashMap::new(),
             filesets: HashMap::new(),
             loaded_roots: Vec::new(),
@@ -431,7 +441,11 @@ impl LuauWorkspace {
                     bootstrap_host.clone(),
                     bootstrap_configuration.clone(),
                 )?;
-                install_expansion_executor(lua, bootstrap_host.clone())?;
+                install_expansion_executor(
+                    lua,
+                    bootstrap_host.clone(),
+                    bootstrap_configuration.clone(),
+                )?;
                 Ok(LuaValue::Nil)
             })
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -471,21 +485,78 @@ impl LuauWorkspace {
     /// Evaluate Luau workspace config and BUILD modules, then return their
     /// exported build graph roots.
     pub async fn load_modules(&mut self) -> Result<Vec<GraphRoot>> {
-        self.load_modules_with_ci_overlay(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"))
-            .await
+        let roots = self
+            .load_modules_with_ci_overlay(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"))
+            .await?;
+        let (axes, profiles) = self.mode_registry();
+        let mode = crate::spike::resolve_mode_registry(&axes, &profiles, None, &[])?;
+        self.set_invocation_mode(mode, None)?;
+        self.configuration.borrow_mut().invocation_values = None;
+        Ok(roots)
+    }
+
+    pub fn mode_registry(
+        &self,
+    ) -> (
+        BTreeMap<String, serde_json::Value>,
+        BTreeMap<String, serde_json::Value>,
+    ) {
+        let state = self.configuration.borrow();
+        (state.mode_axes.clone(), state.mode_profiles.clone())
+    }
+
+    pub fn set_invocation_mode(
+        &mut self,
+        mode: serde_json::Value,
+        profile: Option<&str>,
+    ) -> Result<()> {
+        self.host.borrow_mut().invocation_mode = serde_json::from_value(mode.clone())?;
+        let mut state = self.configuration.borrow_mut();
+        let mut values = BTreeMap::new();
+        values.insert("imp.mode".to_owned(), mode);
+        if let Some(odin) = profile
+            .and_then(|name| state.mode_profiles.get(name))
+            .and_then(|p| p.get("odin"))
+        {
+            values.insert("odin".to_owned(), odin.clone());
+        }
+        state.invocation_values = Some(values);
+        Ok(())
+    }
+
+    pub(crate) fn clear_invocation_mode(&mut self) {
+        self.host.borrow_mut().invocation_mode.clear();
+        self.configuration.borrow_mut().invocation_values = None;
     }
 
     pub fn begin_graph_run(&mut self, cancellation: Arc<AtomicBool>) {
         let mut host = self.host.borrow_mut();
+        if host.invocation_mode.is_empty() {
+            host.invocation_mode = self
+                .configuration
+                .borrow()
+                .mode_axes
+                .iter()
+                .map(|(name, def)| {
+                    (
+                        name.clone(),
+                        def["default"]
+                            .as_str()
+                            .expect("validated default")
+                            .to_owned(),
+                    )
+                })
+                .collect();
+        }
         host.task_results.clear();
+        host.resolved_inputs.clear();
         host.expansion_results.clear();
-        host.projection_values.clear();
         host.graph_run_active = true;
         host.cancellation = cancellation;
     }
 
     pub fn expansion_projection_is_all(&self, handle_id: u32) -> Option<bool> {
-        match self.host.borrow().nodes.get(&(handle_id as u64)) {
+        match unconfigured_node(&self.host.borrow(), handle_id as u64).1 {
             Some(GraphNode::ExpansionAll { .. }) => Some(true),
             Some(GraphNode::ExpansionGet { .. }) => Some(false),
             _ => None,
@@ -496,12 +567,12 @@ impl LuauWorkspace {
     /// The expansion callback runs once per graph invocation, after its input
     /// tasks have completed.
     pub async fn resolve_expansion_root(&mut self, root: &GraphRoot) -> Result<Vec<GraphRoot>> {
-        let node = self
-            .host
-            .borrow()
-            .nodes
-            .get(&(root.handle_id as u64))
-            .cloned();
+        let (base_id, scope) = scoped_node(
+            &self.host.borrow(),
+            root.handle_id as u64,
+            &invocation_mode(&self.host.borrow()),
+        );
+        let node = self.host.borrow().nodes.get(&base_id).cloned();
         let projection = match node {
             Some(GraphNode::ExpansionGet {
                 expansion_id,
@@ -519,15 +590,19 @@ impl LuauWorkspace {
         let Some((expansion_id, selected_key, workflow, facet)) = projection else {
             return Ok(vec![root.clone()]);
         };
-        let source = format!("return __imp_discover_expansion({expansion_id})");
-        let children_value = self
-            .run_script_value("@imp/expand", &source)
-            .await
-            .with_context(|| format!("discover Luau expansion for {}", root.address))?;
-        let children = children_value
-            .as_table()
-            .cloned()
-            .with_context(|| format!("expansion for {} must return a keyed table", root.address))?;
+        let lua = self.lua()?;
+        let (children, _) = discover_mode_expansion(
+            &lua,
+            &self.host,
+            &self.configuration,
+            expansion_id,
+            &scope,
+            &[],
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("discover Luau expansion for {}: {error}", root.address)
+        })?;
         let keys = if let Some(key) = selected_key.as_ref() {
             if children
                 .get::<Option<LuaValue>>(key.as_str())
@@ -572,6 +647,19 @@ impl LuauWorkspace {
                 .borrow::<GraphHandle>()
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             validate_expansion_child(&self.host.borrow(), handle.id, &workflow, &key)?;
+            let overrides: ModeScope = scope
+                .iter()
+                .filter(|(axis, value)| {
+                    self.host.borrow().invocation_mode.get(*axis) != Some(*value)
+                })
+                .map(|(axis, value)| (axis.clone(), value.clone()))
+                .collect();
+            let handle = if overrides.is_empty() {
+                handle.clone()
+            } else {
+                configured_handle(&lua, &self.host, &handle, overrides)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            };
             let address = if selected_key.is_some() {
                 root.address.clone()
             } else {
@@ -689,7 +777,7 @@ impl LuauWorkspace {
                 for (handle_id, slot) in handles {
                     let state = self.host.borrow();
                     // Other values, such as tool or file handles, are not roots.
-                    let valid = match state.nodes.get(&handle_id) {
+                    let valid = match unconfigured_node(&state, handle_id).1 {
                         Some(
                             GraphNode::Task
                             | GraphNode::TaskOutput { .. }
@@ -810,6 +898,8 @@ impl LuauWorkspace {
         host.graph_run_active = false;
         host.goal_invocation = None;
         host.goal_callback_active = false;
+        host.invocation_mode.clear();
+        self.configuration.borrow_mut().invocation_values = None;
         result
     }
 
@@ -843,21 +933,27 @@ impl LuauWorkspace {
         let mut test_roots = 0;
         let mut test_units = 0;
         for root in roots {
-            let package = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
+            let package = match unconfigured_node(&self.host.borrow(), root.handle_id as u64).1 {
                 Some(GraphNode::TestRoot { package }) => Some(package.clone()),
                 _ => None,
             };
-            let program = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
+            let program = match unconfigured_node(&self.host.borrow(), root.handle_id as u64).1 {
                 Some(GraphNode::Program(program)) => Some(program.clone()),
                 _ => None,
             };
+            let root_scope = scoped_node(
+                &self.host.borrow(),
+                root.handle_id as u64,
+                &invocation_mode(&self.host.borrow()),
+            )
+            .1;
             let result = if let Some(program) = program {
-                describe_program(&lua, &self.host, &self.configuration, program)
+                describe_program_scoped(&lua, &self.host, &self.configuration, program, &root_scope)
                     .await
                     .map_err(lua_err)?
             } else if let Some(package) = package {
                 let units = self
-                    .run_test_root(&package, case_filter, suite_filter)
+                    .run_test_root(&package, case_filter, suite_filter, &root_scope)
                     .await?;
                 test_roots += 1;
                 test_units += units.len();
@@ -916,11 +1012,24 @@ impl LuauWorkspace {
             .context("Luau runtime is not initialized")
     }
 
+    fn configure_test_runtime(&self, runtime: &mut Self, scope: &ModeScope) -> Result<()> {
+        *runtime.configuration.borrow_mut() = self.configuration.borrow().clone();
+        runtime.host.borrow_mut().invocation_mode = scope.clone();
+        runtime
+            .configuration
+            .borrow_mut()
+            .invocation_values
+            .get_or_insert_with(BTreeMap::new)
+            .insert("imp.mode".to_owned(), serde_json::to_value(scope)?);
+        Ok(())
+    }
+
     async fn run_test_root(
         &self,
         package: &str,
         case_filter: Option<&str>,
         suite_filter: Option<&str>,
+        scope: &ModeScope,
     ) -> Result<Vec<TestUnit>> {
         let directory = if package == "." {
             self.loader.workspace_root.clone()
@@ -998,6 +1107,7 @@ impl LuauWorkspace {
                 &rules_root,
                 Arc::clone(&service),
             )?;
+            self.configure_test_runtime(&mut discovery, scope)?;
             let cases = match discovery.evaluate(&module).await {
                 Ok(value) => match flatten_test_cases(value) {
                     Ok(cases) => cases,
@@ -1068,6 +1178,7 @@ impl LuauWorkspace {
                         continue;
                     }
                 };
+                self.configure_test_runtime(&mut runtime, scope)?;
                 runtime.host.borrow_mut().cancellation =
                     Arc::clone(&self.host.borrow().cancellation);
                 let result = match runtime.evaluate(&module).await {
@@ -1478,6 +1589,355 @@ fn install_require(
     lua.globals().set("require", require)
 }
 
+type ModeScope = BTreeMap<String, String>;
+type ModeAxes = std::collections::BTreeSet<String>;
+
+#[derive(Clone)]
+struct ResolvedInput {
+    value: LuaValue,
+    axes: ModeAxes,
+}
+
+fn mode_key(axes: &ModeAxes, scope: &ModeScope) -> String {
+    serde_json::to_string(
+        &axes
+            .iter()
+            .map(|axis| (axis, scope.get(axis)))
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .expect("mode values are strings")
+}
+
+fn invocation_mode(host: &HostState) -> ModeScope {
+    host.invocation_mode.clone()
+}
+
+// Each edge carries its own scope. No callback reads a mutable current scope.
+async fn resolve_mode_inputs(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    configuration: &Rc<RefCell<ConfigurationState>>,
+    inputs: &LuaTable,
+    scope: &ModeScope,
+    visiting: &[u64],
+) -> LuaResult<(LuaTable, ModeAxes)> {
+    let resolved = lua.create_table()?;
+    let mut axes = ModeAxes::new();
+    for pair in inputs.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        let id = match &value {
+            LuaValue::UserData(userdata) => userdata.borrow::<GraphHandle>().ok().map(|h| h.id),
+            _ => None,
+        };
+        let leaf = id.is_some_and(|id| {
+            matches!(
+                host.borrow().nodes.get(&id),
+                Some(
+                    GraphNode::Files(_)
+                        | GraphNode::NativeTool(_)
+                        | GraphNode::SelfTool
+                        | GraphNode::Artifact(_)
+                )
+            )
+        });
+        let value = if leaf {
+            value
+        } else if let Some(id) = id {
+            let input = resolve_mode_handle(lua, host, configuration, id, scope, visiting).await?;
+            let preserve_handle = input.axes.is_empty() && {
+                let state = host.borrow();
+                match state.nodes.get(&id) {
+                    Some(GraphNode::Tool { source_id, .. } | GraphNode::Path { source_id, .. }) => {
+                        matches!(
+                            state.nodes.get(source_id),
+                            Some(GraphNode::TaskOutput { .. } | GraphNode::Artifact(_))
+                        )
+                    }
+                    _ => false,
+                }
+            };
+            axes.extend(input.axes);
+            if preserve_handle {
+                value
+            } else {
+                input.value
+            }
+        } else {
+            value
+        };
+        resolved.set(key, value)?;
+    }
+    Ok((resolved, axes))
+}
+
+fn resolve_mode_handle<'a>(
+    lua: &'a Lua,
+    host: &'a Rc<RefCell<HostState>>,
+    configuration: &'a Rc<RefCell<ConfigurationState>>,
+    id: u64,
+    scope: &'a ModeScope,
+    visiting: &'a [u64],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = LuaResult<ResolvedInput>> + 'a>> {
+    Box::pin(async move {
+        if visiting.contains(&id) {
+            return Err(LuaError::external(format!(
+                "cyclic Luau task dependency at {id}"
+            )));
+        }
+        if let Some(result) = host
+            .borrow()
+            .resolved_inputs
+            .get(&(id, scope.clone()))
+            .cloned()
+        {
+            return Ok(result);
+        }
+        let mut visiting = visiting.to_vec();
+        visiting.push(id);
+        let node = host
+            .borrow()
+            .nodes
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| LuaError::external(format!("unknown Luau graph handle {id}")))?;
+        let result = match node {
+            GraphNode::Mode(axis) => {
+                if !host.borrow().graph_run_active && !host.borrow().test_case_active {
+                    return Err(LuaError::external(
+                        "semantic input resolved outside a workflow invocation",
+                    ));
+                }
+                Ok(ResolvedInput {
+                    value: scope
+                        .get(&axis)
+                        .map(|v| lua.create_string(v).map(LuaValue::String))
+                        .transpose()?
+                        .unwrap_or(LuaValue::Nil),
+                    axes: [axis].into_iter().collect(),
+                })
+            }
+            GraphNode::Configured {
+                source_id,
+                overrides,
+            } => {
+                let mut nested = scope.clone();
+                nested.extend(overrides.clone());
+                let mut result =
+                    resolve_mode_handle(lua, host, configuration, source_id, &nested, &visiting)
+                        .await?;
+                result.axes.retain(|axis| !overrides.contains_key(axis));
+                Ok(result)
+            }
+            GraphNode::Task => {
+                let task = host
+                    .borrow()
+                    .tasks
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| LuaError::external("unknown Luau task"))?;
+                let (inputs, axes) =
+                    resolve_mode_inputs(lua, host, configuration, &task.inputs, scope, &visiting)
+                        .await?;
+                let key = (id, mode_key(&axes, scope));
+                let cached = host.borrow().task_results.get(&key).cloned();
+                let outputs = if let Some(cached) = cached {
+                    cached
+                } else {
+                    let salt = imp_store::cache::digest_json(&serde_json::json!({
+                        "scope": "axes", "values": axes.iter().map(|axis| (axis, scope.get(axis))).collect::<BTreeMap<_, _>>(), "config": {}
+                    })).map_err(LuaError::external)?;
+                    let exec = create_task_exec(
+                        lua,
+                        host,
+                        configuration,
+                        &inputs,
+                        &task.inputs,
+                        !task.outputs.is_empty(),
+                        &salt,
+                    )?;
+                    host.borrow_mut().graph_callback_depth += 1;
+                    let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
+                    host.borrow_mut().graph_callback_depth -= 1;
+                    let result = result.inspect_err(|error| {
+                        if !is_host_error(error) {
+                            host.borrow_mut().task_failure = Some(error.to_string());
+                        }
+                    })?;
+                    host.borrow_mut().task_failure = None;
+                    let outputs = validate_task_result(lua, host, &task, result)?;
+                    host.borrow_mut().task_results.insert(key, outputs.clone());
+                    outputs
+                };
+                Ok(ResolvedInput {
+                    value: LuaValue::Table(outputs),
+                    axes,
+                })
+            }
+            GraphNode::TaskOutput { task_id, name } => {
+                let result =
+                    resolve_mode_handle(lua, host, configuration, task_id, scope, &visiting)
+                        .await?;
+                let table = result
+                    .value
+                    .as_table()
+                    .ok_or_else(|| LuaError::external("invalid task result"))?;
+                Ok(ResolvedInput {
+                    value: table.get(name)?,
+                    axes: result.axes,
+                })
+            }
+            GraphNode::Path {
+                source_id,
+                owner_package,
+            }
+            | GraphNode::Tool {
+                source_id,
+                owner_package,
+                ..
+            } => {
+                // Bind tools and paths to the resolved artifact, rather than a
+                // task output whose value can differ on another edge.
+                let result =
+                    resolve_mode_handle(lua, host, configuration, source_id, scope, &visiting)
+                        .await?;
+                let source = result
+                    .value
+                    .as_userdata()
+                    .ok_or_else(|| LuaError::external("tool/path source is not an artifact"))?;
+                let source_id = source.borrow::<GraphHandle>()?.id;
+                let original = host
+                    .borrow()
+                    .nodes
+                    .get(&id)
+                    .cloned()
+                    .expect("existing node");
+                let (kind, node) = match original {
+                    GraphNode::Tool { name, bin_dirs, .. } => (
+                        "tool",
+                        GraphNode::Tool {
+                            name,
+                            bin_dirs,
+                            source_id,
+                            owner_package,
+                        },
+                    ),
+                    _ => (
+                        "path",
+                        GraphNode::Path {
+                            source_id,
+                            owner_package,
+                        },
+                    ),
+                };
+                let handle = allocate_handle(host, kind);
+                host.borrow_mut().nodes.insert(handle.id, node);
+                Ok(ResolvedInput {
+                    value: LuaValue::UserData(lua.create_userdata(handle)?),
+                    axes: result.axes,
+                })
+            }
+            GraphNode::ExpansionGet {
+                expansion_id,
+                key,
+                workflow,
+                facet,
+            } => {
+                let (children, mut axes) = discover_mode_expansion(
+                    lua,
+                    host,
+                    configuration,
+                    expansion_id,
+                    scope,
+                    &visiting,
+                )
+                .await?;
+                let child = expansion_child_handle(
+                    &host.borrow(),
+                    &children,
+                    &key,
+                    &workflow,
+                    facet.as_deref(),
+                )
+                .map_err(LuaError::external)?;
+                let result =
+                    resolve_mode_handle(lua, host, configuration, child, scope, &visiting).await?;
+                axes.extend(result.axes);
+                Ok(ResolvedInput {
+                    value: result.value,
+                    axes,
+                })
+            }
+            GraphNode::ExpansionAll { .. } => Err(LuaError::external(
+                "an expansion:all() handle cannot be a task input; use expansion:get()",
+            )),
+            GraphNode::Program(_) => Err(LuaError::external("a program cannot be a task input")),
+            _ => Ok(ResolvedInput {
+                value: LuaValue::UserData(lua.create_userdata(GraphHandle {
+                    id,
+                    kind: match node {
+                        GraphNode::Files(_) => "files",
+                        GraphNode::NativeTool(_) => "native_tool",
+                        GraphNode::SelfTool => "self_tool",
+                        GraphNode::Artifact(_) => "artifact",
+                        _ => "test_root",
+                    },
+                    outputs: None,
+                })?),
+                axes: ModeAxes::new(),
+            }),
+        }?;
+        host.borrow_mut()
+            .resolved_inputs
+            .insert((id, scope.clone()), result.clone());
+        Ok(result)
+    })
+}
+
+async fn discover_mode_expansion(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    configuration: &Rc<RefCell<ConfigurationState>>,
+    id: u64,
+    scope: &ModeScope,
+    visiting: &[u64],
+) -> LuaResult<(LuaTable, ModeAxes)> {
+    let expansion = host
+        .borrow()
+        .expansions
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| LuaError::external(format!("unknown Luau expansion {id}")))?;
+    let (inputs, axes) =
+        resolve_mode_inputs(lua, host, configuration, &expansion.inputs, scope, visiting).await?;
+    let key = (id, mode_key(&axes, scope));
+    if let Some(children) = host.borrow().expansion_results.get(&key).cloned() {
+        return Ok((children, axes));
+    }
+    host.borrow_mut().graph_callback_depth += 1;
+    let children = expansion.create.call_async::<LuaValue>(inputs).await;
+    host.borrow_mut().graph_callback_depth -= 1;
+    let children = children.map_err(|error| {
+        LuaError::external(format!("expansion '{}' failed: {error}", expansion.display))
+    })?;
+    let LuaValue::Table(children) = children else {
+        return Err(LuaError::external(format!(
+            "expansion '{}' must return a keyed table",
+            expansion.display
+        )));
+    };
+    for pair in children.pairs::<String, LuaValue>() {
+        if pair?.0.is_empty() {
+            return Err(LuaError::external(
+                "expansion child keys must be non-empty strings",
+            ));
+        }
+    }
+    host.borrow_mut()
+        .expansion_results
+        .insert(key, children.clone());
+    Ok((children, axes))
+}
+
 fn install_task_executor(
     lua: &Lua,
     host: Rc<RefCell<HostState>>,
@@ -1487,74 +1947,66 @@ fn install_task_executor(
         let host = Rc::clone(&host);
         let configuration = Rc::clone(&configuration);
         async move {
-            let (task_id, output_name) = match host.borrow().nodes.get(&id) {
-                Some(GraphNode::Task) => (id, None),
-                Some(GraphNode::TaskOutput { task_id, name }) => (*task_id, Some(name.clone())),
-                Some(_) => {
-                    return Err(LuaError::external(format!(
-                        "Luau graph handle {id} is not an executable task or task output"
-                    )))
-                }
-                None => {
-                    return Err(LuaError::external(format!(
-                        "unknown Luau graph handle {id}"
-                    )))
-                }
-            };
-            let order = dependency_order(&host.borrow(), task_id)?;
-            for task_id in order {
-                if host.borrow().task_results.contains_key(&task_id) {
-                    continue;
-                }
-                let task = host.borrow().tasks.get(&task_id).cloned().ok_or_else(|| {
-                    LuaError::external(format!("unknown Luau task handle {task_id}"))
-                })?;
-                // Report a failed projection with its own message, as a
-                // failed task run is reported.
-                if let Err(error) = resolve_projection_inputs(&lua, &host, &task.inputs).await {
-                    let message = error.to_string();
-                    host.borrow_mut()
-                        .task_failure
-                        .get_or_insert(message.clone());
-                    return Err(LuaError::external(message));
-                }
-                let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
-                let returns_outputs = !task.outputs.is_empty();
-                let exec = create_task_exec(&lua, &host, &configuration, &inputs, returns_outputs)?;
-                host.borrow_mut().graph_callback_depth += 1;
-                let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
-                host.borrow_mut().graph_callback_depth -= 1;
-                // The run callback can catch a failed action with `pcall`.
-                // When the callback then raises its own error, report that
-                // error and not the action failure. When the error is the
-                // action failure, keep the action message, because it has no
-                // Luau traceback.
-                let result = result.map_err(|error| {
-                    let message = error.to_string();
-                    if !is_host_error(&error) {
-                        host.borrow_mut().task_failure = Some(message.clone());
-                    }
-                    LuaError::external(message)
-                })?;
-                // When the callback returns, a caught action failure does not
-                // fail the task.
-                host.borrow_mut().task_failure = None;
-                let outputs = validate_task_result(&lua, &host, &task, result)?;
-                host.borrow_mut().task_results.insert(task_id, outputs);
+            let scope = invocation_mode(&host.borrow());
+            let result = resolve_mode_handle(&lua, &host, &configuration, id, &scope, &[]).await;
+            if let Err(error) = &result {
+                host.borrow_mut()
+                    .task_failure
+                    .get_or_insert(error.to_string());
             }
-            let result = host
-                .borrow()
-                .task_results
-                .get(&task_id)
-                .cloned()
-                .ok_or_else(|| LuaError::external("Luau task did not produce a result"))?;
-            match output_name {
-                Some(name) => result.get::<LuaValue>(name),
-                None => Ok(LuaValue::Table(result)),
-            }
+            result.map(|result| result.value)
         }
     })?;
     lua.globals().set("__imp_execute_task", execute)
+}
+
+type ExecAliases = Rc<HashMap<u64, LuaAnyUserData>>;
+
+fn execution_aliases(declared: &LuaTable, resolved: &LuaTable) -> LuaResult<ExecAliases> {
+    let mut aliases = HashMap::new();
+    for pair in declared.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        if let LuaValue::UserData(value) = value {
+            if let Ok(handle) = value.borrow::<GraphHandle>() {
+                if let LuaValue::UserData(resolved) = resolved.get::<LuaValue>(key)? {
+                    aliases.insert(handle.id, resolved);
+                }
+            }
+        }
+    }
+    Ok(Rc::new(aliases))
+}
+
+fn scoped_exec_handle(aliases: &ExecAliases, handle: LuaAnyUserData) -> LuaResult<LuaAnyUserData> {
+    let id = handle.borrow::<GraphHandle>()?.id;
+    Ok(aliases.get(&id).cloned().unwrap_or(handle))
+}
+
+fn scoped_action_options(
+    lua: &Lua,
+    options: &LuaTable,
+    aliases: &ExecAliases,
+) -> LuaResult<LuaTable> {
+    let scoped = lua.create_table()?;
+    for pair in options.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        scoped.set(key, value)?;
+    }
+    if let Some(inputs) = options.get::<Option<LuaTable>>("inputs")? {
+        let bound = lua.create_table()?;
+        for pair in inputs.pairs::<LuaValue, LuaValue>() {
+            let (key, value) = pair?;
+            let value = match value {
+                LuaValue::UserData(handle) if handle.is::<GraphHandle>() => {
+                    LuaValue::UserData(scoped_exec_handle(aliases, handle)?)
+                }
+                value => value,
+            };
+            bound.set(key, value)?;
+        }
+        scoped.set("inputs", bound)?;
+    }
+    Ok(scoped)
 }
 
 fn create_task_exec(
@@ -1562,15 +2014,20 @@ fn create_task_exec(
     host: &Rc<RefCell<HostState>>,
     configuration: &Rc<RefCell<ConfigurationState>>,
     inputs: &LuaTable,
+    declared_inputs: &LuaTable,
     returns_outputs: bool,
+    config_digest: &str,
 ) -> LuaResult<LuaTable> {
     let exec = lua.create_table()?;
+    let aliases = execution_aliases(declared_inputs, inputs)?;
     let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
     let path_host = Rc::clone(host);
     let path_inputs = inputs.clone();
+    let path_aliases = Rc::clone(&aliases);
     exec.set(
                     "path",
                     lua.create_function(move |_, handle: LuaAnyUserData| {
+                        let handle = scoped_exec_handle(&path_aliases, handle)?;
                         let graph_handle = handle.borrow::<GraphHandle>()?;
                         require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
                         let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
@@ -1586,9 +2043,11 @@ fn create_task_exec(
                 )?;
     let tool_dir_host = Rc::clone(host);
     let tool_dir_inputs = inputs.clone();
+    let tool_dir_aliases = Rc::clone(&aliases);
     exec.set(
         "tool_dir",
         lua.create_function(move |lua, handle: LuaAnyUserData| {
+            let handle = scoped_exec_handle(&tool_dir_aliases, handle)?;
             let id = handle.borrow::<GraphHandle>()?.id;
             exec_tool_dir(lua, &tool_dir_host, &tool_dir_inputs, id)
         })?,
@@ -1597,9 +2056,11 @@ fn create_task_exec(
         let fileset_host = Rc::clone(host);
         let fileset_inputs = inputs.clone();
         let fileset_captures = Rc::clone(&captures);
+        let fileset_aliases = Rc::clone(&aliases);
         exec.set(
             name,
             lua.create_function(move |lua, handle: LuaAnyUserData| {
+                let handle = scoped_exec_handle(&fileset_aliases, handle)?;
                 let id = handle.borrow::<GraphHandle>()?.id;
                 let function = format!("exec.{name}");
                 // An artifact handle is a resolved task input or
@@ -1637,6 +2098,8 @@ fn create_task_exec(
             })?,
         )?;
     }
+    let action_aliases = Rc::clone(&aliases);
+    let action_config_digest = config_digest.to_owned();
     let action_host = Rc::clone(host);
     let action_configuration = Rc::clone(configuration);
     let action_lua = lua.clone();
@@ -1645,12 +2108,15 @@ fn create_task_exec(
     exec.set(
         "action",
         lua.create_async_function(move |_, options: LuaTable| {
+            let action_aliases = Rc::clone(&action_aliases);
+            let config_digest = action_config_digest.clone();
             let action_host = Rc::clone(&action_host);
             let action_configuration = Rc::clone(&action_configuration);
             let action_inputs = action_inputs.clone();
             let action_lua = action_lua.clone();
             let action_captures = Rc::clone(&action_captures);
             async move {
+                let options = scoped_action_options(&action_lua, &options, &action_aliases)?;
                 match run_action(
                     action_lua,
                     Rc::clone(&action_host),
@@ -1658,6 +2124,7 @@ fn create_task_exec(
                     options,
                     action_inputs,
                     action_captures,
+                    config_digest,
                 )
                 .await
                 {
@@ -1727,7 +2194,7 @@ async fn run_cache_details(
     }
     let previous = host.borrow_mut().cached_tool_bindings.replace(bindings);
     let result = async {
-        let exec = create_task_exec(&lua, host, configuration, &inputs, true)?;
+        let exec = create_task_exec(&lua, host, configuration, &inputs, &inputs, true, "")?;
         let run: LuaFunction = options.get("run")?;
         host.borrow_mut().graph_callback_depth += 1;
         let result = run.call_async::<Option<String>>((exec, inputs)).await;
@@ -1890,7 +2357,8 @@ fn push_goal_entry(
 /// A task root whose task declares exactly one output resolves to that
 /// output's value. Other roots keep the value that the task executor returned.
 fn single_output_value(host: &HostState, handle_id: u64, value: LuaValue) -> LuaResult<LuaValue> {
-    let Some(GraphNode::Task) = host.nodes.get(&handle_id) else {
+    let (handle_id, node) = unconfigured_node(host, handle_id);
+    let Some(GraphNode::Task) = node else {
         return Ok(value);
     };
     let Some(task) = host.tasks.get(&handle_id) else {
@@ -1915,20 +2383,17 @@ fn require_graph_declaration(host: &Rc<RefCell<HostState>>) -> LuaResult<()> {
     Ok(())
 }
 
-async fn describe_program(
+async fn describe_program_scoped(
     lua: &Lua,
     host: &Rc<RefCell<HostState>>,
     configuration: &Rc<RefCell<ConfigurationState>>,
     program: Program,
+    scope: &ModeScope,
 ) -> LuaResult<LuaValue> {
-    let roots = input_task_roots(&host.borrow(), &program.inputs).map_err(LuaError::external)?;
-    let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
-    for root in roots {
-        execute.call_async::<()>(root).await?;
-    }
-    resolve_projection_inputs(lua, host, &program.inputs).await?;
-    let inputs = resolve_task_inputs(lua, host, &program.inputs)?;
-    let exec = create_task_exec(lua, host, configuration, &inputs, true)?;
+    let (inputs, _) =
+        resolve_mode_inputs(lua, host, configuration, &program.inputs, scope, &[]).await?;
+    let aliases = execution_aliases(&program.inputs, &inputs)?;
+    let exec = create_task_exec(lua, host, configuration, &inputs, &program.inputs, true, "")?;
     exec.set("action", LuaValue::Nil)?;
     exec.set("worker_start", LuaValue::Nil)?;
     let previous = program.loader.stack.replace(program.stack);
@@ -1998,7 +2463,15 @@ async fn describe_program(
                 }
             )));
         }
-        result.set(field, values)?;
+        if field == "tools" {
+            let bound = lua.create_table()?;
+            for (index, tool) in values.sequence_values::<LuaAnyUserData>().enumerate() {
+                bound.set(index + 1, scoped_exec_handle(&aliases, tool?)?)?;
+            }
+            result.set(field, bound)?;
+        } else {
+            result.set(field, values)?;
+        }
     }
     if !matches!(
         result.get::<LuaValue>("display")?,
@@ -2102,180 +2575,6 @@ fn plain_goal_value(
     }
 }
 
-fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
-    fn visit(
-        host: &HostState,
-        id: u64,
-        visiting: &mut Vec<u64>,
-        visited: &mut std::collections::HashSet<u64>,
-        order: &mut Vec<u64>,
-    ) -> LuaResult<()> {
-        if visited.contains(&id) {
-            return Ok(());
-        }
-        if visiting.contains(&id) {
-            return Err(LuaError::external(format!(
-                "cyclic Luau task dependency at {id}"
-            )));
-        }
-        let task = host
-            .tasks
-            .get(&id)
-            .ok_or_else(|| LuaError::external(format!("unknown Luau task handle {id}")))?;
-        visiting.push(id);
-        for pair in task.inputs.pairs::<LuaValue, LuaValue>() {
-            let (_, value) = pair?;
-            let LuaValue::UserData(value) = value else {
-                continue;
-            };
-            let Ok(handle) = value.borrow::<GraphHandle>() else {
-                continue;
-            };
-            match host.nodes.get(&handle.id) {
-                Some(GraphNode::Program(_)) => {
-                    return Err(LuaError::external("a program cannot be a task input"));
-                }
-                Some(GraphNode::TaskOutput { task_id, .. }) => {
-                    visit(host, *task_id, visiting, visited, order)?;
-                }
-                Some(GraphNode::Path { source_id, .. })
-                | Some(GraphNode::Tool { source_id, .. }) => {
-                    let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(source_id)
-                    else {
-                        return Err(LuaError::external(
-                            "invalid Luau tool or path source handle",
-                        ));
-                    };
-                    visit(host, *task_id, visiting, visited, order)?;
-                }
-                _ => {}
-            }
-        }
-        visiting.pop();
-        visited.insert(id);
-        order.push(id);
-        Ok(())
-    }
-
-    let mut order = Vec::new();
-    visit(
-        host,
-        root,
-        &mut Vec::new(),
-        &mut std::collections::HashSet::new(),
-        &mut order,
-    )?;
-    Ok(order)
-}
-
-fn resolve_task_inputs(
-    lua: &Lua,
-    host: &Rc<RefCell<HostState>>,
-    inputs: &LuaTable,
-) -> LuaResult<LuaTable> {
-    let resolved = lua.create_table()?;
-    for pair in inputs.pairs::<LuaValue, LuaValue>() {
-        let (key, value) = pair?;
-        let value = if let LuaValue::UserData(userdata) = &value {
-            if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                let projected = host.borrow().projection_values.get(&handle.id).cloned();
-                if let Some(projected) = projected {
-                    projected
-                } else if handle.kind == "task_output" {
-                    let node = host.borrow().nodes.get(&handle.id).cloned();
-                    let Some(GraphNode::TaskOutput { task_id, name }) = node else {
-                        return Err(LuaError::external("invalid Luau task output handle"));
-                    };
-                    let result = host
-                        .borrow()
-                        .task_results
-                        .get(&task_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            LuaError::external("Luau task dependency did not produce a result")
-                        })?;
-                    result.get::<LuaValue>(name)?
-                } else {
-                    value
-                }
-            } else {
-                value
-            }
-        } else {
-            value
-        };
-        resolved.set(key, value)?;
-    }
-    Ok(resolved)
-}
-
-/// Resolve each `expansion:get(key, workflow, facet?)` handle in `inputs`:
-/// discover the expansion, then execute the selected child. The task inputs
-/// then receive the value of the child, as they do for a task output.
-async fn resolve_projection_inputs(
-    lua: &Lua,
-    host: &Rc<RefCell<HostState>>,
-    inputs: &LuaTable,
-) -> LuaResult<()> {
-    let mut projections = Vec::new();
-    for pair in inputs.pairs::<LuaValue, LuaValue>() {
-        let (_, value) = pair?;
-        let LuaValue::UserData(userdata) = value else {
-            continue;
-        };
-        let Ok(handle) = userdata.borrow::<GraphHandle>() else {
-            continue;
-        };
-        let host = host.borrow();
-        if host.projection_values.contains_key(&handle.id) {
-            continue;
-        }
-        if let Some(GraphNode::ExpansionAll { .. }) = host.nodes.get(&handle.id) {
-            return Err(LuaError::external(
-                "an expansion:all() handle cannot be a task input; use expansion:get()",
-            ));
-        }
-        if let Some(GraphNode::ExpansionGet {
-            expansion_id,
-            key,
-            workflow,
-            facet,
-        }) = host.nodes.get(&handle.id)
-        {
-            projections.push((
-                handle.id,
-                *expansion_id,
-                key.clone(),
-                workflow.clone(),
-                facet.clone(),
-            ));
-        }
-    }
-    for (projection_id, expansion_id, key, workflow, facet) in projections {
-        let discover = lua
-            .globals()
-            .get::<LuaFunction>("__imp_discover_expansion")?;
-        let children = discover.call_async::<LuaTable>(expansion_id).await?;
-        let child_id =
-            expansion_child_handle(&host.borrow(), &children, &key, &workflow, facet.as_deref())
-                .map_err(|error| LuaError::external(format!("{error:#}")))?;
-        if !matches!(
-            host.borrow().nodes.get(&child_id),
-            Some(GraphNode::Task | GraphNode::TaskOutput { .. })
-        ) {
-            return Err(LuaError::external(format!(
-                "expansion child '{key}' {workflow} must be a task or task output to be a task input"
-            )));
-        }
-        let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
-        let value = execute.call_async::<LuaValue>(child_id).await?;
-        host.borrow_mut()
-            .projection_values
-            .insert(projection_id, value);
-    }
-    Ok(())
-}
-
 /// The handle id of `children[key][workflow][facet?]`, the child that an
 /// expansion projection selects.
 fn expansion_child_handle(
@@ -2368,95 +2667,22 @@ fn validate_task_result(
     Ok(result)
 }
 
-fn install_expansion_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
-    let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
-    let discover = lua.create_async_function(move |lua, expansion_id: u64| {
-        let existing = host.borrow().expansion_results.get(&expansion_id).cloned();
-        let expansion = host.borrow().expansions.get(&expansion_id).cloned();
+fn install_expansion_executor(
+    lua: &Lua,
+    host: Rc<RefCell<HostState>>,
+    configuration: Rc<RefCell<ConfigurationState>>,
+) -> LuaResult<()> {
+    let discover = lua.create_async_function(move |lua, id: u64| {
         let host = Rc::clone(&host);
-        let execute = execute.clone();
+        let configuration = Rc::clone(&configuration);
         async move {
-            if let Some(result) = existing {
-                return Ok(LuaValue::Table(result));
-            }
-            let expansion = expansion.ok_or_else(|| {
-                LuaError::external(format!("unknown Luau expansion {expansion_id}"))
-            })?;
-            let input_tasks = {
-                let host_state = host.borrow();
-                input_task_roots(&host_state, &expansion.inputs)?
-            };
-            for task_id in input_tasks {
-                execute
-                    .call_async::<()>(task_id)
-                    .await
-                    .map_err(|error| LuaError::external(error.to_string()))?;
-            }
-            let inputs = resolve_task_inputs(&lua, &host, &expansion.inputs)?;
-            host.borrow_mut().graph_callback_depth += 1;
-            let children = expansion.create.call_async::<LuaValue>(inputs).await;
-            host.borrow_mut().graph_callback_depth -= 1;
-            let children = children.map_err(|error| {
-                LuaError::external(format!("expansion '{}' failed: {error}", expansion.display))
-            })?;
-            let LuaValue::Table(children) = children else {
-                return Err(LuaError::external(format!(
-                    "expansion '{}' must return a keyed table",
-                    expansion.display
-                )));
-            };
-            for pair in children.pairs::<String, LuaValue>() {
-                let (key, _) = pair.map_err(|error| {
-                    LuaError::external(format!(
-                        "expansion '{}' child keys must be strings: {error}",
-                        expansion.display
-                    ))
-                })?;
-                if key.is_empty() {
-                    return Err(LuaError::external(format!(
-                        "expansion '{}' returned an empty child key",
-                        expansion.display
-                    )));
-                }
-            }
-            host.borrow_mut()
-                .expansion_results
-                .insert(expansion_id, children.clone());
-            Ok(LuaValue::Table(children))
+            let scope = invocation_mode(&host.borrow());
+            discover_mode_expansion(&lua, &host, &configuration, id, &scope, &[])
+                .await
+                .map(|(children, _)| children)
         }
     })?;
     lua.globals().set("__imp_discover_expansion", discover)
-}
-
-fn input_task_roots(host: &HostState, inputs: &LuaTable) -> LuaResult<Vec<u64>> {
-    let mut roots = std::collections::BTreeSet::new();
-    for pair in inputs.pairs::<LuaValue, LuaValue>() {
-        let (_, value) = pair?;
-        let LuaValue::UserData(userdata) = value else {
-            continue;
-        };
-        let Ok(handle) = userdata.borrow::<GraphHandle>() else {
-            continue;
-        };
-        match host.nodes.get(&handle.id) {
-            Some(GraphNode::Program(_)) => {
-                return Err(LuaError::external("a program cannot be a graph input"))
-            }
-            Some(GraphNode::Task) => {
-                roots.insert(handle.id);
-            }
-            Some(GraphNode::TaskOutput { task_id, .. }) => {
-                roots.insert(*task_id);
-            }
-            Some(GraphNode::Path { source_id, .. }) | Some(GraphNode::Tool { source_id, .. }) => {
-                if let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(source_id) {
-                    roots.insert(*task_id);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(roots.into_iter().collect())
 }
 
 fn create_core(
@@ -2470,6 +2696,134 @@ fn create_core(
     core.set("BUILD", "BUILD")?;
     core.set("PACKAGE", "PACKAGE")?;
     core.set("TEST", "TEST")?;
+
+    let axis_config = Rc::clone(&configuration);
+    let axis_host = Rc::clone(&host);
+    core.set(
+        "define_mode_axis",
+        lua.create_function(move |_, (name, options): (String, LuaTable)| {
+            validate_config_namespace(&name)?;
+            let definition: serde_json::Value =
+                serde_json::to_value(options).map_err(LuaError::external)?;
+            crate::spike::validate_mode_axis_definition(&name, &definition)
+                .map_err(LuaError::external)?;
+            let effective = axis_host
+                .borrow_mut()
+                .invocation_mode
+                .entry(name.clone())
+                .or_insert_with(|| {
+                    definition["default"]
+                        .as_str()
+                        .expect("validated default")
+                        .to_owned()
+                })
+                .clone();
+            let mut state = axis_config.borrow_mut();
+            if let Some(mode) = state
+                .invocation_values
+                .as_mut()
+                .and_then(|values| values.get_mut("imp.mode"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                mode.entry(name.clone())
+                    .or_insert(serde_json::Value::String(effective));
+            }
+            state.mode_axes.insert(name, definition);
+            Ok(())
+        })?,
+    )?;
+    let profile_config = Rc::clone(&configuration);
+    core.set(
+        "define_profile",
+        lua.create_function(move |_, (name, values): (String, LuaTable)| {
+            validate_config_namespace(&name)?;
+            let mut values = values
+                .pairs::<String, LuaValue>()
+                .map(|pair| {
+                    let (key, value) = pair?;
+                    Ok((
+                        key,
+                        serde_json::to_value(value).map_err(LuaError::external)?,
+                    ))
+                })
+                .collect::<LuaResult<serde_json::Map<String, serde_json::Value>>>()?;
+            // Empty Luau tables encode as arrays. This field is a map.
+            if let Some(defines) = values
+                .get_mut("odin")
+                .and_then(|value| value.get_mut("defines"))
+            {
+                if defines.as_array().is_some_and(Vec::is_empty) {
+                    *defines = serde_json::json!({});
+                }
+            }
+            let values = serde_json::Value::Object(values);
+            profile_config
+                .borrow_mut()
+                .mode_profiles
+                .insert(name, values);
+            Ok(())
+        })?,
+    )?;
+    let semantic = lua.create_table()?;
+    let mode_host = Rc::clone(&host);
+    semantic.set(
+        "mode",
+        lua.create_function(move |lua, axis: String| {
+            require_graph_declaration(&mode_host)?;
+            if axis.is_empty() {
+                return Err(LuaError::external(
+                    "semantic.mode requires a non-empty axis name",
+                ));
+            }
+            let handle = allocate_handle(&mode_host, "semantic");
+            mode_host
+                .borrow_mut()
+                .nodes
+                .insert(handle.id, GraphNode::Mode(axis));
+            lua.create_userdata(handle)
+        })?,
+    )?;
+    core.set("semantic", semantic)?;
+    let configured_host = Rc::clone(&host);
+    let configured_config = Rc::clone(&configuration);
+    core.set(
+        "configured",
+        lua.create_function(
+            move |lua, (source, overrides): (LuaAnyUserData, LuaTable)| {
+                require_graph_declaration(&configured_host)?;
+                let source = source.borrow::<GraphHandle>()?.clone();
+                let overrides: ModeScope = overrides
+                    .pairs::<LuaValue, LuaValue>()
+                    .map(|pair| {
+                        let (LuaValue::String(key), LuaValue::String(value)) = pair? else {
+                            return Err(LuaError::external(
+                                "configured overrides must map axis names to strings",
+                            ));
+                        };
+                        Ok((key.to_str()?.to_owned(), value.to_str()?.to_owned()))
+                    })
+                    .collect::<LuaResult<_>>()?;
+                if overrides.is_empty() {
+                    return Err(LuaError::external("configured overrides must not be empty"));
+                }
+                let (_, output_select) = crate::spike::classify_mode_overrides(
+                    &configured_config.borrow().mode_axes,
+                    &overrides,
+                    "configured",
+                )
+                .map_err(LuaError::external)?;
+                if !output_select.is_empty() {
+                    return Err(LuaError::external("configured only accepts rebuild axes"));
+                }
+                lua.create_userdata(configured_handle(
+                    lua,
+                    &configured_host,
+                    &source,
+                    overrides,
+                )?)
+            },
+        )?,
+    )?;
 
     let expansion_host = Rc::clone(&host);
     core.set(
@@ -2819,6 +3173,9 @@ fn create_core(
             validate_config_namespace(&namespace)?;
             let value: serde_json::Value = serde_json::to_value(value)
                 .map_err(|error| LuaError::external(format!("serialize config value: {error}")))?;
+            if namespace == "imp.mode" {
+                return Err(LuaError::external("imp.mode is reserved for mode axes"));
+            }
             let mut state = config_state.borrow_mut();
             let existing = state
                 .values
@@ -2835,7 +3192,15 @@ fn create_core(
         lua.create_function(
             move |lua, (namespace, fallback): (String, Option<LuaValue>)| {
                 validate_config_namespace(&namespace)?;
-                let value = config_state.borrow().values.get(&namespace).cloned();
+                let state = config_state.borrow();
+                let mut value = state.values.get(&namespace).cloned();
+                if let Some(patch) = state
+                    .invocation_values
+                    .as_ref()
+                    .and_then(|values| values.get(&namespace))
+                {
+                    merge_config_json(value.get_or_insert(serde_json::Value::Null), patch.clone());
+                }
                 match value {
                     Some(value) => lua.to_value(&value),
                     None => Ok(fallback.unwrap_or(LuaValue::Nil)),
@@ -3637,8 +4002,8 @@ async fn with_test_fake(
             FakeKind::Diff => state.fakes.diff = Some(recorder.clone()),
         }
         state.task_results.clear();
+        state.resolved_inputs.clear();
         state.expansion_results.clear();
-        state.projection_values.clear();
     }
     let result = body.call_async::<LuaMultiValue>(recorder).await;
     {
@@ -3655,8 +4020,8 @@ async fn with_test_fake(
             FakeKind::Diff => state.fakes.diff = None,
         }
         state.task_results.clear();
+        state.resolved_inputs.clear();
         state.expansion_results.clear();
-        state.projection_values.clear();
     }
     result
 }
@@ -3752,13 +4117,14 @@ fn install_test_host_api(
                     }
                     handle.id
                 };
-                let program = match host.borrow().nodes.get(&id) {
+                let program = match unconfigured_node(&host.borrow(), id).1 {
                     Some(GraphNode::Program(program)) => Some(program.clone()),
                     _ => None,
                 };
                 let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+                let scope = scoped_node(&host.borrow(), id, &invocation_mode(&host.borrow())).1;
                 let result = if let Some(program) = program {
-                    describe_program(&lua, &host, &configuration, program).await
+                    describe_program_scoped(&lua, &host, &configuration, program, &scope).await
                 } else {
                     execute.call_async::<LuaValue>(id).await
                 };
@@ -3997,6 +4363,16 @@ fn collect_luau_owned_files(
         return Ok(());
     }
     match host.nodes.get(&node_id) {
+        Some(GraphNode::Configured { source_id, .. }) => {
+            collect_luau_owned_files(
+                workspace_root,
+                host,
+                *source_id,
+                owned,
+                visited_nodes,
+                visited_tables,
+            )?;
+        }
         Some(GraphNode::Files(spec)) => {
             if spec.source_root.is_some() {
                 return Ok(());
@@ -4143,7 +4519,8 @@ fn artifact_output_source(
 ) -> LuaResult<u64> {
     let handle = source.borrow::<GraphHandle>()?;
     let state = host.borrow();
-    let Some(GraphNode::TaskOutput { task_id, name }) = state.nodes.get(&handle.id) else {
+    let Some(GraphNode::TaskOutput { task_id, name }) = unconfigured_node(&state, handle.id).1
+    else {
         return Err(LuaError::external(
             "tool/path source must be a declared task artifact output",
         ));
@@ -4168,15 +4545,17 @@ fn resolve_source_artifact(
     match host.nodes.get(&source_id) {
         Some(GraphNode::Artifact(artifact)) => Ok(artifact.clone()),
         Some(GraphNode::TaskOutput { task_id, name }) => {
-            let result = host.task_results.get(task_id).ok_or_else(|| {
-                LuaError::external("Luau task dependency did not produce a result")
-            })?;
-            let value = result.get::<LuaValue>(name.as_str())?;
-            let LuaValue::UserData(value) = value else {
-                return Err(LuaError::external("task output is not an artifact handle"));
-            };
-            let artifact_handle = value.borrow::<GraphHandle>()?;
-            match host.nodes.get(&artifact_handle.id) {
+            // Only sources that read no axes keep their declared tool/path
+            // handles. Mode-dependent sources bind to artifacts per edge.
+            let result = host
+                .task_results
+                .get(&(*task_id, "{}".to_owned()))
+                .ok_or_else(|| {
+                    LuaError::external("Luau task dependency did not produce a result")
+                })?;
+            let value = result.get::<LuaAnyUserData>(name.as_str())?;
+            let source = value.borrow::<GraphHandle>()?;
+            match host.nodes.get(&source.id) {
                 Some(GraphNode::Artifact(artifact)) => Ok(artifact.clone()),
                 _ => Err(LuaError::external("task output is not an artifact handle")),
             }
@@ -4244,6 +4623,78 @@ fn require_declared_input(inputs: &LuaTable, id: u64, function: &str) -> LuaResu
     Err(LuaError::external(format!(
         "{function}(handle) requires a declared task input"
     )))
+}
+
+fn configured_handle(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    source: &GraphHandle,
+    mut overrides: ModeScope,
+) -> LuaResult<GraphHandle> {
+    let mut source_id = source.id;
+    let node = host.borrow().nodes.get(&source_id).cloned();
+    if let Some(GraphNode::Configured {
+        source_id: inner,
+        overrides: mut merged,
+    }) = node
+    {
+        merged.extend(overrides);
+        overrides = merged;
+        source_id = inner;
+    }
+    let key = (source_id, overrides.clone());
+    if let Some(handle) = host.borrow().configured_handles.get(&key).cloned() {
+        return Ok(handle);
+    }
+    let handle = allocate_handle(host, source.kind);
+    host.borrow_mut().nodes.insert(
+        handle.id,
+        GraphNode::Configured {
+            source_id,
+            overrides: overrides.clone(),
+        },
+    );
+    let outputs = if let Some(outputs) = &source.outputs {
+        let wrapped = lua.create_table()?;
+        for pair in outputs.pairs::<String, LuaAnyUserData>() {
+            let (name, output) = pair?;
+            let output = configured_handle(
+                lua,
+                host,
+                &output.borrow::<GraphHandle>()?.clone(),
+                overrides.clone(),
+            )?;
+            wrapped.set(name, lua.create_userdata(output)?)?;
+        }
+        Some(wrapped)
+    } else {
+        None
+    };
+    let handle = GraphHandle { outputs, ..handle };
+    host.borrow_mut()
+        .configured_handles
+        .insert(key, handle.clone());
+    Ok(handle)
+}
+
+fn scoped_node(host: &HostState, mut id: u64, scope: &ModeScope) -> (u64, ModeScope) {
+    let mut scope = scope.clone();
+    while let Some(GraphNode::Configured {
+        source_id,
+        overrides,
+    }) = host.nodes.get(&id)
+    {
+        scope.extend(overrides.clone());
+        id = *source_id;
+    }
+    (id, scope)
+}
+
+fn unconfigured_node(host: &HostState, mut id: u64) -> (u64, Option<&GraphNode>) {
+    while let Some(GraphNode::Configured { source_id, .. }) = host.nodes.get(&id) {
+        id = *source_id;
+    }
+    (id, host.nodes.get(&id))
 }
 
 fn allocate_handle(host: &Rc<RefCell<HostState>>, kind: &'static str) -> GraphHandle {
@@ -4316,7 +4767,7 @@ fn validate_expansion_child(
     workflow: &str,
     key: &str,
 ) -> Result<()> {
-    let valid = match host.nodes.get(&handle_id) {
+    let valid = match unconfigured_node(host, handle_id).1 {
         Some(
             GraphNode::Task
             | GraphNode::TaskOutput { .. }
@@ -4789,6 +5240,7 @@ async fn run_action(
     options: LuaTable,
     task_inputs: LuaTable,
     captures: FilesetCaptures,
+    config_digest: String,
 ) -> Result<LuaTable> {
     let argv = options
         .get::<Option<Vec<String>>>("argv")
@@ -4896,7 +5348,7 @@ async fn run_action(
         argv,
         display: display.clone(),
         env,
-        config_digest: String::new(),
+        config_digest,
         input_digest,
         outputs: output_specs,
         tools,
@@ -5687,6 +6139,399 @@ mod tests {
             panic!("test module must return a task handle");
         };
         runtime.execute_task(&handle).await.unwrap_err()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_modes_bind_captured_handles_to_each_execution_scope() {
+        let (_, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+core.define_mode_axis("opt", { kind = "rebuild", ["default"] = "debug", values = { "debug", "release" } })
+return { core.test.case("captured mode handles", function()
+    assert(core.configuration("imp.mode").opt == "debug")
+    local provider = core.task({ inputs = { opt = core.semantic.mode("opt"), sh = core.native_tool("sh"), mkdir = core.native_tool("mkdir") },
+        outputs = { dir = core.output.artifact() }, run = function(exec, input)
+            local dir = "runtime-" .. input.opt
+            local result = exec.action({ argv = { "sh", "-c", 'mkdir "$1"; printf %s "$2" > "$1/value.txt"', "provider", dir, input.opt },
+                outputs = { dir = core.output.directory(dir, { named_cache = { name = "mode-captured-review", key = input.opt } }) } })
+            return { dir = result.outputs.dir }
+        end })
+    local path = core.path(provider.outputs.dir)
+    local tool = core.tool(provider.outputs.dir, { name = "runtime", bin_dirs = {} })
+    local unrelated = core.path(core.task({ outputs = { dir = core.output.artifact() }, run = function() error("must not run") end }).outputs.dir)
+    local consumer = core.task({ inputs = { path = path, tool = tool, opt = core.semantic.mode("opt"), sh = core.native_tool("sh"), cat = core.native_tool("cat") },
+        outputs = { text = core.output.value() }, run = function(exec, input)
+            assert(exec.path(path) == "runtime-" .. input.opt)
+            local ok, err = pcall(exec.path, unrelated)
+            assert(not ok and string.find(tostring(err), "requires a declared task input", 1, true))
+            exec.action({ argv = { "sh", "-c", 'test "$(cat "$1/value.txt")" = "$3" && test "$(cat "$2/value.txt")" = "$3"', "consumer", exec.path(path), exec.tool_dir(tool), input.opt }, inputs = { path } })
+            return { text = input.opt }
+        end })
+    assert(core.test.resolve(consumer.outputs.text) == "debug")
+    assert(core.test.resolve(core.configured(consumer, { opt = "release" }).outputs.text) == "release")
+    local program = core.program({ inputs = { path = path, tool = tool, artifact = provider.outputs.dir }, describe = function(exec)
+        return { argv = { "echo", exec.path(path) }, tools = { tool }, inputs = { exec.digest(provider.outputs.dir) } }
+    end })
+    assert(core.test.resolve(core.configured(program, { opt = "release" })).argv[2] == "runtime-release")
+    local debug_path = core.configured(path, { opt = "debug" })
+    local release_path = core.configured(path, { opt = "release" })
+    local both = core.task({ inputs = { debug = debug_path, release = release_path }, outputs = { text = core.output.value() }, run = function(exec)
+        return { text = exec.path(debug_path) .. "|" .. exec.path(release_path) }
+    end })
+    assert(core.test.resolve(both.outputs.text) == "runtime-debug|runtime-release")
+end) }
+"#).await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn luau_modes_configured_test_roots_preserve_profile_and_case_isolation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("imp.workspace.luau"), r#"
+local core = require("@imp/core")
+core.define_mode_axis("opt", { kind = "rebuild", ["default"] = "debug", values = { "debug", "release" } })
+core.define_profile("shipping", { odin = { defines = { SHIPPING = "true" } } })
+core.configure("odin", { defines = { BASE = "true" } })
+return {}
+"#).unwrap();
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
+return { tests = { [test.TEST] = core.configured(core.test_root(), { opt = "release" }) } }
+"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("mode.test.luau"), r#"
+local core = require("@imp/core")
+local function check()
+    assert(core.configuration("imp.mode").opt == "release")
+    local task = core.task({ inputs = { opt = core.semantic.mode("opt") }, outputs = { text = core.output.value() }, run = function(_, input) return { text = input.opt } end })
+    assert(core.test.resolve(task.outputs.text) == "release")
+    assert(core.configuration("case_private") == nil)
+    core.configure("case_private", { touched = true })
+    assert(core.configuration("case_private").touched)
+    core.configure("odin", { defines = { LOCAL = "true", SHIPPING = "false" } })
+    local defines = core.configuration("odin").defines
+    assert(defines.BASE == "true" and defines.LOCAL == "true" and defines.SHIPPING == "true")
+end
+return { core.test.case("first", check), core.test.case("second", check) }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        runtime
+            .set_invocation_mode(serde_json::json!({"opt": "debug"}), Some("shipping"))
+            .unwrap();
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(report.contains("test: 2/2 unit(s) passed"), "{report}");
+        assert!(!runtime
+            .configuration
+            .borrow()
+            .values
+            .contains_key("case_private"));
+        assert_eq!(
+            runtime.configuration.borrow().values["odin"]["defines"]["SHIPPING"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_modes_repository_probe_matches_javascript_fork_and_share_contract() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = crate::loader::RulesSource::discover();
+        let rules = source.root().unwrap();
+        fs::copy(
+            rules.join("imp/config/example/BUILD.luau"),
+            workspace.path().join("BUILD.luau"),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), &rules).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let root_id = roots[0].handle_id as u64;
+        for (opt, report, actions) in [
+            ("debug", "leaf:debug|leaf:release|shared:none", 3),
+            ("release", "leaf:release|leaf:release|shared:none", 5),
+        ] {
+            runtime
+                .set_invocation_mode(serde_json::json!({"opt": opt}), None)
+                .unwrap();
+            runtime
+                .execute_graph(
+                    "build",
+                    &roots,
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let state = runtime.host.borrow();
+            let result = state
+                .task_results
+                .iter()
+                .find(|((id, _), _)| *id == root_id)
+                .unwrap()
+                .1;
+            assert_eq!(result.get::<String>("report").unwrap(), report);
+            assert_eq!(state.action_count, actions);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_modes_scope_persistent_action_cache_to_read_axes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        let source = r#"
+local core = require("@imp/core")
+core.define_mode_axis("opt", { kind = "rebuild", values = { "debug", "release" }, ["default"] = "debug" })
+core.goal("verify", function() end)
+local function stamp(name, inputs)
+    inputs.sh = core.native_tool("sh")
+    return core.task({ inputs = inputs, outputs = { artifact = core.output.artifact() }, run = function(exec)
+        local result = exec.action({ argv = { "sh", "-c", "printf '%s' '$UNIQUE' > " .. name }, outputs = { file = core.output.file(name) } })
+        return { artifact = result.outputs.file }
+    end })
+end
+return { leaf = { VERIFY = stamp("leaf", { opt = core.semantic.mode("opt") }) }, shared = { VERIFY = stamp("shared", {}) } }
+"#.replace("$UNIQUE", workspace.path().file_name().unwrap().to_str().unwrap());
+        fs::write(workspace.path().join("BUILD.luau"), source).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        for (mode, expected_hits) in [("debug", 0), ("release", 1), ("release", 3), ("debug", 5)] {
+            runtime
+                .set_invocation_mode(serde_json::json!({"opt": mode}), None)
+                .unwrap();
+            runtime
+                .execute_graph(
+                    "verify",
+                    &roots,
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(runtime.cache_hit_count(), expected_hits, "mode {mode}");
+        }
+        assert_eq!(runtime.action_count(), 8);
+    }
+
+    #[tokio::test]
+    async fn luau_modes_fork_tasks_outputs_expansions_and_program_inputs() {
+        let (workspace, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+core.define_mode_axis("opt", { kind = "rebuild", values = { "debug", "release" }, ["default"] = "debug" })
+return { core.test.case("mode graph", function()
+    local counts = { leaf = 0, shared = 0, discover = 0, pinned = 0 }
+    local shared = core.task({ outputs = { text = core.output.value() }, run = function()
+        counts.shared += 1; return { text = "shared" }
+    end })
+    local leaf = core.task({ inputs = { opt = core.semantic.mode("opt"), shared = shared.outputs.text },
+        outputs = { text = core.output.value() }, run = function(_, input)
+            counts.leaf += 1; return { text = input.opt .. ":" .. input.shared }
+        end })
+    local release = core.configured(leaf, { opt = "release" })
+    assert(core.test.resolve(leaf.outputs.text) == "debug:shared")
+    assert(core.test.resolve(release.outputs.text) == "release:shared")
+    assert(core.test.resolve(core.configured(release, { opt = "debug" }).outputs.text) == "debug:shared")
+    local pinned = core.task({ inputs = { text = release.outputs.text }, outputs = { text = core.output.value() },
+        run = function(_, input) counts.pinned += 1; return input end })
+    assert(core.test.resolve(pinned.outputs.text) == "release:shared")
+    assert(core.test.resolve(core.configured(pinned, { opt = "release" }).outputs.text) == "release:shared")
+    assert(counts.pinned == 1)
+    local expansion = core.expand({ inputs = { opt = core.semantic.mode("opt") }, create = function(input)
+        counts.discover += 1
+        return { child = { BUILD = core.task({ outputs = { text = core.output.value() }, run = function()
+            return { text = input.opt }
+        end }) } }
+    end })
+    local child = expansion:get("child", "BUILD")
+    local consume = core.task({ inputs = { text = child }, outputs = { text = core.output.value() }, run = function(_, input) return input end })
+    assert(core.test.resolve(consume.outputs.text).text == "debug")
+    assert(core.test.resolve(core.configured(consume, { opt = "release" }).outputs.text).text == "release")
+    assert(counts.discover == 2)
+    local blind_expansion = core.expand({ create = function()
+        counts.discover += 1; return { child = { BUILD = leaf } }
+    end })
+    local blind_child = core.task({ inputs = { child = blind_expansion:get("child", "BUILD") },
+        outputs = { text = core.output.value() }, run = function(_, input) return { text = input.child.text } end })
+    assert(core.test.resolve(core.configured(blind_child, { opt = "debug" }).outputs.text) == "debug:shared")
+    assert(core.test.resolve(core.configured(blind_child, { opt = "release" }).outputs.text) == "release:shared")
+    assert(counts.discover == 3)
+    local program = core.program({ inputs = { text = leaf.outputs.text }, describe = function(_, input)
+        return { argv = { "echo", input.text } }
+    end })
+    assert(core.test.resolve(core.configured(program, { opt = "release" })).argv[2] == "release:shared")
+    assert(counts.leaf == 2 and counts.shared == 1)
+    core.test.with_fake_run(function()
+        local provider = core.task({ outputs = { dir = core.output.artifact() }, run = function(exec)
+            local output = exec.action({ argv = { "unused" }, outputs = { dir = core.output.directory("runtime", { named_cache = { name = "mode-identity", key = "v1" } }) } })
+            return { dir = output.outputs.dir }
+        end })
+        local tool = core.tool(provider.outputs.dir, { name = "runtime", bin_dirs = {} })
+        local path = core.path(provider.outputs.dir)
+        local consumer = core.task({ inputs = { tool = tool, path = path }, run = function(exec, input)
+            assert(input.tool == tool and input.path == path)
+            assert(exec.path(path) == "runtime")
+            assert(string.find(exec.tool_dir(tool), "mode-identity", 1, true))
+        end })
+        core.test.resolve(consumer)
+    end)
+end) }
+"#).await;
+        assert!(workspace.path().exists());
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn luau_modes_resolve_profiles_before_discovery_and_clear_failed_invocations() {
+        use crate::spike::{self, AuthoringRuntime, GoalExecutionOptions, GoalSelection};
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("imp.workspace.luau"), r#"
+local core = require("@imp/core")
+core.define_profile("release", { opt = "release", odin = { defines = { SHIPPING = "true" } } })
+core.define_profile("empty", { odin = { defines = {} } })
+core.define_profile("defaults", {})
+core.define_mode_axis("opt", { kind = "rebuild", values = { "debug", "release" }, ["default"] = "debug" })
+return {}
+"#).unwrap();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+core.goal("verify", function() end)
+local child = core.task({ inputs = { opt = core.semantic.mode("opt") }, run = function(_, input)
+    assert(input.opt == core.configuration("imp.mode").opt)
+    if input.opt == "release" then assert(core.configuration("odin").defines.SHIPPING == "true") end
+end })
+local expansion = core.expand({ inputs = { opt = core.semantic.mode("opt") }, create = function(input)
+    assert(input.opt == core.configuration("imp.mode").opt)
+    return { child = { VERIFY = child } }
+end })
+local pinned_child = core.task({ inputs = { opt = core.semantic.mode("opt") }, run = function(_, input)
+    assert(input.opt == "release")
+end })
+local pinned_expansion = core.expand({ inputs = { opt = core.semantic.mode("opt") }, create = function(input)
+    assert(input.opt == "release")
+    return { child = { VERIFY = pinned_child } }
+end })
+return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIFY = core.configured(pinned_expansion:all("VERIFY"), { opt = "release" }) } }
+"#).unwrap();
+        let live = spike::load_workspace_with_runtime(
+            workspace.path(),
+            crate::loader::RulesSource::discover(),
+            Arc::new(imp_execution::service::LocalExecutionService::new()),
+            Some(AuthoringRuntime::Luau),
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        ));
+        for (profile, axes, expected) in [
+            (None, vec![], "debug"),
+            (Some("release"), vec![], "release"),
+            (Some("release"), vec!["opt=debug".to_owned()], "debug"),
+        ] {
+            assert_eq!(
+                spike::resolve_mode_axes(&live, profile, &axes).unwrap()["opt"],
+                expected
+            );
+            spike::execute_goal_live_selection(
+                &live,
+                workspace.path(),
+                &crate::selector::SelectorContext::root(),
+                "verify",
+                GoalSelection::Selectors(&["//:probe".to_owned()]),
+                GoalExecutionOptions {
+                    no_cache: false,
+                    trace_inputs: false,
+                    js_workers: 1,
+                    flags: serde_json::json!({}),
+                    run_args: &[],
+                    axis_overrides: &axes,
+                    profile,
+                },
+            )
+            .await
+            .unwrap();
+            let luau = live.luau.as_ref().unwrap().borrow();
+            assert!(luau.configuration.borrow().invocation_values.is_none());
+            assert!(luau.host.borrow().invocation_mode.is_empty());
+        }
+        spike::execute_goal_live_selection(
+            &live,
+            workspace.path(),
+            &crate::selector::SelectorContext::root(),
+            "verify",
+            GoalSelection::Selectors(&["//:pinned".to_owned()]),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+        let error = spike::execute_goal_live_selection(
+            &live,
+            workspace.path(),
+            &crate::selector::SelectorContext::root(),
+            "verify",
+            GoalSelection::Selectors(&["//:missing".to_owned()]),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profile: Some("release"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("missing"));
+        assert!(live
+            .luau
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .configuration
+            .borrow()
+            .invocation_values
+            .is_none());
+        for (profile, axes, part) in [
+            (Some("missing"), vec![], "undeclared mode profile"),
+            (None, vec!["unknown=x".to_owned()], "undeclared mode axis"),
+            (None, vec!["opt=invalid".to_owned()], "not a valid value"),
+        ] {
+            assert!(spike::resolve_mode_axes(&live, profile, &axes)
+                .unwrap_err()
+                .to_string()
+                .contains(part));
+        }
     }
 
     #[tokio::test]

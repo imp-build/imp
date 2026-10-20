@@ -784,6 +784,11 @@ pub(crate) async fn load_workspace_with_runtime(
         let mut luau = crate::luau::LuauWorkspace::new_with_service(&root, rules_root, service)?;
         live.workspace.graph.roots = luau.load_modules().await?;
         live.workspace.workspace_config = luau.workspace_config();
+        {
+            let mut host = live.host_state.lock().unwrap();
+            (host.mode_axes, host.mode_profiles) = luau.mode_registry();
+            host.workspace_config = luau.workspace_config();
+        }
         live.workspace.config_schemas = luau.configuration_schemas();
         // Luau workflow modules register their own goals. The JavaScript
         // seed goals do not apply to a Luau workspace.
@@ -3673,53 +3678,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             let def: serde_json::Value = serde_json::from_str(&def_json).map_err(|e| {
                 rquickjs::Error::new_loading_message("defineModeAxis", format!("parse def: {e}"))
             })?;
-            let Some(obj) = def.as_object() else {
-                return Err(rquickjs::Error::new_loading_message(
-                    "defineModeAxis",
-                    "definition must be an object",
-                ));
-            };
-            if !obj.contains_key("default") {
-                return Err(rquickjs::Error::new_loading_message(
-                    "defineModeAxis",
-                    "definition must include a \"default\" value",
-                ));
-            }
-            let Some(default) = obj.get("default").and_then(|value| value.as_str()) else {
-                return Err(rquickjs::Error::new_loading_message(
-                    "defineModeAxis",
-                    "\"default\" must be a string",
-                ));
-            };
-            match obj.get("kind").and_then(|k| k.as_str()) {
-                Some("rebuild") | Some("output-select") => {}
-                _ => {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "defineModeAxis",
-                        "\"kind\" must be \"rebuild\" or \"output-select\"",
-                    ));
-                }
-            }
-            if let Some(values) = obj.get("values") {
-                let Some(values) = values.as_array() else {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "defineModeAxis",
-                        "\"values\" must be an array of strings",
-                    ));
-                };
-                if !values.iter().all(|value| value.as_str().is_some()) {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "defineModeAxis",
-                        "\"values\" must be an array of strings",
-                    ));
-                }
-                if !values.iter().any(|value| value.as_str() == Some(default)) {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "defineModeAxis",
-                        "\"default\" must be included in \"values\" when values are declared",
-                    ));
-                }
-            }
+            validate_mode_axis_definition(&name, &def)?;
             state_mode_axes.lock().unwrap().mode_axes.insert(name, def);
             Ok(())
         },
@@ -6914,15 +6873,64 @@ pub struct GoalExecutionOptions<'a> {
     pub profile: Option<&'a str>,
 }
 
-/// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
-/// via `defineModeAxis` and write the fully-defaulted result into the live
-/// `"imp.mode"` config namespace, before any target executes.
-/// Check a set of `axis=value` overrides against the declared axes and split
-/// them by axis kind: `rebuild` values make a different node, `output-select`
-/// values pick a result the producer already made. `api` names the caller in
-/// the error message, because more than one API accepts overrides
-/// (`link()` on the memo path, `configured()` on the graph path).
-fn classify_mode_overrides(
+/// Validate an axis declaration for either authoring runtime.
+pub(crate) fn validate_mode_axis_definition(
+    name: &str,
+    def: &serde_json::Value,
+) -> rquickjs::Result<()> {
+    validate_config_namespace(name)?;
+    let Some(obj) = def.as_object() else {
+        return Err(rquickjs::Error::new_loading_message(
+            "defineModeAxis",
+            "definition must be an object",
+        ));
+    };
+    if !obj.contains_key("default") {
+        return Err(rquickjs::Error::new_loading_message(
+            "defineModeAxis",
+            "definition must include a \"default\" value",
+        ));
+    }
+    let Some(default) = obj.get("default").and_then(|value| value.as_str()) else {
+        return Err(rquickjs::Error::new_loading_message(
+            "defineModeAxis",
+            "\"default\" must be a string",
+        ));
+    };
+    match obj.get("kind").and_then(|k| k.as_str()) {
+        Some("rebuild") | Some("output-select") => {}
+        _ => {
+            return Err(rquickjs::Error::new_loading_message(
+                "defineModeAxis",
+                "\"kind\" must be \"rebuild\" or \"output-select\"",
+            ));
+        }
+    }
+    if let Some(values) = obj.get("values") {
+        let Some(values) = values.as_array() else {
+            return Err(rquickjs::Error::new_loading_message(
+                "defineModeAxis",
+                "\"values\" must be an array of strings",
+            ));
+        };
+        if !values.iter().all(|value| value.as_str().is_some()) {
+            return Err(rquickjs::Error::new_loading_message(
+                "defineModeAxis",
+                "\"values\" must be an array of strings",
+            ));
+        }
+        if !values.iter().any(|value| value.as_str() == Some(default)) {
+            return Err(rquickjs::Error::new_loading_message(
+                "defineModeAxis",
+                "\"default\" must be included in \"values\" when values are declared",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Split validated overrides into rebuild and output-selection axes.
+pub(crate) fn classify_mode_overrides(
     mode_axes: &BTreeMap<String, serde_json::Value>,
     overrides: &BTreeMap<String, String>,
     api: &str,
@@ -6969,6 +6977,7 @@ fn validate_mode_axis_value(
     Ok(())
 }
 
+/// Resolve invocation modes before graph discovery and install them in both hosts.
 pub fn resolve_mode_axes(
     live: &LiveWorkspace,
     profile_name: Option<&str>,
@@ -6978,7 +6987,24 @@ pub fn resolve_mode_axes(
     let mode_axes = hs.mode_axes.clone();
     let mode_profiles = hs.mode_profiles.clone();
 
-    for (profile_name, profile) in &mode_profiles {
+    let resolved = resolve_mode_registry(&mode_axes, &mode_profiles, profile_name, axis_overrides)?;
+    hs.workspace_config
+        .insert(MODE_AXIS_NAMESPACE.to_owned(), resolved.clone());
+    drop(hs);
+    if let Some(luau) = &live.luau {
+        luau.borrow_mut()
+            .set_invocation_mode(resolved.clone(), profile_name)?;
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn resolve_mode_registry(
+    mode_axes: &BTreeMap<String, serde_json::Value>,
+    mode_profiles: &BTreeMap<String, serde_json::Value>,
+    profile_name: Option<&str>,
+    axis_overrides: &[String],
+) -> Result<serde_json::Value> {
+    for (profile_name, profile) in mode_profiles {
         let values = profile
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("profile '{profile_name}' values must be an object"))?;
@@ -7048,7 +7074,7 @@ pub fn resolve_mode_axes(
     }
 
     let mut resolved = serde_json::Map::new();
-    for (name, def) in &mode_axes {
+    for (name, def) in mode_axes {
         let value = overrides
             .get(name)
             .map(|v| serde_json::Value::String(v.clone()))
@@ -7061,8 +7087,6 @@ pub fn resolve_mode_axes(
         resolved.insert(name.clone(), value);
     }
     let resolved = serde_json::Value::Object(resolved);
-    hs.workspace_config
-        .insert(MODE_AXIS_NAMESPACE.to_owned(), resolved.clone());
     Ok(resolved)
 }
 
@@ -7086,21 +7110,28 @@ fn invocation_config(
     Ok(config)
 }
 
-struct InvocationConfigGuard {
+struct InvocationConfigGuard<'a> {
+    luau: Option<&'a std::cell::RefCell<crate::luau::LuauWorkspace>>,
     state: Arc<Mutex<HostState>>,
 }
 
-impl InvocationConfigGuard {
-    fn install(live: &LiveWorkspace, config: BTreeMap<String, serde_json::Value>) -> Self {
+impl<'a> InvocationConfigGuard<'a> {
+    fn install(live: &'a LiveWorkspace, config: BTreeMap<String, serde_json::Value>) -> Self {
         let state = Arc::clone(&live.host_state);
         state.lock().unwrap().active_invocation_config = Some(config);
-        Self { state }
+        Self {
+            state,
+            luau: live.luau.as_ref(),
+        }
     }
 }
 
-impl Drop for InvocationConfigGuard {
+impl Drop for InvocationConfigGuard<'_> {
     fn drop(&mut self) {
         self.state.lock().unwrap().active_invocation_config = None;
+        if let Some(luau) = self.luau {
+            luau.borrow_mut().clear_invocation_mode();
+        }
     }
 }
 

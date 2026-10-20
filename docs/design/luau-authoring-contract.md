@@ -585,6 +585,73 @@ modules may return a table keyed by registered configuration namespace; the
 CI table deep-merges over the workspace table. Rule modules register their
 namespaces before the workspace configuration is validated.
 
+## Build modes
+
+Rule authors can declare mode axes and named profiles through `@imp/core`.
+Require `@imp/rules/imp/mode` from the workspace module to register the `opt`
+axis and the `default` and `release` profiles.
+
+| API | Arguments | Result |
+| --- | --- | --- |
+| `define_mode_axis(name, options)` | A namespace name and the option table below. | Registers an axis. |
+| `define_profile(name, values)` | A namespace name and a table of axis names to string values. The optional `odin` entry contains a `defines` table of non-empty names to strings. | Registers a named profile. Profiles may precede their axes. |
+| `semantic.mode(name)` | A non-empty axis name. | Declares a task, expansion, or program input. The input resolves to the axis value during invocation. An undeclared axis resolves to `nil`. |
+| `configured(handle, overrides)` | A graph handle and a non-empty table of declared rebuild axes to valid string values. | Pins the axes on that dependency and forwards its named outputs. |
+
+The `define_mode_axis` option table has these fields:
+
+| Field | Required | Value |
+| --- | --- | --- |
+| `kind` | Yes | `"rebuild"` or `"output-select"`. `configured()` accepts rebuild axes only. |
+| `["default"]` | Yes | A string. Use brackets to match the JavaScript option name. |
+| `values` | No | A list of allowed strings. When present, it must include the default. |
+
+From a workspace that declares these modes, use `imp build //:app --profile
+release` or `imp build //:app --axis opt=release`. CLI axis values override
+the selected profile. The selected profile overrides axis defaults. No
+profile is selected when `--profile` is absent. Repeated `--axis` entries use
+the last value for each axis. Imp validates all declared profiles before
+selection or discovery. The `imp.mode` configuration namespace is reserved;
+use axis declarations instead of `configure("imp.mode", ...)`.
+
+`configured()` applies its overrides to the dependency subtree. Nested calls
+use the outer value when both calls set the same axis. A task runs once for
+each distinct set of effective values of the axes its inputs read. A task
+that reads no axes stays shared. Pinned axes do not make consumers vary with
+the invocation's value of those axes. Action cache keys use the same axis
+values. Expansion discovery reads its own inputs; selected children can read
+additional axes. Discovery and goal execution share results within one
+invocation.
+
+Task and program callbacks can pass declared tool and path handles to their
+`exec` helpers. Imp binds those handles to the callback's effective mode.
+Configured test roots pass their pinned modes to discovery and each test
+case. Each case receives an independent copy of the workspace configuration
+and profile overrides.
+
+**Illustrative example** for a rule module:
+
+```lua
+local core = require("@imp/core")
+require("@imp/rules/imp/mode")
+
+local leaf = core.task({
+    inputs = { opt = core.semantic.mode("opt") },
+    outputs = { text = core.output.value() },
+    run = function(_exec, input)
+        return { text = input.opt }
+    end,
+})
+local release = core.configured(leaf, { opt = "release" })
+```
+
+From this repository's root, run `IMP_RUNTIME=luau imp build
+//rules/imp/config/example:probe`. The probe combines the ambient leaf, a
+release leaf, and a task that reads no axes. With the default mode, its report
+is `leaf:debug|leaf:release|shared:none`. The leaf runs twice and the shared
+task runs once. With `--profile release`, the two leaf dependencies share one
+execution.
+
 ## Workspace configuration
 
 Luau rule modules use `define_config_schema(namespace, shape)` to register a

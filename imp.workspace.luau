@@ -18,4 +18,6 @@ require("@imp/rules/workflows/publish")
 require("@imp/rules/workflows/run")
 require("@imp/rules/workflows/test")
 
+require("@imp/rules/imp/mode")
+
 return {}
