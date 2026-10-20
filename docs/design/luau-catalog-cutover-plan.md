@@ -294,3 +294,17 @@ Remove QuickJS only after all conditions below pass on
 Record every command result. Keep code failures, toolchain failures, and
 environment failures separate. A focused pass does not replace a failed broad
 gate.
+
+## OCI package port
+
+The OCI package has Luau image rules, Crane acquisition, BUILD discovery, and
+focused tests. JavaScript remains available. The Luau port rejects layer
+traversal and encodes image configuration with private string-array and
+string-map helpers. The consumer check under `rules/oci/testdata` exercises
+local composition, packaging, hashes, metadata, fresh-build determinism, and
+Crane acquisition. Registry publication is covered with fake actions.
+
+The OCI guide documents Luau now. Generated Luau references remain deferred
+to `2026-09-30-integrate-luau-workspace-tests-and-docs`; the OCI task's
+reference-generation acceptance criterion is therefore not fully met by this
+package port alone.
