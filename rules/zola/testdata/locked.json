@@ -1,0 +1,19 @@
+{
+  "tool": "zola",
+  "versions": {
+    "0.23.6": {
+      "linux/x86_64": {
+        "url": "https://locked.example/zola",
+        "artifact": "zola",
+        "size": 42,
+        "sha256": "deadbeef"
+      },
+      "windows/x86_64": {
+        "url": "https://locked.example/zola",
+        "artifact": "zola",
+        "size": 42,
+        "sha256": "deadbeef"
+      }
+    }
+  }
+}

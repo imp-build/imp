@@ -308,3 +308,16 @@ The OCI guide documents Luau now. Generated Luau references remain deferred
 to `2026-09-30-integrate-luau-workspace-tests-and-docs`; the OCI task's
 reference-generation acceptance criterion is therefore not fully met by this
 package port alone.
+
+## Zola package port
+
+The Zola package provides Luau toolchain declarations, graph acquisition,
+lockfile generation roots, BUILD discovery, and focused tests. JavaScript
+remains available for the existing documentation build. The consumer check
+under `rules/zola/testdata` acquires the pinned default release and checks
+site builds, packaging, source edits, and failure propagation.
+
+The Zola guide documents Luau now. Generated Luau references remain deferred
+to `2026-09-30-integrate-luau-workspace-tests-and-docs`. The Zola task's
+reference-generation acceptance criterion remains incomplete until that work
+lands.
