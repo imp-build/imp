@@ -19,15 +19,30 @@ Rule authors on the migration branch can use the PEX and uv toolchains from
 Luau. The Python application, runtime, and Ruff examples below still use
 JavaScript. These APIs are separate until their migration tasks are complete.
 
-In `imp.workspace.luau`, declare and export the lockfile generation targets:
+In `imp.workspace.luau`, register the lockfile workflow:
+
+```lua
+require("@imp/rules/workflows/lockfiles")
+return {}
+```
+
+Workspace configuration registers workflows. BUILD exports create selectable
+target addresses. In `BUILD.luau` at the workspace root, declare and export
+the lockfile generation targets:
 
 ```lua
 local pex = require("@imp/rules/python/pex_toolchain")
 local uv = require("@imp/rules/python/uv_toolchain")
 
 return {
-    pex = pex.pex_toolchain("2.102.0", { default = true }),
-    uv = uv.uv_toolchain("0.12.13", { default = true }),
+    pex = pex.pex_toolchain("2.102.0", {
+        default = true,
+        lockfile = "@workspace/locks/pex.lock",
+    }),
+    uv = uv.uv_toolchain("0.12.13", {
+        default = true,
+        lockfile = "@workspace/locks/uv.lock",
+    }),
 }
 ```
 
@@ -45,6 +60,16 @@ From that workspace root, generate the declared lockfiles with:
 
 ```sh
 IMP_RUNTIME=luau imp goal gen-lockfiles //:pex //:uv
+```
+
+The command selects the two BUILD exports and writes `locks/pex.lock` and
+`locks/uv.lock`.
+
+Contributors can check target discovery for this example without downloads.
+From the Imp checkout root, after building `target/debug/imp`, run:
+
+```sh
+python3 rules/python/testdata/consumer_check.py --imp target/debug/imp
 ```
 
 For execution, `graph_toolchain(version)` returns `tool`, `cache_tool`, and
