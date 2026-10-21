@@ -2114,6 +2114,46 @@ fn create_task_exec(
     exec_options: &TaskExecOptions,
 ) -> LuaResult<LuaTable> {
     let exec = lua.create_table()?;
+    let file_host = Rc::clone(host);
+    exec.set(
+        "file",
+        lua.create_function(move |lua, options: LuaTable| {
+            for pair in options.pairs::<String, LuaValue>() {
+                let (key, _) = pair?;
+                if key != "path" && key != "contents" {
+                    return Err(LuaError::external(format!(
+                        "exec.file options do not accept '{key}'"
+                    )));
+                }
+            }
+            let path: String = options.get("path")?;
+            validate_output_path(&path)?;
+            if imp_store::digest::is_root_artifact_path(&path) {
+                return Err(LuaError::external("exec.file path must name a file"));
+            }
+            let contents: LuaString = options.get("contents")?;
+            let bytes = contents.as_bytes();
+            let digest =
+                imp_store::cache::store_blob(&bytes, "file").map_err(LuaError::external)?;
+            let artifact = imp_store::cache::CachedArtifact {
+                artifact_id: format!("content:{digest}:{path}"),
+                kind: "file".to_owned(),
+                path: Some(path),
+                value: None,
+                digest,
+                bytes: Some(bytes.len() as u64),
+                mode: None,
+                tree_digest: None,
+                named_cache: None,
+            };
+            let handle = allocate_handle(&file_host, "artifact");
+            file_host
+                .borrow_mut()
+                .nodes
+                .insert(handle.id, GraphNode::Artifact(artifact));
+            lua.create_userdata(handle)
+        })?,
+    )?;
     let aliases = execution_aliases(declared_inputs, inputs)?;
     let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
     let path_host = Rc::clone(host);
@@ -2124,7 +2164,9 @@ fn create_task_exec(
                     lua.create_function(move |_, handle: LuaAnyUserData| {
                         let handle = scoped_exec_handle(&path_aliases, handle)?;
                         let graph_handle = handle.borrow::<GraphHandle>()?;
-                        require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
+                        if !matches!(path_host.borrow().nodes.get(&graph_handle.id), Some(GraphNode::Artifact(_))) {
+                            require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
+                        }
                         let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
                             Some(GraphNode::Path { source_id, owner_package }) => (*source_id, owner_package.clone()),
                             Some(GraphNode::Artifact(_)) => (graph_handle.id, String::new()),
@@ -2515,6 +2557,7 @@ async fn describe_program_scoped(
         "",
         &TaskExecOptions::default(),
     )?;
+    exec.set("file", LuaValue::Nil)?;
     exec.set("action", LuaValue::Nil)?;
     exec.set("worker_start", LuaValue::Nil)?;
     let previous = program.loader.stack.replace(program.stack);
@@ -5188,11 +5231,24 @@ fn run_fake_action(
 ) -> Result<LuaTable> {
     let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
     let mut input_count = 0;
+    let recorded_inputs = lua.create_table().map_err(lua_error)?;
     if let Some(inputs) = &request.inputs {
         for value in inputs.sequence_values::<LuaAnyUserData>() {
             let value = value.map_err(lua_error)?;
-            value.borrow::<GraphHandle>().map_err(lua_error)?;
+            let handle = value.borrow::<GraphHandle>().map_err(lua_error)?;
             input_count += 1;
+            if let Some(GraphNode::Artifact(artifact)) = host.borrow().nodes.get(&handle.id) {
+                let record = lua.create_table().map_err(lua_error)?;
+                record
+                    .set("path", artifact.path.clone())
+                    .map_err(lua_error)?;
+                record
+                    .set("digest", normalize_luau_artifact(artifact)?.digest())
+                    .map_err(lua_error)?;
+                recorded_inputs
+                    .set(input_count, record)
+                    .map_err(lua_error)?;
+            }
         }
     }
     let toolchain = host.borrow().fakes.toolchain.clone();
@@ -5282,6 +5338,7 @@ fn run_fake_action(
     }
     record.set("env", env).map_err(lua_error)?;
     record.set("input_count", input_count).map_err(lua_error)?;
+    record.set("inputs", recorded_inputs).map_err(lua_error)?;
     record.set("tools", tool_names).map_err(lua_error)?;
     let recorded_outputs = lua.create_table().map_err(lua_error)?;
 
@@ -7080,7 +7137,7 @@ return { core.test.case("program description", function()
     local tool = core.native_tool("sh")
     local other = core.native_tool("cat")
     local program = core.program({ inputs = { sh = tool }, describe = function(exec, input)
-        assert(exec.action == nil and exec.worker_start == nil)
+        assert(exec.file == nil and exec.action == nil and exec.worker_start == nil)
         fails(function() core.task({ run = function() end }) end, "cannot declare graph nodes")
         fails(function() core.files({ include = { "*" } }) end, "cannot declare graph nodes")
         fails(function() core.run_program({ argv = { "false" } }) end, "cannot launch a program")
@@ -8224,6 +8281,66 @@ return {{
         );
     }
 
+    #[tokio::test]
+    async fn luau_content_artifacts_preserve_bytes_and_feed_sandboxed_actions() {
+        let source = r#"
+local core = require("@imp/core")
+
+    local producer = core.task({
+        outputs = { file = core.output.artifact() },
+        run = function(exec)
+            for _, path in ipairs({ "", ".", "../escape", "/absolute" }) do
+                assert(not pcall(exec.file, { path = path, contents = "bad" }), path)
+            end
+            assert(not pcall(exec.file, { path = "ok", contents = "", extra = true }))
+            local empty = exec.file({ path = "empty", contents = "" })
+            assert(core.read_file_in_digest(exec.digest(empty), "empty") == "")
+            local contents = string.rep("payload", 40000) .. "\0é\n"
+            local file = exec.file({ path = "source/data", contents = contents })
+            local same = exec.file({ path = "source/data", contents = contents })
+            assert(exec.digest(file) == exec.digest(same))
+            local changed = exec.file({ path = "source/data", contents = contents .. "changed" })
+            assert(exec.digest(file) ~= exec.digest(changed))
+            return { file = file }
+        end,
+    })
+    local consumer = core.task({
+        inputs = { source = producer.outputs.file, sh = core.native_tool("sh"), cp = core.native_tool("cp") },
+        outputs = { checked = core.output.value() },
+        run = function(exec, inputs)
+            local function copy(source)
+                return exec.action({
+                    argv = { "sh", "-c", 'cp "$1" "$2"', "copy", exec.path(source), "copied" },
+                    inputs = { source },
+                    outputs = { file = core.output.file("copied") },
+                }).outputs.file
+            end
+            local contents = string.rep("payload", 40000) .. "\0é\n"
+            local copied = copy(inputs.source)
+            assert(core.read_file_in_digest(exec.digest(copied), "copied") == contents)
+            local repeated = copy(inputs.source)
+            assert(exec.digest(repeated) == exec.digest(copied))
+            local changed = exec.file({ path = "source/data", contents = contents .. "changed" })
+            assert(core.read_file_in_digest(exec.digest(copy(changed)), "copied") == contents .. "changed")
+            return { checked = true }
+        end,
+    })
+return consumer
+"#;
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(workspace_root.path().join("content.luau"), source).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let LuaValue::UserData(task) = runtime.evaluate("@workspace/content").await.unwrap() else {
+            panic!("content module must return a task");
+        };
+        runtime.execute_task(&task).await.unwrap();
+        assert_eq!(runtime.action_count(), 3);
+        assert!(runtime.cache_hit_count() >= 1);
+        assert!(!workspace_root.path().join("copied").exists());
+        assert!(!workspace_root.path().join("source/data").exists());
+    }
+
     /// `gen-lockfiles` downloads and hashes each artifact in a real action,
     /// keeps the versions that the lockfile has, and writes the lockfile into
     /// the workspace at the goal boundary.
@@ -8250,7 +8367,11 @@ return {{
   }
 }
 "#;
-        fs::write(workspace_root.path().join("tools/demo.lock"), existing).unwrap();
+        let existing = existing.replace(
+            "https://example.test/old",
+            &format!("https://example.test/{}", "x".repeat(270_000)),
+        );
+        fs::write(workspace_root.path().join("tools/demo.lock"), &existing).unwrap();
         fs::write(
             workspace_root.path().join("BUILD.luau"),
             format!(
@@ -8281,6 +8402,10 @@ return {{
         .unwrap();
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let roots = runtime.load_modules().await.unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace_root.path().join("tools/demo.lock")).unwrap(),
+            existing
+        );
 
         let report = execute_workflow(
             &mut runtime,
@@ -8319,6 +8444,11 @@ return {{
 "#,
             artifact = artifact.display(),
         );
+        let expected = expected.replace(
+            "https://example.test/old",
+            &format!("https://example.test/{}", "x".repeat(270_000)),
+        );
+        assert!(expected.len() > 262_144);
         assert_eq!(
             fs::read_to_string(workspace_root.path().join("tools/demo.lock")).unwrap(),
             expected

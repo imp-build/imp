@@ -124,7 +124,9 @@ The recorder tables contain these fields:
 - `runs`: one entry for each faked action, in call order. An entry has `argv`,
   `display`, `cache`, `allow_failure`, `env` (the action `env` table only),
   `input_count` (the number of `inputs` handles), `tools` (sorted tool names
-  from the task inputs), and `outputs` (output name to declared path). A faked
+  from the task inputs), `inputs` (artifact entries indexed by input position,
+  each with `path` and a CAS tree `digest`), and `outputs` (output name to
+  declared path). Non-artifact inputs have no entry in `inputs`. A faked
   `core.run_program` call adds an entry with `program = true`, `argv` (with
   the program arguments), `display`, `env`, `inputs` (digests), and the run
   policy fields `impure`, `sandbox`, `workspace_cwd`, and `stream`.
@@ -377,6 +379,7 @@ A task reads a files handle from its `inputs` with these `exec` functions:
 
 | Function | Effect | JavaScript equivalent |
 | --- | --- | --- |
+| `exec.file({ path, contents })` | Stores the exact string bytes in CAS and returns a file artifact. The path must name a relative file within the sandbox. Empty content and embedded NUL bytes are preserved. The function does not write a workspace file or start an action. It is available in task execution, including fake-run scopes, and is absent from program descriptions. | None. |
 | `exec.paths(files)` | Returns the sorted workspace-relative paths of the fileset. | `exec.paths(fileset)` |
 | `exec.digest(files)` | Returns the CAS tree digest of the fileset. The tree holds each file at its workspace-relative path. | `digestOf(fileset)` |
 | `exec.digest(artifact)` | Returns the CAS tree digest of an artifact handle, for example a resolved task input or an output of an `exec.action` call in this task. The tree holds the artifact at its captured path, so `core.read_file_in_digest` can read files that the action wrote. | `artifact.digest` |
@@ -388,7 +391,9 @@ declared task input, or the call fails with `exec.paths(handle) requires a
 declared task input`. A graph handle that is not a files handle fails with
 `exec.paths(handle) requires a files handle`. `exec.digest` fails with the same
 messages, with the prefix `exec.digest(handle)`, except that it also accepts
-an artifact handle. An artifact handle needs no declaration as a task input.
+an artifact handle. An artifact handle needs no declaration as a task input. `exec.path(artifact)`
+also accepts an artifact created in the current task and returns its captured path.
+Artifacts from `exec.file` have real CAS content even in a fake-run scope.
 A placeholder artifact of a faked action has no content in the CAS, so do
 not read it with `core.read_file_in_digest`. In a `core.test.with_fake_run` scope, these functions still capture
 the real workspace files.

@@ -191,7 +191,7 @@ end
 --- The task inputs of a lockfile task: the native tools of the download,
 --- hash, and write scripts.
 local function lock_tool_inputs()
-	local inputs = { sh = core.native_tool("sh") }
+	local inputs = { sh = core.native_tool("sh"), cp = core.native_tool("cp") }
 	for _, name in ipairs(lockfile.locked_download_tools(core.platform_info())) do
 		inputs[name] = core.native_tool(name)
 	end
@@ -232,15 +232,17 @@ end
 
 --- Write `lock` to `path` in an action, and return the artifact.
 local function write_lock(exec, path, lock, platform_orders)
+	local source = exec.file({ path = path .. ".imp-content", contents = encode_lock(lock, platform_orders) })
 	local result = exec.action({
 		argv = {
 			"sh",
 			"-c",
-			'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
+			'mkdir -p "$(dirname "$1")" && cp "$2" "$1"',
 			"lockfile-write",
 			path,
-			encode_lock(lock, platform_orders),
+			exec.path(source),
 		},
+		inputs = { source },
 		outputs = { lockfile = output.file(path) },
 		display = `write {path}`,
 	})

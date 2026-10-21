@@ -67,7 +67,10 @@ end
 local function written_text(runs)
 	local write = runs[#runs]
 	assert(write.display == "write " .. write.outputs.lockfile, write.display)
-	return write.argv[6]
+	local source = write.inputs[1]
+	assert(write.input_count == 1)
+	assert(write.argv[6] == source.path)
+	return core.read_file_in_digest(source.digest, source.path)
 end
 
 --- Call `fn`, require that it fails, and return the error text.
@@ -211,6 +214,7 @@ return {
 		core.test.case("writes the shipped lockfiles with the same bytes", function()
 			for _, address in ipairs({
 				"@imp/rules/zola/zola.lock",
+				"@imp/rules/js/node/node-toolchain.lock",
 				"@imp/rules/odin/odin.lock",
 				"@imp/rules/rust/rust.lock",
 				"@imp/rules/c/gcc/gcc.lock",
