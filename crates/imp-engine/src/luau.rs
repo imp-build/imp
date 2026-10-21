@@ -125,9 +125,27 @@ impl LuaUserData for OutputDeclarationHandle {}
 
 #[derive(Clone)]
 struct Task {
+    exec_options: TaskExecOptions,
     run: LuaFunction,
     inputs: LuaTable,
     outputs: BTreeMap<String, TaskOutputKind>,
+}
+
+#[derive(Clone)]
+struct TaskExecOptions {
+    returns_outputs: bool,
+    display: Option<String>,
+    cache: bool,
+}
+
+impl Default for TaskExecOptions {
+    fn default() -> Self {
+        Self {
+            returns_outputs: true,
+            display: None,
+            cache: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1777,8 +1795,8 @@ fn resolve_mode_handle<'a>(
                         configuration,
                         &inputs,
                         &task.inputs,
-                        !task.outputs.is_empty(),
                         &salt,
+                        &task.exec_options,
                     )?;
                     host.borrow_mut().graph_callback_depth += 1;
                     let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
@@ -2040,8 +2058,8 @@ fn create_task_exec(
     configuration: &Rc<RefCell<ConfigurationState>>,
     inputs: &LuaTable,
     declared_inputs: &LuaTable,
-    returns_outputs: bool,
     config_digest: &str,
+    exec_options: &TaskExecOptions,
 ) -> LuaResult<LuaTable> {
     let exec = lua.create_table()?;
     let aliases = execution_aliases(declared_inputs, inputs)?;
@@ -2130,6 +2148,7 @@ fn create_task_exec(
     let action_lua = lua.clone();
     let action_inputs = inputs.clone();
     let action_captures = Rc::clone(&captures);
+    let exec_options = exec_options.clone();
     exec.set(
         "action",
         lua.create_async_function(move |_, options: LuaTable| {
@@ -2140,8 +2159,17 @@ fn create_task_exec(
             let action_inputs = action_inputs.clone();
             let action_lua = action_lua.clone();
             let action_captures = Rc::clone(&action_captures);
+            let exec_options = exec_options.clone();
             async move {
                 let options = scoped_action_options(&action_lua, &options, &action_aliases)?;
+                if matches!(options.get::<LuaValue>("display")?, LuaValue::Nil) {
+                    if let Some(display) = &exec_options.display {
+                        options.set("display", display.as_str())?;
+                    }
+                }
+                if !exec_options.cache {
+                    options.set("cache", false)?;
+                }
                 match run_action(
                     action_lua,
                     Rc::clone(&action_host),
@@ -2153,7 +2181,7 @@ fn create_task_exec(
                 )
                 .await
                 {
-                    Ok(result) if returns_outputs => Ok(LuaValue::Table(result)),
+                    Ok(result) if exec_options.returns_outputs => Ok(LuaValue::Table(result)),
                     Ok(_) => Ok(LuaValue::Nil),
                     Err(error) => {
                         action_host.borrow_mut().task_failure = Some(format!("{error:#}"));
@@ -2219,7 +2247,15 @@ async fn run_cache_details(
     }
     let previous = host.borrow_mut().cached_tool_bindings.replace(bindings);
     let result = async {
-        let exec = create_task_exec(&lua, host, configuration, &inputs, &inputs, true, "")?;
+        let exec = create_task_exec(
+            &lua,
+            host,
+            configuration,
+            &inputs,
+            &inputs,
+            "",
+            &TaskExecOptions::default(),
+        )?;
         let run: LuaFunction = options.get("run")?;
         host.borrow_mut().graph_callback_depth += 1;
         let result = run.call_async::<Option<String>>((exec, inputs)).await;
@@ -2418,7 +2454,15 @@ async fn describe_program_scoped(
     let (inputs, _) =
         resolve_mode_inputs(lua, host, configuration, &program.inputs, scope, &[]).await?;
     let aliases = execution_aliases(&program.inputs, &inputs)?;
-    let exec = create_task_exec(lua, host, configuration, &inputs, &program.inputs, true, "")?;
+    let exec = create_task_exec(
+        lua,
+        host,
+        configuration,
+        &inputs,
+        &program.inputs,
+        "",
+        &TaskExecOptions::default(),
+    )?;
     exec.set("action", LuaValue::Nil)?;
     exec.set("worker_start", LuaValue::Nil)?;
     let previous = program.loader.stack.replace(program.stack);
@@ -3380,6 +3424,31 @@ fn create_core(
         "task",
         lua.create_function(move |lua, options: LuaTable| {
             require_graph_declaration(&graph_host)?;
+            for pair in options.pairs::<LuaValue, LuaValue>() {
+                let (key, _) = pair?;
+                let LuaValue::String(key) = key else {
+                    return Err(LuaError::external(format!(
+                        "task options require string keys, got {}",
+                        key.type_name()
+                    )));
+                };
+                let key = key.to_str()?;
+                if !["run", "inputs", "outputs", "display", "cache"].contains(&key.as_ref()) {
+                    return Err(LuaError::external(format!(
+                        "task options do not accept '{key}'"
+                    )));
+                }
+            }
+            let display = match options.get::<LuaValue>("display")? {
+                LuaValue::Nil => None,
+                LuaValue::String(value) => Some(value.to_str()?.to_owned()),
+                _ => return Err(LuaError::external("task.display must be a string")),
+            };
+            let cache = match options.get::<LuaValue>("cache")? {
+                LuaValue::Nil => true,
+                LuaValue::Boolean(value) => value,
+                _ => return Err(LuaError::external("task.cache must be a boolean")),
+            };
             let run = options.get::<LuaFunction>("run")?;
             let inputs = options
                 .get::<Option<LuaTable>>("inputs")?
@@ -3430,6 +3499,11 @@ fn create_core(
                 host.tasks.insert(
                     handle.id,
                     Task {
+                        exec_options: TaskExecOptions {
+                            returns_outputs: !outputs.is_empty(),
+                            display,
+                            cache,
+                        },
                         run,
                         inputs,
                         outputs,
@@ -9858,6 +9932,126 @@ return {
             .path()
             .join("crates/vendor/vendor_crate/BUILD.luau")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn luau_task_options_validate_and_apply_exec_options() {
+        let (_, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+return { core.test.case("task options", function()
+    local function rejects(options, expected)
+        options.run = function() end
+        local ok, message = pcall(core.task, options)
+        assert(not ok, expected)
+        assert(string.find(tostring(message), expected, 1, true), tostring(message))
+    end
+    rejects({ typo = true }, "task options do not accept 'typo'")
+    rejects({ [1] = true }, "task options require string keys")
+    rejects({ [true] = true }, "task options require string keys")
+    for _, value in ipairs({ false, 42, {}, function() end }) do
+        rejects({ display = value }, "task.display must be a string")
+    end
+    for _, value in ipairs({ "false", 0, {}, function() end }) do
+        rejects({ cache = value }, "task.cache must be a boolean")
+    end
+    core.test.with_fake_run(function(host)
+        local requests = {
+            { argv = { "unused", "argument" } },
+            { argv = { "unused" }, display = "explicit", cache = true },
+            { argv = { "unused" }, display = "", cache = false },
+        }
+        for _, task_cache in ipairs({ true, false }) do
+            local calls = 0
+            local task = core.task({
+                display = "task label", cache = task_cache,
+                outputs = { first = core.output.value(), second = core.output.value() },
+                run = function(exec)
+                    calls += 1
+                    for _, request in ipairs(requests) do exec.action(request) end
+                    return { first = calls, second = calls }
+                end,
+            })
+            assert(core.test.resolve(task.outputs.first) == 1)
+            assert(core.test.resolve(task.outputs.second) == 1)
+            assert(calls == 1)
+            local offset = #host.runs - 3
+            assert(host.runs[offset + 1].display == "task label")
+            assert(host.runs[offset + 2].display == "explicit")
+            assert(host.runs[offset + 3].display == "")
+            assert(host.runs[offset + 1].cache == task_cache)
+            assert(host.runs[offset + 2].cache == task_cache)
+            assert(host.runs[offset + 3].cache == false)
+        end
+        assert(requests[1].display == nil and requests[1].cache == nil)
+        assert(requests[2].cache == true)
+        local dependency = core.task({ run = function(exec) exec.action(requests[1]) end })
+        local parent = core.task({ cache = false, display = "parent", inputs = { dependency = dependency },
+            run = function(exec) exec.action(requests[1]) end })
+        core.test.resolve(parent)
+        assert(host.runs[#host.runs - 1].display == "unused argument")
+        assert(host.runs[#host.runs - 1].cache == true)
+        assert(host.runs[#host.runs].display == "parent")
+        assert(host.runs[#host.runs].cache == false)
+        core.test.resolve(core.task({ display = "", run = function(exec) exec.action(requests[1]) end }))
+        assert(host.runs[#host.runs].display == "")
+    end)
+end) }
+"#).await;
+        assert!(report
+            .unwrap()
+            .unwrap()
+            .contains("test: 1/1 unit(s) passed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_task_options_control_real_action_cache_across_invocations() {
+        for cache in [true, false] {
+            let workspace = tempfile::tempdir().unwrap();
+            let rules = rules_tempdir();
+            let unique = workspace.path().to_string_lossy();
+            fs::write(
+                workspace.path().join("task.luau"),
+                format!(
+                    r#"
+local core = require("@imp/core")
+return core.task({{
+    cache = {cache}, display = "task cache test",
+    inputs = {{ sh = core.native_tool("sh") }},
+    outputs = {{ digest = core.output.value() }},
+    run = function(exec)
+        local result = exec.action({{
+            argv = {{ "sh", "-c", "printf payload > result.txt", "{unique}" }},
+            cache = true,
+            outputs = {{ file = core.output.file("result.txt") }},
+        }})
+        return {{ digest = exec.digest(result.outputs.file) }}
+    end,
+}})
+"#
+                ),
+            )
+            .unwrap();
+            let mut digests = Vec::new();
+            for invocation in 0..2 {
+                let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+                let LuaValue::UserData(task) = runtime.evaluate("@workspace/task").await.unwrap()
+                else {
+                    panic!("expected task");
+                };
+                runtime.execute_task(&task).await.unwrap();
+                assert_eq!(runtime.action_count(), 1);
+                assert_eq!(
+                    runtime.cache_hit_count(),
+                    usize::from(cache && invocation == 1)
+                );
+                let results = runtime.host.borrow();
+                let output = results.task_results.values().next().unwrap();
+                digests.push(output.get::<String>("digest").unwrap());
+            }
+            assert_eq!(digests[0], digests[1]);
+            assert!(!workspace.path().join("result.txt").exists());
+        }
     }
 
     #[tokio::test]

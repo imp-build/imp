@@ -328,6 +328,27 @@ task then returns, the task succeeds. When the task raises an error, Imp
 reports that error. Thus a rule can add context to an action failure, such as
 the `imp goal gen-lockfiles` hint of `@imp/rules/imp/lockfile`.
 
+### Task options
+
+`core.task({ run, inputs?, outputs?, display?, cache? })` accepts only these
+five keys. Unknown keys fail at declaration and the error names the key.
+Option keys must be strings. `run` is the required callback; `inputs` and
+`outputs` retain their graph contracts described below.
+
+`display` is an optional string, including an empty string. An action uses
+its own `display` when set, then the task's `display`, then its argv label.
+Task labels do not add scheduler events or change graph identity.
+
+`cache` is an optional boolean that defaults to true. Task `cache = false`
+disables action caching for every action called through that task's `exec`.
+An action's `cache = true` cannot override it. Action `cache = false`
+disables caching even when the task permits it. The same effective options
+apply in host fakes and real execution.
+
+Task results remain reusable within an invocation and mode scope, including
+when `cache = false`. Resolving multiple outputs does not repeat the task
+callback. Task options do not change dependency tasks or interactive programs.
+
 ### Task and action outputs
 
 Read the `output` table from `@imp/core`. A task declares named `output.value()` or
