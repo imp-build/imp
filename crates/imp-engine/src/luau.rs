@@ -3651,6 +3651,11 @@ fn create_core(
             let workspace_root = generation_root.clone();
             let host = Rc::clone(&generation_host);
             async move {
+                if !host.borrow().goal_callback_active {
+                    return Err(LuaError::external(
+                        "core.generate_build() can only run in a goal callback",
+                    ));
+                }
                 let mut edits = BTreeMap::<String, Vec<GeneratedLuauBuildTarget>>::new();
                 for generator in generators {
                     let enabled = configuration
@@ -3922,6 +3927,11 @@ fn create_core(
                         &recorder.raw_get::<LuaTable>("calls")?,
                         LuaValue::Table(call),
                     );
+                }
+                if !write_host.borrow().goal_callback_active {
+                    return Err(LuaError::external(
+                        "core.write_workspace() can only run in a goal callback",
+                    ));
                 }
                 imp_store::cache::write_workspace(
                     &digest,
@@ -8557,8 +8567,8 @@ return {
             assert(fake.calls[2].from == nil)
         end)
         local ok, problem = pcall(core.write_workspace, "dist/app", "sha256:missing")
-        assert(not ok, "the real host must write after the fake scope")
-        assert(string.find(tostring(problem), "publish workspace artifact", 1, true), tostring(problem))
+        assert(not ok, "the real host must reject writes outside a goal callback")
+        assert(string.find(tostring(problem), "core.write_workspace() can only run in a goal callback", 1, true), tostring(problem))
     end),
     core.test.case("run and write workspace fakes together", function()
         local publish = core.task({
@@ -9583,6 +9593,150 @@ return { nested_task = core.task({ run = function() end }) }
             .collect::<Vec<_>>();
         addresses.sort();
         assert_eq!(addresses, ["//:root_task", "//pkg:nested_task"]);
+    }
+
+    #[tokio::test]
+    async fn workspace_effects_require_a_goal_callback() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        let digest = captured_tree(&[("file.txt", "published\n")]);
+        let checks = format!(
+            r#"
+local core = require("@imp/core")
+local function rejects(fn, expected)
+    local ok, problem = pcall(fn)
+    assert(not ok, "expected a goal boundary error")
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+local function check_boundary()
+    for _, check in ipairs({{ false, true }}) do
+        rejects(function() core.generate_build(check) end,
+            "core.generate_build() can only run in a goal callback")
+    end
+    rejects(function() core.write_workspace("published.txt", "{digest}", {{ from = "file.txt" }}) end,
+        "core.write_workspace() can only run in a goal callback")
+end
+"#
+        );
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            format!(
+                r#"{checks}
+core.define_config_schema("sample", {{ build_generate = core.field.bool({{ default = true }}) }})
+core.register_build_generator({{
+    namespace = "sample",
+    generate = function() error("generator must not run outside a goal") end,
+}})
+check_boundary()
+core.goal("probe", function()
+    core.write_workspace("published.txt", "{digest}", {{ from = "file.txt" }})
+    if core.goal_flags().fail then error("callback failed") end
+end, {{ selection = "none", flags = {{ fail = {{}} }} }})
+core.goal("root", function() end)
+return {{ sample = {{ build_generate = true }} }}
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            format!(
+                r#"{checks}
+check_boundary()
+return {{ probe = {{ ROOT = core.task({{ run = function() check_boundary() end }}) }} }}
+"#
+            ),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        execute_workflow(
+            &mut runtime,
+            &roots,
+            "root",
+            &["//:probe"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(!workspace_root.path().join("published.txt").exists());
+        for fail in [false, true] {
+            let result = runtime
+                .execute_graph(
+                    "probe",
+                    &[],
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({ "fail": fail }),
+                    &[],
+                )
+                .await;
+            if fail {
+                let error = result.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("callback failed"),
+                    "{error:#}"
+                );
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(
+                fs::read_to_string(workspace_root.path().join("published.txt")).unwrap(),
+                "published\n"
+            );
+            runtime
+                .run_script_value(
+                    "@imp/boundary-check",
+                    &format!("{checks}\ncheck_boundary()"),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn build_generator_selection_runs_inside_the_goal_callback() {
+        for setting in [None, Some(false), Some(true)] {
+            let workspace_root = tempfile::tempdir().unwrap();
+            let rules_root = rules_tempdir();
+            let config = setting
+                .map(|enabled| {
+                    format!("core.configure(\"sample\", {{ build_generate = {enabled} }})")
+                })
+                .unwrap_or_default();
+            fs::write(
+                workspace_root.path().join("imp.workspace.luau"),
+                format!(
+                    r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/generate_build")
+core.define_config_schema("sample", {{ build_generate = core.field.bool({{ default = false }}) }})
+core.register_build_generator({{
+    namespace = "sample",
+    generate = function() error("enabled generator ran") end,
+}})
+{config}
+return {{}}
+"#
+                ),
+            )
+            .unwrap();
+            let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+            runtime.load_modules().await.unwrap();
+            let result = generate_build(&mut runtime, true).await;
+            if setting == Some(true) {
+                let error = result.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("enabled generator ran"),
+                    "{error:#}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().as_deref(),
+                    Some("generate-build: 0 file(s) checked, 0 out of date")
+                );
+            }
+        }
     }
 
     /// Run the selectorless `generate-build` goal of a loaded workspace.
