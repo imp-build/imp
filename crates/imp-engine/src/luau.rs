@@ -4591,6 +4591,16 @@ fn collect_luau_owned_files(
                 visited_tables,
             )?;
         }
+        Some(GraphNode::TestRoot { package }) => {
+            let files = crate::spike::workspace_glob_files(
+                workspace_root,
+                package,
+                &["**/*".to_owned()],
+                &[],
+            )
+            .with_context(|| format!("expand loaded Luau test package '{package}'"))?;
+            owned.extend(files);
+        }
         Some(GraphNode::Files(spec)) => {
             if spec.source_root.is_some() {
                 return Ok(());
@@ -10280,6 +10290,67 @@ end) }
             .unwrap();
         assert!(generate_build(&mut runtime, false).await.unwrap().is_none());
         assert!(!workspace.path().join("app/BUILD.luau").exists());
+    }
+
+    #[tokio::test]
+    async fn luau_test_roots_own_only_reachable_package_trees() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(
+            workspace.path().join("imp.workspace.luau"),
+            r#"local core = require("@imp/core")
+require("@imp/rules/workflows/test")
+core.define_mode_axis("opt", { kind = "rebuild", ["default"] = "debug", values = { "debug", "release" } })
+return {}
+"#,
+        )
+        .unwrap();
+        for package in ["plain", "configured", "plain_extra", "unexported"] {
+            fs::create_dir_all(workspace.path().join(package).join("nested")).unwrap();
+            for file in ["data.c", "nested/data.c"] {
+                fs::write(workspace.path().join(package).join(file), "fixture").unwrap();
+            }
+            let result = match package {
+                "plain" => "return { tests = { [test.TEST] = root } }",
+                "configured" => "return { tests = { [test.TEST] = core.configured(root, { opt = \"release\" }) } }",
+                _ => "return {}",
+            };
+            fs::write(workspace.path().join(package).join("BUILD.luau"), format!(
+                "local core = require('@imp/core')\nlocal test = require('@imp/rules/workflows/test')\nlocal root = core.test_root()\n{result}\n"
+            )).unwrap();
+        }
+        fs::write(workspace.path().join(".gitignore"), "ignored.c\n").unwrap();
+        fs::write(workspace.path().join("ignored.c"), "ignored").unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        let discover = |runtime: &LuauWorkspace, exclude: &[String]| {
+            all_unowned_workspace_files(
+                workspace.path(),
+                &runtime.host.borrow(),
+                ".",
+                &["**/*.c".to_owned()],
+                exclude,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            discover(&runtime, &[]),
+            [
+                "plain_extra/data.c",
+                "plain_extra/nested/data.c",
+                "unexported/data.c",
+                "unexported/nested/data.c",
+            ]
+        );
+        assert_eq!(
+            discover(&runtime, &["**/nested/**".to_owned()]),
+            ["plain_extra/data.c", "unexported/data.c",]
+        );
+        fs::write(workspace.path().join("BUILD.luau"),
+            "local core = require('@imp/core')\nlocal test = require('@imp/rules/workflows/test')\nreturn { tests = { [test.TEST] = core.test_root() } }\n").unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        assert!(discover(&runtime, &[]).is_empty());
     }
 
     #[tokio::test]

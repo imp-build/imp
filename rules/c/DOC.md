@@ -330,10 +330,11 @@ identifier: it replaces each character that is not a letter, digit, or `_`
 with `_`, and adds a `_` prefix to a name that starts with a digit or is a
 Luau keyword. For example, `1-bad` gives `_1_bad`, and `end` gives `_end`.
 
-The Luau ownership check is different from the JavaScript check. A Luau file
-is owned only when a graph value of a loaded BUILD module uses it.
-`core.test_root()` does not own the files of its package, so the generator
-also finds test data that only test cases use.
+A loaded Luau `core.test_root()` owns the files below its package directory,
+including nested test data, as JavaScript `rulesTest({ root })` does. The
+BUILD generator skips these files. A test-root handle that is not reachable
+from a loaded target does not claim files. Packages without a loaded test
+root still need explicit source ownership.
 
 ## Luau modules
 

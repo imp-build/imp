@@ -280,6 +280,13 @@ slot does not discover a table of named handles. Use one handle per slot;
 a task may return named outputs, and a TEST task may combine unit and
 doctest result lists. Named workflow-facet selection is tracked by
 `2026-10-17-add-luau-named-workflow-facets`.
+
+A loaded `core.test_root()` owns all files below its package directory for
+`core.all_unowned` discovery. This includes nested test data and follows the
+existing Git-ignore rules. Configured test roots have the same ownership.
+A root at the workspace root owns the workspace tree. Constructing a test
+root without making it reachable from a loaded target does not claim files.
+
 A `TEST` slot can also hold `core.test_root()`. Other values, such as tool
 handles, are not roots. A Luau workspace offers only the goals that its loaded
 modules register, so require each workflow module from `imp.workspace.luau` or

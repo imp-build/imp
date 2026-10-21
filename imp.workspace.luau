@@ -19,5 +19,6 @@ require("@imp/rules/workflows/run")
 require("@imp/rules/workflows/test")
 
 require("@imp/rules/imp/mode")
+require("@imp/rules/c/generate_build")
 
-return {}
+return { c = { build_generate = true } }
