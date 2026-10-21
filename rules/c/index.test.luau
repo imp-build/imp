@@ -407,13 +407,32 @@ return {
 			end)
 		end),
 
-		core.test.case("compiles use the debug flags until Luau has mode axes", function()
-			with_cc_host(function(host)
-				core.test.resolve(library()[BUILD])
-				for _, run in ipairs(runs_with(host, "cc compile ")) do
-					assert(contains(run.argv[3], "'-O0' '-g'"), run.argv[3])
-				end
-			end)
+		core.test.case("C rules select mode flags and share axis-blind generated sources", function()
+			for _, declare in ipairs({ c.cc_library, c.cc_binary, c.cc_test }) do
+				with_cc_host(function(host)
+					local generated = c_codegen(`{MIXED}/generated/mode.h`)
+					local target = declare({
+						path = MIXED,
+						toolchain = fake_gcc(),
+						generated_srcs = { generated },
+					})
+					for step, mode in ipairs({ "debug", "release", "debug" }) do
+						core.test.resolve(core.configured(target[BUILD], { opt = mode }))
+						local compiles = runs_with(host, "cc compile ")
+						local expected_count = if step == 1 then 2 else 4
+						assert(#compiles == expected_count, `expected {expected_count} compiles, got {#compiles}`)
+					end
+					local compiles = runs_with(host, "cc compile ")
+					assert(#compiles == 4)
+					for index, run in ipairs(compiles) do
+						local flags = run.argv[3]
+						local debug = index <= 2
+						assert(contains(flags, "'-O0' '-g'") == debug, flags)
+						assert(contains(flags, "'-O2' '-DNDEBUG'") == not debug, flags)
+					end
+					assert(#runs_with(host, "generate ") == 1, "axis-blind generator must run once")
+				end)
+			end
 		end),
 
 		core.test.case("unsafe_system_paths selects the -unsafe-paths compilers and plain ar", function()

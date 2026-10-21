@@ -388,6 +388,11 @@ same way.
 `cc_workload_specs()` returns the declared targets in declaration order. The
 C build generator uses it to find duplicate declarations.
 
+The C rules declare the `opt` mode axis as a task input. `release` selects
+release compile flags. A missing value selects debug flags. Require
+`@imp/rules/imp/mode` from the workspace module to register the axis and
+profiles, then use `--profile release` or `--axis opt=release`.
+
 ### Compiler providers
 
 `gcc.graph_toolchain(version?)`, `zig.graph_toolchain(version?)`, and
@@ -469,9 +474,6 @@ a tool handle that the task declares as an input:
 
 ### Differences from the JavaScript modules
 
-- `cc_library`, `cc_binary`, and `cc_test` always compile with the debug
-  flags. The Luau host has no mode axes yet, so a task cannot read the `opt`
-  axis. `--profile` and `--axis` do not change these targets.
 - The Luau host runs one action at a time. The compile actions of a target
   thus run one after another. Each source still has its own action and its
   own cache entry.

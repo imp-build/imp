@@ -31,8 +31,6 @@
 -- does not examine each header.
 --
 -- Differences from the JavaScript module:
---   - The optimization level is always "debug", the default of the `opt`
---     axis. The Luau host has no mode axes yet.
 --   - The Luau host runs one action at a time, so the compile actions of a
 --     target run one after another.
 --   - BUILD generation from CMakeLists.txt and main() detection is in
@@ -299,7 +297,7 @@ local function cc_task(spec, is_library)
 	-- headers with the same name from dependencies.
 	local include_dirs = concat_lists({ spec.path }, from_deps(spec.deps, "transitive_include_dirs"))
 
-	local inputs = { srcs = srcs, hdrs = hdrs }
+	local inputs = { srcs = srcs, hdrs = hdrs, opt_mode = core.semantic.mode("opt") }
 	for index, generated in ipairs(generated_srcs) do
 		inputs[`generated{index}`] = generated.artifact
 	end
@@ -362,7 +360,7 @@ local function cc_task(spec, is_library)
 					obj_path = obj_path,
 					is_cxx = is_cxx_source(source),
 					include_dirs = include_dirs,
-					opt = "debug",
+					opt = if input.opt_mode == "release" then "release" else "debug",
 					copts = spec.copts,
 					is_shared = is_shared,
 				})
