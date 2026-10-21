@@ -510,6 +510,29 @@ impl Scheduler {
         self.activity.notified().await;
     }
 
+    /// Wait until no jobs remain for the full grace period.
+    pub async fn wait_until_stalled(&self, grace: std::time::Duration) {
+        loop {
+            // Register before reading the count to retain a concurrent change.
+            let activity = self.activity.notified();
+            tokio::pin!(activity);
+            activity.as_mut().enable();
+            if self.outstanding() == 0 {
+                tokio::select! {
+                    biased;
+                    _ = &mut activity => {},
+                    _ = tokio::time::sleep(grace) => {
+                        if self.outstanding() == 0 {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                activity.await;
+            }
+        }
+    }
+
     fn bump_outstanding(&self, delta: isize) {
         if delta >= 0 {
             self.outstanding.fetch_add(delta as usize, Ordering::SeqCst);
@@ -637,6 +660,52 @@ mod tests {
     use super::{Scheduler, TaskEvent, TaskKind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_requires_a_full_idle_grace_period() {
+        use std::time::Duration;
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+        let watcher = Arc::clone(&scheduler);
+        let watchdog = tokio::spawn(async move {
+            watcher.wait_until_stalled(Duration::from_secs(30)).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        scheduler.bump_outstanding(1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(40)).await;
+        assert!(!watchdog.is_finished(), "active work must not stall");
+        scheduler.bump_outstanding(-1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!watchdog.is_finished(), "idle time must restart after work");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        watchdog.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_observes_activity_before_its_next_poll() {
+        use std::time::Duration;
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+        let watcher = Arc::clone(&scheduler);
+        let watchdog = tokio::spawn(async move {
+            watcher.wait_until_stalled(Duration::from_secs(30)).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        scheduler.bump_outstanding(1);
+        scheduler.bump_outstanding(-1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            !watchdog.is_finished(),
+            "brief work must reset the grace period"
+        );
+        tokio::time::advance(Duration::from_secs(29)).await;
+        watchdog.await.unwrap();
+    }
 
     #[tokio::test]
     async fn cache_only_sandbox_job_is_classified_without_starting_a_lane() {

@@ -1830,22 +1830,7 @@ async fn cmd_execute_live_impl(
             }
         }
     };
-    let watchdog = async {
-        loop {
-            if scheduler.outstanding() == 0 {
-                tokio::select! {
-                    _ = scheduler.wait_for_activity() => {}
-                    _ = tokio::time::sleep(STALL_GRACE) => {
-                        if scheduler.outstanding() == 0 {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                scheduler.wait_for_activity().await;
-            }
-        }
-    };
+    let watchdog = scheduler.wait_until_stalled(STALL_GRACE);
     let result = tokio::select! {
         biased;
         r = drive => r,

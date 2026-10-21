@@ -7,3 +7,6 @@ edition.workspace = true
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

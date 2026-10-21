@@ -2687,7 +2687,7 @@ struct RegisterGlobalsArgs {
 /// Binds an executing action's lifecycle to its scheduler job. The newtype is
 /// what lets `imp-exec-api`'s gate trait reach `imp-scheduler`'s `RunContext`;
 /// this is the one crate that can see both.
-struct SchedulerGate<'a>(&'a imp_scheduler::RunContext);
+pub(crate) struct SchedulerGate<'a>(pub(crate) &'a imp_scheduler::RunContext);
 
 impl imp_exec_api::JobGate for SchedulerGate<'_> {
     fn reserve(&self) {
@@ -2704,7 +2704,7 @@ impl imp_exec_api::JobGate for SchedulerGate<'_> {
     }
 }
 
-fn report_cache_telemetry(
+pub(crate) fn report_cache_telemetry(
     run_context: &imp_scheduler::RunContext,
     cache_outcome: imp_exec_api::CacheOutcome,
 ) {
@@ -7231,6 +7231,10 @@ pub async fn execute_goal_live_selection(
     // will. If discovery ran under a different invocation, a value it
     // resolved could not be reused for dispatch. Mode axes are resolved
     // just above, thus every part is known at this point.
+    let _luau_scheduler_guard = live.luau.as_ref().map(|luau| {
+        luau.borrow()
+            .scheduler_scope(live.scheduler.lock().unwrap().clone())
+    });
     let resolved_config = invocation_config(live, profile)?;
     let _invocation_config_guard = InvocationConfigGuard::install(live, resolved_config.clone());
     let goal_invocation_json = {

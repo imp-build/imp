@@ -309,12 +309,24 @@ struct HostState {
     workspace_root: PathBuf,
     workspace_id: String,
     service: Arc<dyn ExecutionService>,
+    scheduler: Option<Arc<imp_scheduler::Scheduler>>,
     cancellation: Arc<AtomicBool>,
     task_failure: Option<String>,
     test_case_active: bool,
     graph_callback_depth: usize,
     program_describing: bool,
     fakes: TestFakes,
+}
+
+pub(crate) struct LuauSchedulerGuard {
+    host: Rc<RefCell<HostState>>,
+    previous: Option<Arc<imp_scheduler::Scheduler>>,
+}
+
+impl Drop for LuauSchedulerGuard {
+    fn drop(&mut self) {
+        self.host.borrow_mut().scheduler = self.previous.take();
+    }
 }
 
 /// Host replacements that a running Luau test case installs with the
@@ -402,6 +414,7 @@ impl LuauWorkspace {
             workspace_id,
             workspace_root: workspace_root.clone(),
             service,
+            scheduler: None,
             cancellation: Arc::new(AtomicBool::new(false)),
             task_failure: None,
             test_case_active: false,
@@ -527,6 +540,17 @@ impl LuauWorkspace {
     pub(crate) fn clear_invocation_mode(&mut self) {
         self.host.borrow_mut().invocation_mode.clear();
         self.configuration.borrow_mut().invocation_values = None;
+    }
+
+    pub(crate) fn scheduler_scope(
+        &self,
+        scheduler: Option<Arc<imp_scheduler::Scheduler>>,
+    ) -> LuauSchedulerGuard {
+        let previous = std::mem::replace(&mut self.host.borrow_mut().scheduler, scheduler);
+        LuauSchedulerGuard {
+            host: Rc::clone(&self.host),
+            previous,
+        }
     }
 
     pub fn begin_graph_run(&mut self, cancellation: Arc<AtomicBool>) {
@@ -1015,6 +1039,7 @@ impl LuauWorkspace {
     fn configure_test_runtime(&self, runtime: &mut Self, scope: &ModeScope) -> Result<()> {
         *runtime.configuration.borrow_mut() = self.configuration.borrow().clone();
         runtime.host.borrow_mut().invocation_mode = scope.clone();
+        runtime.host.borrow_mut().scheduler = self.host.borrow().scheduler.clone();
         runtime
             .configuration
             .borrow_mut()
@@ -5359,12 +5384,33 @@ async fn run_action(
         sandbox_retention: SandboxRetention::OnFailure,
         allow_failure,
     };
-    let execution_cancellation = cancellation;
-    let outcome = tokio::task::spawn_blocking(move || {
-        service.execute(&workspace_id, action, Some(execution_cancellation.as_ref()))
-    })
-    .await
-    .context("join hermetic graph action")??;
+    let scheduler = host.borrow().scheduler.clone();
+    let outcome = if let Some(scheduler) = scheduler {
+        scheduler
+            .run(
+                None,
+                display.clone(),
+                imp_scheduler::TaskKind::Sandbox,
+                1,
+                move |context| {
+                    let outcome = service.execute_with_start(
+                        &workspace_id,
+                        action,
+                        Some(cancellation.as_ref()),
+                        &crate::spike::SchedulerGate(&context),
+                    )?;
+                    crate::spike::report_cache_telemetry(&context, outcome.cache_outcome);
+                    Ok(outcome)
+                },
+            )
+            .await?
+    } else {
+        tokio::task::spawn_blocking(move || {
+            service.execute(&workspace_id, action, Some(cancellation.as_ref()))
+        })
+        .await
+        .context("join hermetic graph action")??
+    };
     if outcome.exit_code != 0 && !allow_failure {
         bail!(
             "graph action '{display}' exited with {}: {}",
@@ -5692,17 +5738,40 @@ async fn run_program(
         allow_failure: false,
         materialize: false,
     };
-    let outcome = tokio::task::spawn_blocking(move || {
-        imp_execution::exec::exec_run_local_with_start(
-            &root,
-            opts,
-            Some(cancellation.as_ref()),
-            None,
-            ui_multi.as_ref(),
-        )
-    })
-    .await
-    .context("join interactive program")?
+    let scheduler = host.borrow().scheduler.clone();
+    let outcome = if let Some(scheduler) = scheduler {
+        scheduler
+            .run(
+                None,
+                display.clone(),
+                imp_scheduler::TaskKind::Sandbox,
+                1,
+                move |context| {
+                    let result = imp_execution::exec::exec_run_local_with_start(
+                        &root,
+                        opts,
+                        Some(cancellation.as_ref()),
+                        Some(&crate::spike::SchedulerGate(&context)),
+                        ui_multi.as_ref(),
+                    )?;
+                    crate::spike::report_cache_telemetry(&context, result.cache_outcome);
+                    Ok(result)
+                },
+            )
+            .await
+    } else {
+        tokio::task::spawn_blocking(move || {
+            imp_execution::exec::exec_run_local_with_start(
+                &root,
+                opts,
+                Some(cancellation.as_ref()),
+                None,
+                ui_multi.as_ref(),
+            )
+        })
+        .await
+        .context("join interactive program")?
+    }
     .with_context(|| format!("run program '{display}'"))?;
     host.borrow_mut().action_count += 1;
     let result = lua.create_table().map_err(lua_error)?;
@@ -6129,6 +6198,191 @@ mod tests {
         rules_root
     }
 
+    #[tokio::test]
+    async fn unresolved_luau_goal_still_triggers_the_idle_watchdog() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let lua = runtime.lua().unwrap();
+        let entered = Arc::new(AtomicBool::new(false));
+        let callback_entered = Arc::clone(&entered);
+        let pending = lua
+            .create_async_function(move |_, _: LuaValue| {
+                callback_entered.store(true, Ordering::SeqCst);
+                async { std::future::pending::<LuaResult<()>>().await }
+            })
+            .unwrap();
+        let core: LuaTable = lua.load("return require('@imp/core')").eval().unwrap();
+        let register: LuaFunction = core.get("goal").unwrap();
+        let options = lua.create_table().unwrap();
+        options.set("selection", "none").unwrap();
+        register.call::<()>(("blocked", pending, options)).unwrap();
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(1, Arc::new(AtomicBool::new(false)), events);
+        let guard = runtime.scheduler_scope(Some(Arc::clone(&scheduler)));
+        let flags = serde_json::json!({});
+        {
+            let goal =
+                runtime.execute_graph("blocked", &[], scheduler.cancellation_flag(), &flags, &[]);
+            tokio::pin!(goal);
+            tokio::select! {
+                biased;
+                result = &mut goal => panic!("blocked goal returned: {result:?}"),
+                _ = scheduler.wait_until_stalled(std::time::Duration::from_millis(30)) => {},
+            }
+        }
+        assert!(entered.load(Ordering::SeqCst));
+        assert_eq!(scheduler.outstanding(), 0);
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_execution_jobs_report_activity_and_release_the_scheduler() {
+        use imp_scheduler::{TaskEvent, TaskOutcome};
+        use std::time::Duration;
+        struct CancelOnDrop(Arc<AtomicBool>);
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for program in [false, true] {
+            for outcome in ["success", "failure", "cancel"] {
+                let root = tempfile::tempdir().unwrap();
+                let rules = rules_tempdir();
+                let release = root.path().join("release");
+                let release_literal = serde_json::to_string(&release.to_string_lossy()).unwrap();
+                let exit = if outcome == "failure" { 7 } else { 0 };
+                let command = format!("while [ ! -f \"$RELEASE\" ]; do :; done; printf job-output; printf job-error >&2; exit {exit}");
+                let command_literal = serde_json::to_string(&command).unwrap();
+                let source = format!(
+                    r#"
+local core = require("@imp/core")
+local sh = core.native_tool("sh")
+local options = {{ argv = {{ "sh", "-c", {command_literal} }}, env = {{ RELEASE = {release_literal} }} }}
+local PROBE = core.goal("probe", function()
+    if {program} then
+        options.tools = {{ sh }}
+        local result = core.run_program(options)
+        assert(result.exit_code == 0)
+    end
+end)
+return {{ job = {{ [PROBE] = core.task({{
+    inputs = {{ sh = sh }}, outputs = {{ status = core.output.value() }}, run = function(exec)
+        if not {program} then
+            local result = exec.action(options)
+            assert(string.find(result.stdout, "job-output", 1, true))
+            assert(string.find(result.stderr, "job-error", 1, true))
+        end
+        return {{ status = true }}
+    end,
+}}) }} }}
+"#
+                );
+                fs::write(root.path().join("BUILD.luau"), source).unwrap();
+                let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+                let roots = runtime.load_modules().await.unwrap();
+                let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let scheduler =
+                    imp_scheduler::Scheduler::new(1, Arc::new(AtomicBool::new(false)), events);
+                let _cancel_on_drop = CancelOnDrop(scheduler.cancellation_flag());
+                let guard = runtime.scheduler_scope(Some(Arc::clone(&scheduler)));
+                let flags = serde_json::json!({});
+                let result = {
+                    let goal = runtime.execute_graph(
+                        "probe",
+                        &roots,
+                        scheduler.cancellation_flag(),
+                        &flags,
+                        &[],
+                    );
+                    tokio::pin!(goal);
+                    let observe = async {
+                        while let Some(event) = receiver.recv().await {
+                            if matches!(event, TaskEvent::LaneStarted { .. }) {
+                                break;
+                            }
+                        }
+                        assert_eq!(scheduler.outstanding(), 1);
+                        assert!(tokio::time::timeout(
+                            Duration::from_millis(60),
+                            scheduler.wait_until_stalled(Duration::from_millis(20))
+                        )
+                        .await
+                        .is_err());
+                        if outcome == "cancel" {
+                            scheduler.cancellation_flag().store(true, Ordering::SeqCst);
+                        } else {
+                            fs::write(&release, "release").unwrap();
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        result = &mut goal => panic!("job returned before release: {result:?}"),
+                        result = tokio::time::timeout(Duration::from_secs(10), observe) => { result.unwrap(); },
+                    }
+                    tokio::time::timeout(Duration::from_secs(10), goal)
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(scheduler.outstanding(), 0);
+                let completed: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+                assert!(
+                    completed.iter().any(|event| matches!(
+                        event,
+                        TaskEvent::Done {
+                            cached: Some(false),
+                            ..
+                        }
+                    )),
+                    "{completed:?}"
+                );
+                if outcome == "success" {
+                    result.unwrap();
+                    if !program {
+                        runtime
+                            .execute_graph(
+                                "probe",
+                                &roots,
+                                scheduler.cancellation_flag(),
+                                &flags,
+                                &[],
+                            )
+                            .await
+                            .unwrap();
+                        let cached: Vec<_> =
+                            std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+                        assert!(
+                            cached.iter().any(|event| matches!(
+                                event,
+                                TaskEvent::Done {
+                                    outcome: TaskOutcome::Ok,
+                                    cached: Some(true),
+                                    cache_source: Some(imp_scheduler::CacheSource::Local),
+                                    ..
+                                }
+                            )),
+                            "{cached:?}"
+                        );
+                    }
+                } else {
+                    let error = format!("{:#}", result.unwrap_err());
+                    assert!(
+                        if outcome == "cancel" {
+                            error.to_lowercase().contains("cancel")
+                        } else {
+                            error.contains('7')
+                        },
+                        "{error}"
+                    );
+                }
+                drop(guard);
+                assert!(runtime.host.borrow().scheduler.is_none());
+            }
+        }
+    }
+
     async fn execute_luau_task_source(source: &str) -> anyhow::Error {
         let workspace_root = tempfile::tempdir().unwrap();
         let rules_root = rules_tempdir();
@@ -6475,6 +6729,7 @@ return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIF
             let luau = live.luau.as_ref().unwrap().borrow();
             assert!(luau.configuration.borrow().invocation_values.is_none());
             assert!(luau.host.borrow().invocation_mode.is_empty());
+            assert!(luau.host.borrow().scheduler.is_none());
         }
         spike::execute_goal_live_selection(
             &live,
@@ -6513,6 +6768,15 @@ return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIF
         .await
         .unwrap_err();
         assert!(format!("{error:#}").contains("missing"));
+        assert!(live
+            .luau
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .host
+            .borrow()
+            .scheduler
+            .is_none());
         assert!(live
             .luau
             .as_ref()
