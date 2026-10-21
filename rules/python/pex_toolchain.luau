@@ -107,6 +107,18 @@ local function reset_for_test()
 	cache_tool = nil
 end
 pex_toolchain("2.102.0", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("pex", function()
+	return core.task({
+		display = "resolve @pex",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = pex_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	PEX = KIND, pex_toolchain = pex_toolchain, graph_toolchain = graph_toolchain,
 	pex_bin = pex_bin, cache_env = cache_env, cache_key = cache_key,

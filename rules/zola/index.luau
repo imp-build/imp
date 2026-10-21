@@ -80,6 +80,18 @@ local function reset_for_test()
 	graphs = {}
 end
 zola_toolchain("0.23.6", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("zola", function()
+	return core.task({
+		display = "resolve @zola",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = zola_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	ZOLA = KIND, zola_toolchain = zola_toolchain, graph_toolchain = graph_toolchain,
 	zola_bin = zola_bin, cache_key = cache_key, artifact_name = artifact_name,

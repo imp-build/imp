@@ -82,6 +82,18 @@ local function reset_for_test()
 	graphs = {}
 end
 node_toolchain("26.8.2", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("node", function()
+	return core.task({
+		display = "resolve @node",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = node_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	NODE = KIND, node_toolchain = node_toolchain, graph_toolchain = graph_toolchain,
 	node_bin = node_bin, cache_key = cache_key, artifact_name = artifact_name,

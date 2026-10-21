@@ -112,6 +112,18 @@ local function reset_for_test()
 	cache_tool = nil
 end
 uv_toolchain("0.12.13", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("uv", function()
+	return core.task({
+		display = "resolve @uv",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = uv_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	cache_tool = data_tool, UV = KIND, uv_toolchain = uv_toolchain, graph_toolchain = graph_toolchain,
 	uv_bin = uv_bin, cache_env = cache_env, cache_key = cache_key,

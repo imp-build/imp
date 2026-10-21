@@ -13,11 +13,33 @@
 -- linker path in compiler flags. The task declares the tool handle as an
 -- input, and `exec.tool_dir()` returns the named-cache directory.
 --
--- The JavaScript `Toolchain` class also registers a `bin()` product for
--- `imp @tool`, and `toolchainToolSpec()` makes a legacy `run({ tools })`
--- entry. Luau has neither: `imp @tool` does not dispatch to a Luau
--- workspace, and a tool handle is the `tools` entry of `exec.action` and
--- `core.run_program`.
+-- `register(name, resolver)` exposes a CLI tool. The resolver selects the
+-- current default and returns a task output containing its absolute path.
+local core = require("@imp/core")
+local resolvers = {}
+
+--- Register a zero-argument resolver for `imp @name`.
+local function register(name, resolver)
+	if type(name) ~= "string" or name == "" then
+		error("toolchain.register requires a non-empty name", 2)
+	end
+	if type(resolver) ~= "function" then
+		error("toolchain.register requires a resolver function", 2)
+	end
+	if resolvers[name] then
+		error(`tool '@{name}' is already registered`, 2)
+	end
+	resolvers[name] = core.bind_tool_resolver(resolver)
+end
+
+--- Return the registered tool's path output. The host executes this output.
+local function resolve(name)
+	local resolver = resolvers[name]
+	if not resolver then
+		error(`unknown tool '@{name}'; require its toolchain module in imp.workspace.luau or a BUILD.luau module`, 2)
+	end
+	return resolver()
+end
 
 --- Return a kind table for the toolchain `name`. `name` is used in error
 --- messages. The kind table has these functions:
@@ -132,4 +154,6 @@ end
 return {
 	bin = bin,
 	define = define,
+	register = register,
+	resolve = resolve,
 }

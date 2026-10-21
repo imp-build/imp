@@ -1,5 +1,5 @@
 -- Rust acquisition uses two persistent homes. Declare both tools as task inputs.
--- Local cache imports, legacy run descriptors, and imp @tool are not provided.
+-- Local cache imports and legacy run descriptors are not provided.
 local core = require("@imp/core")
 local lockfile = require("@imp/rules/imp/lockfile")
 local lockfiles = require("@imp/rules/workflows/lockfiles")
@@ -113,6 +113,19 @@ local function graph_tool_env(exec, rustup_tool, cargo_tool, id, _version, kache
 	return { env = { RUSTUP_HOME = rustup, CARGO_HOME = cargo, PATH = `{rustup}/toolchains/{id}/bin:{cargo}/bin` } }
 end
 rust_toolchain("1.98.1", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("rust", function()
+	local graph = graph_toolchain()
+	return core.task({
+		display = "resolve @rust",
+		inputs = { tool = graph.tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { sub_dir = `toolchains/{graph.toolchain_id}/bin`, exe = if core.platform_info().os == "windows" then "cargo.exe" else "cargo" }) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	RUST = RUST, rust_toolchain = rust_toolchain, graph_toolchain = graph_toolchain,
 	graph_tool_env = graph_tool_env, artifact_name = artifact_name, download_url = download_url,

@@ -1045,6 +1045,58 @@ impl LuauWorkspace {
         }
     }
 
+    /// Resolve a registered CLI tool through its graph path output.
+    pub async fn resolve_tool_bin(
+        &mut self,
+        name: &str,
+        scheduler: Option<Arc<imp_scheduler::Scheduler>>,
+    ) -> Result<PathBuf> {
+        let cancellation = scheduler
+            .as_ref()
+            .map(|scheduler| scheduler.cancellation_flag())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let _scheduler_guard = self.scheduler_scope(scheduler);
+        let result = async {
+            let resolver = self
+                .run_script_value(
+                    "@imp/cli-tool-registry",
+                    "return require(\"@imp/rules/imp/toolchain\").resolve",
+                )
+                .await?;
+            let resolver = resolver.as_function().context("invalid tool registry")?;
+            let output: LuaValue = resolver.call(name).map_err(lua_err)?;
+            let id = output
+                .as_userdata()
+                .and_then(|value| value.borrow::<GraphHandle>().ok())
+                .filter(|handle| handle.kind == "task_output")
+                .map(|handle| handle.id)
+                .context("tool resolver must return a task output handle")?;
+            self.begin_graph_run(cancellation);
+            let value = self
+                .run_script_value(
+                    "@imp/cli-tool-path",
+                    &format!("return __imp_execute_task({id})"),
+                )
+                .await?;
+            let path = value
+                .as_string()
+                .context("tool path output must be a string")?
+                .to_str()
+                .map_err(lua_err)?
+                .to_string();
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                bail!("tool path output must be a non-empty absolute path");
+            }
+            Ok(path)
+        }
+        .await;
+        self.host.borrow_mut().graph_run_active = false;
+        self.host.borrow_mut().task_failure = None;
+        self.clear_invocation_mode();
+        result.with_context(|| format!("resolve @{name} from Luau workspace"))
+    }
+
     fn lua(&self) -> Result<Lua> {
         self.host
             .borrow()
@@ -3574,6 +3626,20 @@ fn create_core(
         lua.create_function(|_, message: String| {
             log::warn!(target: "imp::luau", "{message}");
             Ok(())
+        })?,
+    )?;
+    let resolver_loader = loader.clone();
+    core.set(
+        "bind_tool_resolver",
+        lua.create_function(move |lua, callback: LuaFunction| {
+            let loader = resolver_loader.clone();
+            let stack = loader.stack.borrow().clone();
+            lua.create_function(move |_, ()| {
+                let previous = loader.stack.replace(stack.clone());
+                let result = callback.call::<LuaValue>(());
+                loader.stack.replace(previous);
+                result
+            })
         })?,
     )?;
     core.set(
@@ -6251,6 +6317,126 @@ fn normalize_relative(base: &Path, requested: &str) -> LuaResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cli_tool_resolver_preserves_its_module_context_and_restores_the_caller() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = crate::loader::RulesSource::discover();
+        let mut workspace = LuauWorkspace::new(root.path(), rules.root().unwrap()).unwrap();
+        let expected = root.path().join("fixture-tool");
+        fs::create_dir(root.path().join("pkg")).unwrap();
+        fs::write(
+            root.path().join("pkg/helper.luau"),
+            format!(
+                "return {}",
+                serde_json::to_string(expected.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("pkg/tools.luau"),
+            r#"
+local core = require("@imp/core")
+local registry = require("@imp/rules/imp/toolchain")
+registry.register("fixture", function()
+    assert(core.package_path() == "pkg", core.package_path())
+    local path = require("./helper")
+    local source = core.task({ outputs = { directory = core.output.artifact() }, run = function()
+        error("unused tool must not run")
+    end })
+    core.tool(source.outputs.directory, { name = "context-fixture" })
+    return core.task({ outputs = { value = core.output.value() }, run = function()
+        return { value = path }
+    end }).outputs.value
+end)
+registry.register("failure", function()
+    assert(core.package_path() == "pkg", core.package_path())
+    error("fixture resolver failed")
+end)
+return {}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("entry.luau"),
+            "return require(\"./pkg/tools\")",
+        )
+        .unwrap();
+        workspace.evaluate("@workspace/entry").await.unwrap();
+        for name in ["fixture", "failure", "fixture"] {
+            let result = workspace.resolve_tool_bin(name, None).await;
+            if name == "failure" {
+                assert!(format!("{:#}", result.unwrap_err()).contains("fixture resolver failed"));
+            } else {
+                assert_eq!(result.unwrap(), expected);
+            }
+            assert!(workspace.loader.stack.borrow().is_empty());
+        }
+        assert!(workspace
+            .host
+            .borrow()
+            .nodes
+            .values()
+            .any(|node| matches!(node,
+                GraphNode::Tool { name, owner_package, .. }
+                    if name == "context-fixture" && owner_package == "pkg"
+            )));
+    }
+
+    #[tokio::test]
+    async fn cli_tool_resolution_validates_outputs_and_recovers_after_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = crate::loader::RulesSource::discover();
+        let mut workspace = LuauWorkspace::new(root.path(), rules.root().unwrap()).unwrap();
+        let good_path = root.path().join("fixture-tool");
+        let good_literal = serde_json::to_string(good_path.to_str().unwrap()).unwrap();
+        fs::write(
+            root.path().join("tools.luau"),
+            r#"
+local core = require("@imp/core")
+local registry = require("@imp/rules/imp/toolchain")
+local function register(name, run)
+    registry.register(name, function()
+        return core.task({ outputs = { value = core.output.value() }, run = run }).outputs.value
+    end)
+end
+register("good", function() return { value = GOOD_PATH } end)
+register("relative", function() return { value = "relative/tool" } end)
+register("empty", function() return { value = "" } end)
+register("number", function() return { value = 7 } end)
+register("failure", function() error("fixture installation failed") end)
+registry.register("bad-handle", function() return "not a handle" end)
+return {}
+"#
+            .replace("GOOD_PATH", &good_literal),
+        )
+        .unwrap();
+        workspace.evaluate("@workspace/tools").await.unwrap();
+        for (name, message) in [
+            ("missing", "unknown tool '@missing'"),
+            ("relative", "non-empty absolute path"),
+            ("empty", "non-empty absolute path"),
+            ("number", "must be a string"),
+            ("failure", "fixture installation failed"),
+            ("bad-handle", "must return a task output handle"),
+        ] {
+            let error = workspace.resolve_tool_bin(name, None).await.unwrap_err();
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert!(!workspace.host.borrow().graph_run_active);
+            assert!(workspace.host.borrow().scheduler.is_none());
+            assert!(workspace.host.borrow().invocation_mode.is_empty());
+            assert_eq!(
+                workspace.resolve_tool_bin("good", None).await.unwrap(),
+                good_path
+            );
+        }
+        let mut other = LuauWorkspace::new(root.path(), rules.root().unwrap()).unwrap();
+        assert!(format!(
+            "{:#}",
+            other.resolve_tool_bin("good", None).await.unwrap_err()
+        )
+        .contains("unknown tool"));
+    }
 
     /// A temporary rules tree with the Luau workflow modules of the
     /// repository rules tree, so that fixtures can register their goals.

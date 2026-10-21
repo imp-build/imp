@@ -104,6 +104,18 @@ local function reset_for_test()
 	store = nil
 end
 pnpm_toolchain("12.4.1", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("pnpm", function()
+	return core.task({
+		display = "resolve @pnpm",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = pnpm_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	PNPM = KIND, pnpm_toolchain = pnpm_toolchain, graph_toolchain = graph_toolchain,
 	pnpm_bin = pnpm_bin, cache_key = cache_key, artifact_name = artifact_name,

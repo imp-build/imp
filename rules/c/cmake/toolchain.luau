@@ -13,8 +13,8 @@
 --
 -- Differences from the JavaScript module: there is no `CmakeToolchain`
 -- class, `cmakeBin()` product, `installCmakeToolchain()`,
--- `cmakeGraphToolSpec()`, or `cmakeGraphToolchainDir()`. `imp @cmake` does
--- not dispatch to a Luau workspace. `cmake_bin(exec, tool)` gives the
+-- `cmakeGraphToolSpec()`, or `cmakeGraphToolchainDir()`. `imp @cmake` runs
+-- the installed default CMake. `cmake_bin(exec, tool)` gives the
 -- absolute path in a task body.
 local core = require("@imp/core")
 local archive = require("@imp/rules/imp/archive")
@@ -180,6 +180,18 @@ local plat = core.platform_info()
 if ARCH_NAME_BY_OS[plat.os] ~= nil and ARCH_NAME_BY_OS[plat.os][plat.arch] ~= nil then
 	cmake_toolchain("4.4.3", { default = true })
 end
+
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("cmake", function()
+	return core.task({
+		display = "resolve @cmake",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = cmake_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
 
 return {
 	CMAKE = CMAKE,

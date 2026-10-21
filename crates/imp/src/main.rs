@@ -30,7 +30,7 @@ type Tree = ui::Tree;
     long_about = "Extensible workspace build system.\n\n\
 Run a managed toolchain binary directly with `imp @TOOL <args>` (e.g. `imp @odin build foo.odin -out:foo`); \
 args are passed through verbatim, no `--` needed. TOOL is any toolchain-shaped \
-top-level export in imp.workspace.js (e.g. odin, odinfmt), plus the built-in kcov."
+top-level export in imp.workspace.js (e.g. odin, odinfmt), a registered Luau toolchain, or the built-in kcov."
 )]
 struct Cli {
     /// Route sandboxed execution through the local daemon.
@@ -433,7 +433,8 @@ fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -
 }
 
 /// Resolve `@name` to an absolute binary path via the workspace's own
-/// declarations: `name` must be a top-level `export const <name> = ...` in
+/// declarations. Luau uses its registered graph path output. In JavaScript,
+/// `name` must be a top-level `export const <name> = ...` in
 /// `imp.workspace.js` whose target kind has a registered `"toolchain"`
 /// product (see `product(SomeToolchain, TOOLCHAIN, fn)` in the toolchain rule
 /// modules, and `invokeToolchainProduct` in `imp_core.js`). No per-tool
@@ -449,7 +450,22 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
 /// the seam that makes `@tool` dispatch testable without mutating global
 /// process state (`std::env::set_current_dir`) across parallel tests.
 async fn resolve_tool_bin_in_workspace(workspace_root: &Path, name: &str) -> Result<PathBuf> {
-    let live = runtime::load_workspace(workspace_root).await?;
+    resolve_tool_bin_with_rules(
+        workspace_root,
+        name,
+        imp_engine::loader::RulesSource::discover(),
+    )
+    .await
+}
+
+// The Luau VM must stay borrowed while the async call runs.
+#[allow(clippy::await_holding_refcell_ref)]
+async fn resolve_tool_bin_with_rules(
+    workspace_root: &Path,
+    name: &str,
+    rules: imp_engine::loader::RulesSource,
+) -> Result<PathBuf> {
+    let live = spike::load_workspace_with_rules(workspace_root, rules).await?;
 
     // A cold toolchain resolution may need to acquire the tool — verified
     // download + install through run() — so install a minimal execution
@@ -464,6 +480,11 @@ async fn resolve_tool_bin_in_workspace(workspace_root: &Path, name: &str) -> Res
     );
     *live.scheduler.lock().unwrap() = Some(sched);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
+
+    if let Some(luau) = &live.luau {
+        let scheduler = live.scheduler.lock().unwrap().clone();
+        return luau.borrow_mut().resolve_tool_bin(name, scheduler).await;
+    }
 
     // `//:{name}` export lookup first: this is a target handle a workspace
     // exported at that address (e.g. `export const mold = ...`), and it
@@ -2850,6 +2871,78 @@ new DemoToolchain({ kind: "demo-toolchain", attrs: {} }, { default: true });
 
         let path = resolve_tool_bin_in_workspace(p, "demo").await.unwrap();
         assert_eq!(path, PathBuf::from("/abs/demo-fallback-bin"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_luau_tool_bin_preserves_arguments_and_exit_status() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        write_file(
+            &rules.path().join("imp/toolchain/index.luau"),
+            r#"
+local resolvers = {}
+return {
+    register = function(name, resolver) resolvers[name] = resolver end,
+    resolve = function(name)
+        if not resolvers[name] then error("unknown tool '@" .. name .. "'") end
+        return resolvers[name]()
+    end,
+}
+"#,
+        );
+        let script = root.path().join("fixture tool");
+        write_file(
+            &script,
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$0.args\"\nexit 23\n",
+        );
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let literal = serde_json::to_string(script.to_str().unwrap()).unwrap();
+        write_file(
+            &root.path().join("imp.workspace.luau"),
+            &format!(
+                r#"
+local core = require("@imp/core")
+local registry = require("@imp/rules/imp/toolchain")
+registry.register("fixture", function()
+    return core.task({{ outputs = {{ value = core.output.value() }}, run = function()
+        return {{ value = {literal} }}
+    end }}).outputs.value
+end)
+return {{}}
+"#
+            ),
+        );
+        let bin = resolve_tool_bin_with_rules(
+            root.path(),
+            "fixture",
+            imp_engine::loader::RulesSource::directory(rules.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bin, script);
+        let args = [
+            "two words".into(),
+            "--flag".into(),
+            "--".into(),
+            "".into(),
+            std::ffi::OsString::from_vec(vec![0xff]),
+        ];
+        assert_eq!(run_direct_tool_command(&bin, &args), 23);
+        assert_eq!(
+            std::fs::read(script.with_file_name("fixture tool.args")).unwrap(),
+            b"two words\0--flag\0--\0\0\xff\0"
+        );
+        let error = resolve_tool_bin_with_rules(
+            root.path(),
+            "missing",
+            imp_engine::loader::RulesSource::directory(rules.path().to_path_buf()),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("unknown tool '@missing'"));
     }
 
     #[tokio::test]

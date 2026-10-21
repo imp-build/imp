@@ -80,6 +80,18 @@ local function reset_for_test()
 	graphs = {}
 end
 crane_toolchain("0.22.1", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("crane", function()
+	return core.task({
+		display = "resolve @crane",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = crane_bin(exec, inputs.tool) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	CRANE = KIND, crane_toolchain = crane_toolchain, graph_toolchain = graph_toolchain,
 	crane_bin = crane_bin, cache_key = cache_key, artifact_name = artifact_name,

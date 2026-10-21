@@ -48,10 +48,29 @@ local function with_tool(tool, fn)
 	}).outputs.value
 end
 
--- The JavaScript `Toolchain` class also registers a `bin()` product for
--- `imp @tool`, and requires a `static tool` token. Luau has no product
--- model, so those cases are not ported.
+-- The CLI registry uses graph outputs instead of JavaScript products.
 return {
+	core.test.suite("CLI tool registry", {
+		core.test.case("registration validates names and callbacks", function()
+			assert(contains(error_text(toolchain.register, "", function() end), "non-empty name"))
+			assert(contains(error_text(toolchain.register, "invalid", true), "resolver function"))
+			toolchain.register("duplicate", function() end)
+			assert(contains(error_text(toolchain.register, "duplicate", function() end), "already registered"))
+			assert(contains(error_text(toolchain.resolve, "missing-tool"), "unknown tool '@missing-tool'"))
+		end),
+		core.test.case("resolution reads the final default", function()
+			local kind = toolchain.define("cli-fixture")
+			kind.declare("1", { default = true })
+			toolchain.register("cli-fixture", function()
+				local version = kind.require_version()
+				return core.task({ outputs = { value = output.value() }, run = function()
+					return { value = "/fixture/" .. version }
+				end }).outputs.value
+			end)
+			kind.declare("2", { default = true })
+			assert(core.test.resolve(toolchain.resolve("cli-fixture")) == "/fixture/2")
+		end),
+	}),
 	core.test.suite("toolchain kinds", {
 		core.test.case("defaults are tracked per kind", function()
 			local alpha = toolchain.define("alpha")

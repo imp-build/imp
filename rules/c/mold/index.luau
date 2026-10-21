@@ -6,11 +6,8 @@
 -- installed tree. A task that links with mold declares that tool handle as
 -- an input, and gives it to `rust_linker_env` or `odin_linker_env`.
 --
--- The JavaScript module also has `installMoldToolchain` (a local directory
--- into the named cache), `moldTool` (a legacy `run({ tools })` entry), and
--- `moldBin` with the `bin()` product for `imp @tool`. Luau has no host cache
--- write, the tool handle replaces the `run` entry, and `imp @tool` does not
--- dispatch to a Luau workspace. Thus this module does not provide them.
+-- `imp @mold` runs the installed default mold. Local cache imports and
+-- legacy JavaScript run descriptors are not provided.
 local core = require("@imp/core")
 local archive = require("@imp/rules/imp/archive")
 local lockfile = require("@imp/rules/imp/lockfile")
@@ -203,6 +200,18 @@ end
 if core.platform_info().os == "linux" then
 	mold_toolchain("2.42.1", { default = true })
 end
+
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("mold", function()
+	return core.task({
+		display = "resolve @mold",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { sub_dir = "bin", exe = "mold" }) }
+		end,
+	}).outputs.value
+end)
 
 return {
 	MOLD = MOLD,

@@ -100,6 +100,18 @@ local function graph_toolchain(version)
 	return graphs[resolved]
 end
 kache_toolchain("0.22.0", { default = true })
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("kache", function()
+	return core.task({
+		display = "resolve @kache",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { exe = if core.platform_info().os == "windows" then "kache.exe" else "kache" }) }
+		end,
+	}).outputs.value
+end)
+
 return {
 	KACHE = KACHE, kache_toolchain = kache_toolchain, graph_toolchain = graph_toolchain,
 	build_cache_env = build_cache_env, script_preamble = function() return 'export KACHE_BASE_DIR="$imp_sandbox_root"; ' end,

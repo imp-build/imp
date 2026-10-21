@@ -17,7 +17,7 @@
 -- with `cachePut`, and mounts each tool name with `msvcGraphToolSpec`. It
 -- also has `nasmHostBin` with the `bin()` product for `imp @nasm`, the
 -- `NASM_TOOL` product name, and `nasmGenLockfiles`. Luau has no host cache
--- write and no `imp @tool` dispatch, and `nasm_toolchain()` returns the
+-- write, and `nasm_toolchain()` returns the
 -- lockfile root. Thus this module does not provide them.
 local core = require("@imp/core")
 local output = core.output
@@ -468,6 +468,18 @@ end
 if core.platform_info().os == "windows" then
 	nasm_toolchain(NASM_VERSION, { default = true })
 end
+
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("nasm", function()
+	return core.task({
+		display = "resolve @nasm",
+		inputs = { tool = nasm_graph_tool(NASM.require_version()) },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { exe = "nasm.exe" }) }
+		end,
+	}).outputs.value
+end)
 
 return {
 	MSVC_GRAPH_TOOL_NAMES = MSVC_GRAPH_TOOL_NAMES,

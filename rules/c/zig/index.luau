@@ -8,10 +8,8 @@
 -- `zigranlib`, `clang`, and `ar` wrappers on PATH. `build_cache_tool` is the
 -- prewarmed Zig build cache.
 --
--- The JavaScript module also has `installZigToolchain` (a local directory
--- into the named cache), `zigBin` with the `bin()` product for `imp @tool`,
--- and the `ZIG_TOOL` product name. Luau has no host cache write and no
--- `imp @tool` dispatch. Thus this module does not provide them.
+-- `imp @zig` runs the installed default Zig. Local cache imports and
+-- legacy JavaScript run descriptors are not provided.
 local core = require("@imp/core")
 local output = core.output
 local c_toolchain = require("@imp/rules/c/toolchain")
@@ -460,6 +458,18 @@ end
 if is_supported_platform(core.platform_info()) then
 	zig_toolchain("0.16.0", { default = true })
 end
+
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("zig", function()
+	return core.task({
+		display = "resolve @zig",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { exe = if core.platform_info().os == "windows" then "zig.exe" else "zig" }) }
+		end,
+	}).outputs.value
+end)
 
 return {
 	ZIG = ZIG,

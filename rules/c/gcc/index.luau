@@ -8,15 +8,8 @@
 -- `version`. `tool` is a `core.tool()` handle whose `bin` directory has the
 -- `clang`, `cc`, `c++`, `ar`, and `ranlib` names, and on Windows `nasm`.
 --
--- The JavaScript module also has `installGccToolchain` (a local directory
--- into the named cache), `gccTool` (a legacy `run({ tools })` entry),
--- `gccBin` with the `bin()` product for `imp @tool`, the `GCC_TOOL` product
--- name, and `gccGraphToolSpec` (a mount for each tool name of a replayed
--- CMake edge). Luau has no host cache write and no `imp @tool` dispatch, and
--- the tool handle replaces the `run` entry and the mounts. Thus this module
--- does not provide them. The functions that need the absolute install
--- directory take the task `exec` and the tool handle, and read the directory
--- with `exec.tool_dir`.
+-- `imp @gcc` runs the installed default gcc. Local cache imports and
+-- legacy JavaScript run descriptors are not provided.
 local core = require("@imp/core")
 local output = core.output
 local c_toolchain = require("@imp/rules/c/toolchain")
@@ -614,6 +607,18 @@ end
 if is_supported_platform(core.platform_info()) then
 	gcc_toolchain({ linux = "2025.08-1", windows = "16.2.0posix-14.0.0-ucrt-r1" }, { default = true })
 end
+
+-- Resolve the final workspace default when the CLI requests this tool.
+toolchain.register("gcc", function()
+	return core.task({
+		display = "resolve @gcc",
+		inputs = { tool = graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, inputs)
+			return { value = toolchain.bin(exec, inputs.tool, { sub_dir = "bin", exe = if core.platform_info().os == "windows" then "gcc.exe" else `{GCC_EXE_PREFIX[core.platform_info().arch]}-gcc` }) }
+		end,
+	}).outputs.value
+end)
 
 return {
 	GCC = GCC,

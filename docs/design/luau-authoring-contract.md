@@ -491,11 +491,35 @@ with `exec.tool_dir`. The
 MSVC provider runs the host programs where Visual Studio installed them: its
 action `env` puts their directories on `PATH`.
 
+### CLI tool registry
+
+Rule authors register `imp @name` with `toolchain.register(name, resolver)`.
+The name must be a non-empty string and the resolver must be a function.
+Duplicate names fail. Require the toolchain module from `imp.workspace.luau`
+or a `BUILD.luau` module to register its name.
+
+The zero-argument resolver runs after workspace loading, in the module context
+where it was registered. Relative imports and package-owned graph declarations
+use that context. Imp restores the caller's context after success or failure.
+`core.bind_tool_resolver(callback)` captures this context for the registry;
+rule authors use `toolchain.register` to bind and register the callback.
+The resolver selects the final
+workspace default and returns a task output handle. The task declares the tool
+as an input and returns its absolute executable path with `toolchain.bin`.
+`toolchain.resolve(name)` returns this output; an unknown name fails with an
+import instruction. The CLI executes the output through the graph executor,
+which installs the tool if necessary, and then runs the executable with the
+original command arguments and returns its exit code.
+
+The registered names are `mold`, `gcc`, `zig`, `nasm`, `cmake`, `rust`, `kache`,
+`node`, `pnpm`, `pex`, `uv`, `crane`, and `zola`. `@rust` runs Cargo. Platform
+and default-version limits remain those of each toolchain. The CLI does not
+add environment settings for the launched tool.
+
 **Not provided:** Luau has no general handle resolution outside test cases
-and no `cache_get`. A task gets an installed toolchain path through a declared
-tool input and `exec.tool_dir`. There is no `Toolchain` class with a `bin()`
-product, so `imp @tool` does not dispatch to a Luau workspace. There is no
-`toolchainToolSpec`: a tool handle is the `tools` entry of `exec.action` and
+and no `cache_get`. CLI resolution is a host operation. A rule task reads an
+installed toolchain path through a declared tool input and `exec.tool_dir`.
+There is no `toolchainToolSpec`: use a tool handle in `exec.action` or
 `core.run_program`.
 
 These `@imp/core` functions serve rule modules at declaration time and in task
