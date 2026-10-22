@@ -1131,7 +1131,7 @@ export function runCTestTask(
 		display: `ctest ${spec.path} [${(testNames.length ? testNames : ["all"]).join(",")}]`,
 		inputs: {
 			directory: built.outputs.directory,
-			ctest: nativeTool("ctest"),
+			cmakeTool: spec.cmakeToolchain.tool,
 		},
 		outputs: { units: output.value() },
 		async run(exec, input) {
@@ -1157,7 +1157,7 @@ export function runCTestTask(
 					spec.buildDirPath,
 					...ctestNameFilterArgs(testNames),
 				],
-				tools: [input.ctest],
+				tools: [input.cmakeTool],
 				inputs: [input.directory],
 				display: `ctest ${spec.path}`,
 				allowFailure: true,

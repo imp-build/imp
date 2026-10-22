@@ -16,6 +16,7 @@ local build = require("@imp/rules/workflows/build")
 local package = require("@imp/rules/workflows/package")
 local test_workflow = require("@imp/rules/workflows/test")
 local gcc = require("@imp/rules/c/gcc")
+local cmake_tools = require("@imp/rules/c/cmake/toolchain")
 local expansion = require("@imp/rules/c/cmake/expansion")
 local replay = require("@imp/rules/c/cmake/graph_replay")
 local ninja = require("@imp/rules/c/cmake/ninja_graph")
@@ -186,7 +187,7 @@ local function fake_spec(options)
 	options = options or {}
 	options.path = PROJECT
 	options.toolchain = fake_gcc()
-	options.cmake_toolchain = { tool = core.native_tool("cmake"), version = "4.4.3" }
+	options.cmake_toolchain = options.cmake_toolchain or { tool = core.native_tool("cmake"), version = "4.4.3" }
 	return replay.cmake_project_spec(options)
 end
 
@@ -498,6 +499,37 @@ return {
 	}),
 
 	core.test.suite("ctest task", {
+		core.test.case("uses the selected CMake toolchain for ctest", function()
+			core.test.with_fake_toolchain_host(function(host)
+				local selected = cmake_tools.graph_toolchain("3.31.0")
+				core.test.resolve(replay.run_ctest_task(
+					fake_spec({ cmake_toolchain = selected }),
+					fake_configured(),
+					fixture_graph(),
+					{ "hello_cmake_main" }
+				).outputs.units)
+				local ctest = run_with(host, `ctest {PROJECT}`)
+				assert(same_list(ctest.tools, { "cmake" }))
+				assert(run_with(host, "install cmake 3.31.0 (linux/x86_64)") ~= nil)
+				for _, call in ipairs(host.calls) do
+					assert(not (call[1] == "native_tool" and call[2] == "ctest"))
+				end
+			end)
+		end),
+
+		core.test.case("uses the explicit CMake tool handle", function()
+			core.test.with_fake_toolchain_host(function(host)
+				local selected = { tool = core.native_tool("selected-cmake"), version = "3.31.0" }
+				core.test.resolve(replay.run_ctest_task(
+					fake_spec({ cmake_toolchain = selected }),
+					fake_configured(),
+					fixture_graph(),
+					{ "hello_cmake_main" }
+				).outputs.units)
+				assert(same_list(run_with(host, `ctest {PROJECT}`).tools, { "selected-cmake" }))
+			end)
+		end),
+
 		core.test.case("runs ctest for the correlated test names only", function()
 			core.test.with_fake_toolchain_host(function(host)
 				local units = core.test.resolve(replay.run_ctest_task(

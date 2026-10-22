@@ -282,8 +282,8 @@ a task body.
 - The Luau modules do not provide `cmakeBin()`, `installCmakeToolchain()`,
   `cmakeGraphToolSpec()`, or `cmakeGraphToolchainDir()`. `imp @cmake` does
   not dispatch to a Luau workspace.
-- ctest comes from the host PATH, as in the JavaScript module, not from the
-  pinned CMake toolchain.
+- Both runtimes run ctest from the CMake toolchain selected for the project.
+  The host PATH does not need to contain ctest.
 
 **Unknown:** the Windows behavior of the Luau modules is not verified on a
 Windows host. The fake-host tests check only the argv values.

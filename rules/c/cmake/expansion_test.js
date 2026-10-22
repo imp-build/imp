@@ -24,9 +24,11 @@ import {
 	isCmakeCompilerEdge,
 	parseNinjaDeps,
 	replayCmakeTarget,
+	runCTestTask,
 	scanCmakeCompilerInputs,
 } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
+import { cmakeGraphToolchain } from "//rules/c/cmake/toolchain";
 import { gccToolchainRecord } from "//rules/c/gcc";
 
 // Fixture mirrors rules/c/cmake/example/CMakeLists.txt: a SHARED_LIBRARY
@@ -388,6 +390,62 @@ describe("cmakeProjectExpansion", () => {
 			expect(build.__imp_graph_handle).toBe(true);
 			expect(testUnit.__imp_graph_handle).toBe(true);
 			expect(build.__graph_id === testUnit.__graph_id).toBe(false);
+		});
+	});
+
+	test("ctest uses the selected CMake toolchain", () => {
+		return withFakeToolchainHost(async (host) => {
+			host.addFile(
+				"//rules/c/cmake/cmake.lock",
+				JSON.stringify({
+					tool: "cmake",
+					versions: {
+						"3.31.0": {
+							"linux/x86_64": {
+								url: "https://locked.example/cmake.tar.gz",
+								artifact: "cmake.tar.gz",
+								size: 42,
+								sha256: "cafe",
+							},
+						},
+					},
+				}),
+			);
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: cmakeGraphToolchain("3.31.0"),
+			});
+			host.setRunOutputFiles(
+				"cmake configure rules/c/cmake/example",
+				"directory",
+				CONFIGURE_FILES,
+			);
+			const configured = configureCmakeProject(spec);
+			const graph = {
+				...parseNinja(BUILD_NINJA, () => RULES_NINJA),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const result = runCTestTask(spec, configured, graph, [
+				"hello_cmake_main",
+			]);
+			await resolveHandles([result.outputs.units]);
+			const action = host.runs.find(
+				(run) => run.display === "ctest rules/c/cmake/example",
+			);
+			expect(action.tools).toEqual([
+				{
+					name: "cmake",
+					cache: "cmake-toolchains",
+					key: "3.31.0/linux-x86_64",
+					binDirs: ["bin"],
+				},
+			]);
+			expect(
+				host.calls.some(
+					(call) => call[0] === "graphNativeTool" && call[1] === "ctest",
+				),
+			).toBe(false);
 		});
 	});
 

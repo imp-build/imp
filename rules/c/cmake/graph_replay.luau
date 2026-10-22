@@ -999,7 +999,7 @@ local function run_ctest_task(
 	)
 	local unit_name = if #test_names > 0 then table.concat(test_names, ",") else spec.path
 	return core.task({
-		inputs = { directory = built.outputs.directory, ctest = core.native_tool("ctest") },
+		inputs = { directory = built.outputs.directory, cmake_tool = spec.cmake_toolchain.tool },
 		outputs = { units = output.value() },
 		run = function(exec, input)
 			local argv = {
