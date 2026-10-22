@@ -53,6 +53,26 @@ return {
 				same(c_toolchain.import_lib_args("out/m.dll", true), { "'-Wl,--out-implib,out/m.lib'" })
 			end)
 		end),
+		core.test.case("Windows shared-library paths require the lowercase .dll suffix", function()
+			local paths = { "out/m", "out/m.so", "out/m.DLL", "out/m.lib" }
+			core.test.with_fake_toolchain_host(WINDOWS, function()
+				for _, path in ipairs(paths) do
+					local expected = `Windows shared-library output path must end in .dll: {path}`
+					for _, helper in ipairs({ c_toolchain.import_lib_path, c_toolchain.import_lib_args }) do
+						local text = error_text(helper, path, true)
+						assert(string.find(text, expected, 1, true), text)
+					end
+					assert(c_toolchain.import_lib_path(path, false) == nil)
+					same(c_toolchain.import_lib_args(path, false), {})
+				end
+			end)
+			core.test.with_fake_toolchain_host(LINUX, function()
+				for _, path in ipairs(paths) do
+					assert(c_toolchain.import_lib_path(path, true) == nil)
+					same(c_toolchain.import_lib_args(path, true), {})
+				end
+			end)
+		end),
 	}),
 
 	core.test.suite("cc toolchain union", {

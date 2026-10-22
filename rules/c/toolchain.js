@@ -78,9 +78,16 @@ export function rpathOriginArgs(bundled) {
 // link against a DLL. It needs this import library, and it fails on the DLL
 // with "LNK1107: invalid or corrupt file". The name `<stem>.lib` is the name
 // cl.exe /LD already gives it.
+// A Windows shared-library output path must end in lowercase `.dll`.
 export function importLibPath(outPath, isShared) {
 	if (!isShared || platformInfo().os !== "windows") return null;
-	return String(outPath).replace(/\.dll$/, ".lib");
+	const path = String(outPath);
+	if (!path.endsWith(".dll")) {
+		throw new Error(
+			`Windows shared-library output path must end in .dll: ${path}`,
+		);
+	}
+	return path.replace(/\.dll$/, ".lib");
 }
 
 // The `-Wl,--out-implib` argument that makes a MinGW-style link step write the

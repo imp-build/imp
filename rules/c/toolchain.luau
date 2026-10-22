@@ -89,11 +89,16 @@ end
 --- beside the DLL, or nil. MSVC `link.exe` cannot link against a DLL. It
 --- needs the import library, `<stem>.lib`, the name that `cl.exe /LD` gives
 --- it.
+--- A Windows shared-library output path must end in lowercase `.dll`.
 local function import_lib_path(out_path, is_shared)
 	if not is_shared or core.platform_info().os ~= "windows" then
 		return nil
 	end
-	return (string.gsub(tostring(out_path), "%.dll$", ".lib"))
+	local path = tostring(out_path)
+	if not string.match(path, "%.dll$") then
+		error(`Windows shared-library output path must end in .dll: {path}`, 2)
+	end
+	return (string.gsub(path, "%.dll$", ".lib"))
 end
 
 --- The `-Wl,--out-implib` argument that makes a MinGW-style link step write
