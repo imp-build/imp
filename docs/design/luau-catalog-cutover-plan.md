@@ -414,3 +414,31 @@ The fix declares package-local `biome.json` and `biome.jsonc` as action inputs
 and copies them into the lint working tree. The consumer check verifies both
 application factories, both configuration extensions, and configuration-only
 cache invalidation. The reviewer checked the fix and found no further issues.
+
+## Tree-sitter package port
+
+The Tree-sitter port adds Luau grammar roots, two built-in Cargo executable
+packages, native rule tests, and the `roundtrip` test target. The external
+consumer check under `rules/treesitter/testdata` runs the JSON round-trip and
+checks Odin analysis, source edits, and failure propagation. The JavaScript
+modules remain for the current Odin consumer and documentation build.
+
+The guide documents the Luau support roots. Generated Luau references remain
+deferred to `2026-09-30-integrate-luau-workspace-tests-and-docs`. The
+Tree-sitter task's reference-generation acceptance criterion remains incomplete
+until that integration work lands.
+
+### Tree-sitter validation commands
+
+From the repository root on Linux, with the checkout binary:
+
+| Command | Result |
+| --- | --- |
+| `cargo build -p imp` | Exit 0. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/treesitter/...` | Exit 0; 5/5 units passed, including the grammar round-trip. |
+| `python3 rules/treesitter/testdata/consumer_check.py --imp target/debug/imp` | Exit 0; JSON round-trip, Odin analysis, source edits, and missing-file failure passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/...` | Exit 0; 600/600 units passed. Four action failures are expected CMake negative-test cases. |
+| `target/debug/imp test //rules/treesitter/...` | Exit 0; 2/2 JavaScript-path units passed. |
+| `PATH="$PWD/target/debug:$PATH" imp fmt //...` | Exit 0; 61 unchanged, 0 changed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0; 58/58 units passed, including 5 documentation quality tests. |
