@@ -1,0 +1,26 @@
+local core = require("@imp/core")
+return {
+	core.test.case("imports add facets only to later declarations", function()
+		local js = require("@imp/rules/js")
+		local fmt = require("@imp/rules/workflows/fmt")
+		local lint = require("@imp/rules/workflows/lint")
+		local before = js.js_sources({ base = "rules/js/example/app/src" })
+		require("@imp/rules/js/biome")
+		local formatted = js.js_sources({ base = "rules/js/example/app/src" })
+		require("@imp/rules/js/biome/lint")
+		local both = js.js_sources({ base = "rules/js/example/app/src" })
+		assert(before[fmt.FMT] == nil and before[lint.LINT] == nil)
+		assert(type(formatted[fmt.FMT]) == "userdata" and formatted[lint.LINT] == nil)
+		assert(type(both[fmt.FMT]) == "userdata" and type(both[lint.LINT]) == "userdata")
+		assert(table.isfrozen(both))
+	end),
+	core.test.case("lint import does not enable formatting", function()
+		local js = require("@imp/rules/js")
+		local fmt = require("@imp/rules/workflows/fmt")
+		local lint = require("@imp/rules/workflows/lint")
+		require("@imp/rules/js/biome/lint")
+		local source = js.js_sources({ base = "rules/js/example/app/src" })
+		assert(type(source[lint.LINT]) == "userdata" and source[fmt.FMT] == nil)
+	end),
+
+}

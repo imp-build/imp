@@ -1,0 +1,19 @@
+{
+  "tool": "biome-toolchain",
+  "versions": {
+    "2.5.4": {
+      "linux/x86_64": {
+        "url": "https://locked.example/biome",
+        "artifact": "biome-linux-x64.tar.gz",
+        "size": 21401125,
+        "sha256": "deadbeef"
+      },
+      "windows/x86_64": {
+        "url": "https://locked.example/biome",
+        "artifact": "biome-linux-x64.tar.gz",
+        "size": 21401125,
+        "sha256": "deadbeef"
+      }
+    }
+  }
+}

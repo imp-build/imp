@@ -66,8 +66,9 @@ Windows application execution is unverified.
 `register_js_sources_hook` and `register_js_app_hook` are extension APIs. Each
 hook receives a frozen snapshot and returns additional fields. Hooks run in
 registration order; registering the same function twice does not add it twice.
-Import an extension before declaring targets that need its facets. The Luau
-Biome extension belongs to a separate migration task.
+Import an extension before declaring targets that need its facets. See the
+[Biome guide](https://imps.build/reference/user-api/js/biome/) for Luau
+formatting, linting, and local toolchain installation.
 
 #### Toolchains and lockfiles
 

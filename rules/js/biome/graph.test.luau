@@ -1,0 +1,58 @@
+local core = require("@imp/core")
+local js = require("@imp/rules/js")
+local biome = require("@imp/rules/js/biome")
+require("@imp/rules/js/biome/lint")
+local fmt = require("@imp/rules/workflows/fmt")
+local lint = require("@imp/rules/workflows/lint")
+local function check(flags, fn)
+	core.test.with_fake_toolchain_host(function(host)
+		biome.reset_for_test()
+		biome.biome_toolchain("2.5.4", { default = true })
+		core.test.with_fake_goal_flags(flags, function() fn(host) end)
+	end)
+end
+return {
+	core.test.case("format check passes check mode and preserves failure output", function()
+		check({ check = true }, function(host)
+			local source = js.js_sources({ base = "rules/js/example/app/src" })
+			host.set_run_exit_code("biome fmt rules/js/example/app/src", 1)
+			host.set_run_stdout("biome fmt rules/js/example/app/src", "format failure")
+			local value = core.test.resolve(source[fmt.FMT])
+			assert(value.check.requested and value.check.failed)
+			assert(string.find(value.output, "format failure", 1, true))
+			assert(host.runs[#host.runs].argv[6] == "check")
+			assert(value.sources_digest and #value.paths > 0)
+		end)
+	end),
+	core.test.case("format write and lint fix use workflow result contracts", function()
+		check({ fix = true }, function(host)
+			local source = js.js_sources({ base = "rules/js/example/app/src" })
+			local formatted = core.test.resolve(source[fmt.FMT])
+			assert(not formatted.check.requested)
+			assert(host.runs[#host.runs].argv[6] == "write")
+			local fixed = core.test.resolve(source[lint.LINT])
+			assert(fixed.ok and fixed.fix_applied and fixed.fixed.path == "fixed")
+			assert(host.runs[#host.runs].argv[6] == "1")
+		end)
+	end),
+	core.test.case("lint failures are returned without fixed artifacts", function()
+		check({}, function(host)
+			local source = js.js_sources({ base = "rules/js/example/app/src" })
+			host.set_run_exit_code("biome lint rules/js/example/app/src", 1)
+			local result = core.test.resolve(source[lint.LINT])
+			assert(not result.ok and not result.fix_applied and result.fixed == nil)
+		end)
+	end),
+	core.test.case("empty sources do not run Biome", function()
+		check({}, function(host)
+			local graph = require("@imp/rules/js/biome/graph")
+			local empty = { root = "rules/js/biome/testdata", sources = core.files({ root = "rules/js/biome/testdata", include = { "absent.js" } }) }
+			local source = { [fmt.FMT] = graph.biome_fmt_root(empty), [lint.LINT] = graph.biome_lint_root(empty) }
+			local formatted = core.test.resolve(source[fmt.FMT])
+			local clean = core.test.resolve(source[lint.LINT])
+			assert(#formatted.paths == 0 and not formatted.check.failed)
+			assert(clean.ok and not clean.fix_applied)
+			for _, run in ipairs(host.runs) do assert(not string.find(run.display, "biome fmt", 1, true) and not string.find(run.display, "biome lint", 1, true)) end
+		end)
+	end),
+}

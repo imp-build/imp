@@ -371,3 +371,46 @@ Windows and macOS execution were not checked.
 The port preserves the existing pytest summary parser. If pytest prints only
 passing summaries and then exits with an error, the parser can report success.
 Correcting that behavior requires a separate change.
+
+## Biome package port
+
+The Biome package provides Luau formatting and linting facets, verified tool
+acquisition, local installation from declared file artifacts, BUILD discovery,
+and focused tests. JavaScript remains available. The consumer check under
+`rules/js/biome/testdata` checks real formatting and lint fixes, check-mode
+workspace preservation, nested paths with spaces, executable resolution, and
+local-source cache separation. Application checks cover `js_app` and `ts_app`
+with both `biome.json` and `biome.jsonc`, including configuration-only changes.
+
+The Biome guide documents Luau now. Generated Luau references remain deferred
+to `2026-09-30-integrate-luau-workspace-tests-and-docs`. The Biome task's
+reference-generation acceptance criterion remains incomplete until that work
+lands.
+
+### Biome validation commands
+
+From the repository root on Linux, with the checkout binary built by
+`cargo build`:
+
+| Command | Result |
+| --- | --- |
+| `cargo build` | Exit 0. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/js/...` | Exit 0; 44/44 units passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/...` | Exit 0; 595/595 units passed. Four action failures are expected CMake negative-test cases. |
+| `python3 rules/js/biome/testdata/consumer_check.py --imp target/debug/imp` | Exit 0; real format, lint, failure, and local-cache checks passed. |
+| `PATH="$PWD/target/debug:$PATH" imp fmt //...` | Exit 0; 61 unchanged, 0 changed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
+| `cargo test --workspace` | Exit 0; 569 tests passed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0; 58/58 units passed with the checkout binary. |
+
+The installed binary's `imp test //...` returned exit 1: 57/58 units passed.
+`environment_tests::imp_sandbox_test_reuses_imp_cache_and_has_writable_xdg_cache_home`
+failed with `Imp test sandboxes must share IMP_CACHE_DIR`. The direct Cargo
+workspace run and the checkout-binary rerun passed this test. No Rust source
+changed in the Biome port.
+
+Independent review found that application facets omitted Biome configuration.
+The fix declares package-local `biome.json` and `biome.jsonc` as action inputs
+and copies them into the lint working tree. The consumer check verifies both
+application factories, both configuration extensions, and configuration-only
+cache invalidation. The reviewer checked the fix and found no further issues.
