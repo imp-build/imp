@@ -8,6 +8,7 @@
 local core = require("@imp/core")
 local lockfiles = require("@imp/rules/workflows/lockfiles")
 local zig = require("@imp/rules/c/zig")
+local shell_quote = require("@imp/rules/c/toolchain").shell_quote
 
 local TESTDATA = "@imp/rules/c/zig/testdata"
 local LINUX = { os = "linux", arch = "x86_64" }
@@ -77,7 +78,7 @@ return {
 				assert(declared.version == "0.13.0")
 				assert(declared.lockfile == "@imp/rules/c/zig/zig.lock")
 				assert(type(declared[lockfiles.GEN_LOCKFILES]) == "userdata")
-				assert(zig.cache_key("0.13.0", LINUX) == "0.13.0/linux-x86_64")
+				assert(zig.cache_key("0.13.0", LINUX) == "v2/0.13.0/linux-x86_64")
 				assert(zig.default_version() == "0.13.0")
 			end)
 		end),
@@ -103,7 +104,7 @@ return {
 		core.test.case("downloads, verifies, and installs a toolchain with sandboxed actions (linux)", function()
 			with_zig_host(LINUX, function(host)
 				zig.zig_toolchain("0.13.0", { default = true, lockfile = `{TESTDATA}/locked.json` })
-				assert(install("0.13.0") == "/cache/zig-toolchains/0.13.0/linux-x86_64")
+				assert(install("0.13.0") == "/cache/zig-toolchains/v2/0.13.0/linux-x86_64")
 				assert(#host.runs == 2, tostring(#host.runs))
 
 				local download, installed = host.runs[1], host.runs[2]
@@ -119,15 +120,60 @@ return {
 				assert(has(installed.argv, "zigranlib"))
 				assert(has(installed.argv, "clang"))
 				assert(has(installed.argv, "ar"))
-				assert(has(installed.argv, '#!/bin/sh\nexec "$(dirname "$0")/zig" ar "$@"\n'))
-				assert(has(installed.argv, '#!/bin/sh\nexec "$(dirname "$0")/zig" cc "$@"\n'))
+				for index, subcommand in ipairs({ "ar", "ranlib", "cc", "ar" }) do
+					local expected = '#!/bin/sh\nexec "${0%/*}/zig" ' .. subcommand .. ' "$@"\n'
+					assert(installed.argv[5 + index * 2] == expected, installed.argv[5 + index * 2])
+				end
 				local script = installed.argv[3]
 				assert(contains(script, 'tar -xJf "$1" -C "$2" --strip-components=1'), script)
 				-- The fourth wrapper uses positional parameters after $9.
 				assert(contains(script, 'printf %s "$9" > "$2/${10}"'), script)
 				assert(contains(script, 'chmod +x "$2/${10}"'), script)
-				assert(published(host, "zig-toolchains", "0.13.0/linux-x86_64"))
+				assert(published(host, "zig-toolchains", "v2/0.13.0/linux-x86_64"))
 			end)
+		end),
+
+		core.test.case("Unix wrappers run without dirname in a real sandbox", function()
+			if core.platform_info().os ~= "linux" then
+				return
+			end
+			local wrappers = with_zig_host(LINUX, function(host)
+				zig.zig_toolchain("0.13.0", { unverified = true })
+				install("0.13.0")
+				local argv = host.runs[2].argv
+				local captured = {}
+				for index = 7, 13, 2 do
+					table.insert(captured, { content = argv[index], name = argv[index + 1] })
+				end
+				return captured
+			end)
+			local script = {
+				'if command -v dirname >/dev/null 2>&1; then exit 1; fi',
+				'mkdir "tool chain"',
+				'printf %s ' .. shell_quote('#!/bin/sh\nprintf "<%s>\\n" "$@"\n') .. ' > "tool chain/zig"',
+				'chmod +x "tool chain/zig"',
+			}
+			for _, wrapper in ipairs(wrappers) do
+				table.insert(script, 'printf %s ' .. shell_quote(wrapper.content) .. ' > "tool chain/' .. wrapper.name .. '"')
+				table.insert(script, 'chmod +x "tool chain/' .. wrapper.name .. '"')
+				table.insert(script, '"./tool chain/' .. wrapper.name .. '" "argument with spaces" "*"')
+			end
+			local status = core.test.resolve(core.task({
+				inputs = { mkdir = core.native_tool("mkdir"), chmod = core.native_tool("chmod") },
+				outputs = { status = core.output.value() },
+				run = function(exec)
+					local result = exec.action({
+						argv = { "sh", "-ec", table.concat(script, "\n") },
+						env = { PATH = "" },
+						display = "test Zig wrappers without dirname",
+					})
+					return { status = { code = result.exit_code, stdout = result.stdout } }
+				end,
+			}).outputs.status)
+			assert(status.code == 0, tostring(status.code))
+			local args = "<argument with spaces>\n<*>\n"
+			local expected = "<ar>\n" .. args .. "<ranlib>\n" .. args .. "<cc>\n" .. args .. "<ar>\n" .. args
+			assert(status.stdout == expected, status.stdout)
 		end),
 
 		core.test.case("installs a toolchain on windows with .bat wrappers and a declared sh tool", function()

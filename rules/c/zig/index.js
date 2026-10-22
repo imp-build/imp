@@ -36,6 +36,8 @@ import {
 export const ZIG_TOOL = toolName("zig");
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
+// Change this revision when installed wrapper content changes.
+const INSTALL_REVISION = 2;
 // The prewarmed $ZIG_GLOBAL_CACHE_DIR is mutable — Zig rewrites it as it
 // JIT-builds runtime support code — so it is not `shared: true` (that scope
 // is for immutable version-keyed content). One fixed key: the content is
@@ -119,7 +121,7 @@ export function zigSupportedPlatforms() {
  * @returns {string}
  */
 export function zigCacheKey(version, plat) {
-	return `${version}/${plat.os}-${plat.arch}`;
+	return `v${INSTALL_REVISION}/${version}/${plat.os}-${plat.arch}`;
 }
 
 // Bare coreutils used by the download/extract scripts below. The sandbox is
@@ -148,7 +150,7 @@ function coreToolNames(plat) {
 function wrapperContent(plat, zigExe, subcommand) {
 	return plat.os === "windows"
 		? `@"%~dp0${zigExe}" ${subcommand} %*\r\n`
-		: `#!/bin/sh\nexec "$(dirname "$0")/${zigExe}" ${subcommand} "$@"\n`;
+		: `#!/bin/sh\nexec "\${0%/*}/${zigExe}" ${subcommand} "$@"\n`;
 }
 
 /**

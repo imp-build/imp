@@ -42,7 +42,7 @@ describe("Zig toolchain", () => {
 			expect(toolchain.attrs.version).toBe("0.13.0");
 			expect(
 				zigCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" }),
-			).toBe("0.13.0/linux-x86_64");
+			).toBe("v2/0.13.0/linux-x86_64");
 			expect(defaultZigToolchainVersion()).toBe("0.13.0");
 			expect(
 				host.calls.some(
@@ -72,7 +72,7 @@ describe("Zig toolchain", () => {
 			const key = zigCacheKey("0.13.0", { os: "linux", arch: "x86_64" });
 
 			expect(installZigToolchain("0.13.0", "/tmp/zig-0.13.0")).toBe(
-				"/cache/zig-toolchains/0.13.0/linux-x86_64",
+				"/cache/zig-toolchains/v2/0.13.0/linux-x86_64",
 			);
 			expect(
 				host.calls.some(
@@ -109,7 +109,7 @@ describe("Zig toolchain", () => {
 			zigToolchain("0.13.0", { default: true });
 
 			expect(await zigBin("0.13.0")).toBe(
-				"/cache/zig-toolchains/0.13.0/linux-x86_64/zig",
+				"/cache/zig-toolchains/v2/0.13.0/linux-x86_64/zig",
 			);
 			// Verified download plus install. The zig-build-cache prewarm is its
 			// own graph tool (zigGraphToolchain), not part of getting the binary.
@@ -137,6 +137,17 @@ describe("Zig toolchain", () => {
 
 			expect(install.argv).toContain("zigar");
 			expect(install.argv).toContain("zigranlib");
+			for (const [name, subcommand] of [
+				["zigar", "ar"],
+				["zigranlib", "ranlib"],
+				["clang", "cc"],
+				["ar", "ar"],
+			]) {
+				const index = install.argv.indexOf(name);
+				expect(install.argv[index - 1]).toBe(
+					`#!/bin/sh\nexec "\${0%/*}/zig" ${subcommand} "$@"\n`,
+				);
+			}
 			expect(
 				install.argv.some(
 					(arg) => typeof arg === "string" && arg.includes("#!/bin/sh"),

@@ -20,6 +20,8 @@ local toolchain = require("@imp/rules/imp/toolchain")
 local shell_quote = c_toolchain.shell_quote
 
 local ZIG_TOOLCHAIN_CACHE = "zig-toolchains"
+-- Change this revision when installed wrapper content changes.
+local INSTALL_REVISION = 2
 -- Zig changes the prewarmed $ZIG_GLOBAL_CACHE_DIR when it builds runtime
 -- support code. Zig addresses that content by what it compiles, not by the
 -- Zig version, so one fixed key serves each version.
@@ -99,7 +101,7 @@ end
 
 --- The named-cache key for a Zig version and platform.
 local function cache_key(version, plat)
-	return `{version}/{plat.os}-{plat.arch}`
+	return `v{INSTALL_REVISION}/{version}/{plat.os}-{plat.arch}`
 end
 
 local LOCKFILE_SPEC = lockfiles.register_toolchain_lockfile({
@@ -124,7 +126,7 @@ local function wrapper_content(plat, zig_exe, subcommand)
 	if plat.os == "windows" then
 		return `@"%~dp0{zig_exe}" {subcommand} %*\r\n`
 	end
-	return `#!/bin/sh\nexec "$(dirname "$0")/{zig_exe}" {subcommand} "$@"\n`
+	return `#!/bin/sh\nexec "$\{0%/*\}/{zig_exe}" {subcommand} "$@"\n`
 end
 
 -- The native tools of the install script. The sandbox is hermetic, so it
