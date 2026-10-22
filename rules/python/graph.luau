@@ -53,26 +53,17 @@ local function python_app(options)
 	local extra_pex_args = table.clone(options.extra_pex_args or {})
 	local inputs = inputs_for(spec)
 	inputs.pex, inputs.pex_cache = selected_pex.tool, selected_pex.cache_tool
-	inputs.cp, inputs.mkdir, inputs.dirname = core.native_tool("cp"), core.native_tool("mkdir"), core.native_tool("dirname")
 	local built = core.task({
 		display = `python-app build {spec.project.path}`, inputs = inputs, outputs = { artifact = core.output.artifact() },
 		run = function(exec, input)
-			local paths = {}
-			for _, path in ipairs(exec.paths(input.sources)) do
-				if spec.project.path ~= "." then
-					assert(string.sub(path, 1, #spec.project.path + 1) == spec.project.path .. "/", `python source {path} is not below {spec.project.path}`)
-					path = string.sub(path, #spec.project.path + 2)
-				end
-				table.insert(paths, path)
-			end
 			local argv = { "sh", "-c",
-				'project=$1; workspace=$2; uv=$3; pex=$4; out=$5; version=$6; entry=$7; pexargs=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$workspace" --all-packages --locked --no-dev --no-progress --managed-python --python "$version" && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$project/$path" "$stage/$path" || exit 1; done && "$workspace/$venvpy" "$pex" --venv-repository="$workspace/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
+				'project=$1; workspace=$2; uv=$3; pex=$4; out=$5; version=$6; entry=$7; pexargs=$8; venvpy=$9; stage=${10}; "$uv" sync --project "$workspace" --all-packages --locked --no-dev --no-progress --managed-python --python "$version" && "$workspace/$venvpy" "$pex" --venv-repository="$workspace/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
 				"python-app-build", spec.project.path, spec.project.workspace.path, uv.uv_bin(exec, input.uv), pex.pex_bin(exec, input.pex),
 				".imp-out/app.pex", spec.python_version, entry_point, table.concat(extra_pex_args, " "), venv_python(), ".imp-pex-sources" }
-			for _, path in ipairs(paths) do table.insert(argv, path) end
 			local env = uv.cache_env(exec, input.uv_cache)
 			for key, value in pairs(pex.cache_env(exec, input.pex_cache)) do env[key] = value end
-			local result = exec.action({ argv = argv, env = env, inputs = { input.workspace, input.sources },
+			-- UV needs sources at their project paths; PEX needs a separate source tree.
+			local result = exec.action({ argv = argv, env = env, inputs = { input.workspace, input.sources, { source = input.sources, from = spec.project.path, to = ".imp-pex-sources" } },
 				outputs = { artifact = core.output.file(".imp-out/app.pex") } })
 			return { artifact = result.outputs.artifact }
 		end,

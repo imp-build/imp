@@ -2391,6 +2391,16 @@ fn scoped_action_options(
                 LuaValue::UserData(handle) if handle.is::<GraphHandle>() => {
                     LuaValue::UserData(scoped_exec_handle(aliases, handle)?)
                 }
+                LuaValue::Table(mapping) => {
+                    let copy = lua.create_table()?;
+                    for pair in mapping.pairs::<LuaValue, LuaValue>() {
+                        let (key, value) = pair?;
+                        copy.set(key, value)?;
+                    }
+                    let source = mapping.get::<LuaAnyUserData>("source")?;
+                    copy.set("source", scoped_exec_handle(aliases, source)?)?;
+                    LuaValue::Table(copy)
+                }
                 value => value,
             };
             bound.set(key, value)?;
@@ -5515,6 +5525,104 @@ fn action_env_entries(action_env: Option<&LuaTable>) -> Result<Vec<(String, Stri
     Ok(entries)
 }
 
+/// One action-local relocation of a captured file set.
+struct MappedActionInput {
+    from: String,
+    to: String,
+    paths: Vec<String>,
+    tree: DirectoryDigest,
+}
+
+fn mapping_directory(path: &str) -> Result<()> {
+    if path != "."
+        && (path.is_empty()
+            || path.contains(['\\', ':', '\0'])
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".."))
+    {
+        bail!("action input mapping path must be '.' or a relative directory without traversal");
+    }
+    Ok(())
+}
+
+fn relocate_fileset(
+    captured: &crate::spike::GlobResult,
+    from: &str,
+    to: &str,
+) -> Result<DirectoryDigest> {
+    let prefix = format!("{from}/");
+    if from != "." && captured.files.iter().any(|path| !path.starts_with(&prefix)) {
+        bail!("action input mapping source contains paths outside '{from}'");
+    }
+    let inner = if captured.files.is_empty() || from == "." {
+        captured.digest.clone()
+    } else {
+        match imp_store::digest::resolve_in_trie(captured.digest.tree()?, from)? {
+            imp_store::digest::ResolvedEntry::Directory(tree) => tree,
+            _ => bail!("action input mapping 'from' must name a directory"),
+        }
+    };
+    nest_directory(to, &inner)
+}
+
+fn mapped_action_inputs(
+    host: &Rc<RefCell<HostState>>,
+    captures: &FilesetCaptures,
+    task_inputs: &LuaTable,
+    inputs: Option<&LuaTable>,
+) -> Result<BTreeMap<usize, MappedActionInput>> {
+    let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
+    let mut mapped = BTreeMap::new();
+    let mut trees = Vec::new();
+    if let Some(inputs) = inputs {
+        let has_mapping = inputs
+            .clone()
+            .sequence_values::<LuaValue>()
+            .any(|value| matches!(value, Ok(LuaValue::Table(_))));
+        if !has_mapping {
+            return Ok(mapped);
+        }
+        for (index, value) in inputs.sequence_values::<LuaValue>().enumerate() {
+            let value = value.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let LuaValue::Table(mapping) = value else {
+                // Include ordinary file sets in conflict validation for fake actions too.
+                if let LuaValue::UserData(handle) = value {
+                    let id = handle.borrow::<GraphHandle>().map_err(lua_error)?.id;
+                    if let Some(captured) = captured_fileset(&host.borrow(), captures, id)? {
+                        trees.push(captured.digest.clone());
+                    }
+                }
+                continue;
+            };
+            let source = mapping.get::<LuaAnyUserData>("source").map_err(lua_error)?;
+            let id = source.borrow::<GraphHandle>().map_err(lua_error)?.id;
+            require_declared_input(task_inputs, id, "action input mapping").map_err(lua_error)?;
+            let from = mapping.get::<String>("from").map_err(lua_error)?;
+            let to = mapping.get::<String>("to").map_err(lua_error)?;
+            mapping_directory(&from)?;
+            mapping_directory(&to)?;
+            let captured = captured_fileset(&host.borrow(), captures, id)?
+                .context("action input mapping source must be a file set")?;
+            let tree = relocate_fileset(&captured, &from, &to)?;
+            trees.push(tree.clone());
+            mapped.insert(
+                index + 1,
+                MappedActionInput {
+                    from,
+                    to,
+                    paths: captured.files.clone(),
+                    tree,
+                },
+            );
+        }
+    }
+    if !mapped.is_empty() {
+        imp_store::digest::merge_digests(trees)?;
+    }
+    Ok(mapped)
+}
+
 struct FakeActionRequest {
     argv: Vec<String>,
     display: String,
@@ -5524,6 +5632,7 @@ struct FakeActionRequest {
     env: Option<LuaTable>,
     inputs: Option<LuaTable>,
     task_inputs: LuaTable,
+    mapped_inputs: BTreeMap<usize, MappedActionInput>,
 }
 
 /// Record an action request in a test fake and return placeholder artifacts
@@ -5540,10 +5649,31 @@ fn run_fake_action(
     let mut input_count = 0;
     let recorded_inputs = lua.create_table().map_err(lua_error)?;
     if let Some(inputs) = &request.inputs {
-        for value in inputs.sequence_values::<LuaAnyUserData>() {
+        for value in inputs.sequence_values::<LuaValue>() {
             let value = value.map_err(lua_error)?;
-            let handle = value.borrow::<GraphHandle>().map_err(lua_error)?;
             input_count += 1;
+            if let Some(mapping) = request.mapped_inputs.get(&input_count) {
+                let record = lua.create_table().map_err(lua_error)?;
+                record
+                    .set("from", mapping.from.as_str())
+                    .map_err(lua_error)?;
+                record.set("to", mapping.to.as_str()).map_err(lua_error)?;
+                record
+                    .set(
+                        "paths",
+                        lua.create_sequence_from(mapping.paths.clone())
+                            .map_err(lua_error)?,
+                    )
+                    .map_err(lua_error)?;
+                recorded_inputs
+                    .set(input_count, record)
+                    .map_err(lua_error)?;
+                continue;
+            }
+            let LuaValue::UserData(value) = value else {
+                bail!("exec.action inputs require handles or file-set mappings");
+            };
+            let handle = value.borrow::<GraphHandle>().map_err(lua_error)?;
             if let Some(GraphNode::Artifact(artifact)) = host.borrow().nodes.get(&handle.id) {
                 let record = lua.create_table().map_err(lua_error)?;
                 record
@@ -5823,6 +5953,8 @@ async fn run_action(
         }
         _ => bail!("exec.action().cores must be an integer of 1 or more within the u32 range"),
     };
+    let mapped_inputs =
+        mapped_action_inputs(&host, &captures, &task_inputs, action_inputs.as_ref())?;
     let fake_run = host.borrow().fakes.run.clone();
     if let Some(recorder) = fake_run {
         return run_fake_action(
@@ -5838,6 +5970,7 @@ async fn run_action(
                 env: action_env,
                 inputs: action_inputs,
                 task_inputs,
+                mapped_inputs,
             },
             &options,
         );
@@ -5855,8 +5988,20 @@ async fn run_action(
 
     let mut input_specs = Vec::new();
     if let Some(inputs) = action_inputs {
-        for value in inputs.sequence_values::<LuaAnyUserData>() {
+        for (index, value) in inputs.sequence_values::<LuaValue>().enumerate() {
             let value = value.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if let Some(mapping) = mapped_inputs.get(&(index + 1)) {
+                input_specs.push(ExecIoSpec {
+                    path: None,
+                    kind: "digest".to_owned(),
+                    digest: Some(mapping.tree.digest().to_owned()),
+                    named_cache: None,
+                });
+                continue;
+            }
+            let LuaValue::UserData(value) = value else {
+                bail!("exec.action inputs require handles or file-set mappings");
+            };
             let handle = value
                 .borrow::<GraphHandle>()
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -7917,6 +8062,215 @@ return {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no case 'missing' found"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_mapping_cache_tracks_content_and_destination() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::create_dir(workspace.path().join("pkg")).unwrap();
+        fs::write(workspace.path().join("pkg/data"), "first").unwrap();
+        for (invocation, destination, expected_hit) in [
+            (0, "first", false),
+            (1, "first", true),
+            (2, "second", false),
+            (3, "second", false),
+            (4, "second", true),
+        ] {
+            if invocation == 3 {
+                fs::write(workspace.path().join("pkg/data"), "changed").unwrap();
+            }
+            fs::write(workspace.path().join("task.luau"), format!(r#"
+local core = require("@imp/core")
+return core.task({{ inputs = {{ files = core.files({{ root = "pkg", include = {{ "*" }} }}), sh = core.native_tool("sh") }},
+    run = function(exec, input)
+        exec.action({{ argv = {{ "sh", "-c", "true", "{}" }},
+            inputs = {{ {{ source = input.files, from = "pkg", to = "{destination}" }} }} }})
+    end }})
+"#, workspace.path().display())).unwrap();
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let LuaValue::UserData(task) = runtime.evaluate("@workspace/task").await.unwrap()
+            else {
+                panic!("expected task")
+            };
+            runtime.execute_task(&task).await.unwrap();
+            assert_eq!(runtime.action_count(), 1);
+            assert_eq!(
+                runtime.cache_hit_count(),
+                usize::from(expected_hit),
+                "invocation {invocation}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn luau_mapping_preserves_captured_symlinks_and_modes() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir(workspace.path().join("pkg")).unwrap();
+        fs::write(workspace.path().join("pkg/data"), [0, 255, 42]).unwrap();
+        fs::set_permissions(
+            workspace.path().join("pkg/data"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        symlink("data", workspace.path().join("pkg/link")).unwrap();
+        let files = vec!["pkg/data".to_owned(), "pkg/link".to_owned()];
+        let digest = imp_store::digest::capture_paths(workspace.path(), &files).unwrap();
+        let captured = crate::spike::GlobResult { files, digest };
+        let mapped = relocate_fileset(&captured, "pkg", "new").unwrap();
+        let output = tempfile::tempdir().unwrap();
+        imp_store::digest::materialize_trie(mapped.tree().unwrap(), output.path()).unwrap();
+        assert_eq!(
+            fs::read(output.path().join("new/data")).unwrap(),
+            [0, 255, 42]
+        );
+        assert_eq!(
+            fs::read_link(output.path().join("new/link")).unwrap(),
+            PathBuf::from("data")
+        );
+        assert_ne!(
+            fs::metadata(output.path().join("new/data"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        let other = relocate_fileset(&captured, "pkg", "other").unwrap();
+        assert_ne!(mapped.digest(), other.digest());
+        fs::write(workspace.path().join("pkg/data"), "changed").unwrap();
+        let changed = crate::spike::GlobResult {
+            digest: imp_store::digest::capture_paths(workspace.path(), &captured.files).unwrap(),
+            files: captured.files.clone(),
+        };
+        // The original capture is stable after a workspace edit.
+        assert_eq!(
+            relocate_fileset(&captured, "pkg", "new").unwrap().digest(),
+            mapped.digest()
+        );
+        let changed = relocate_fileset(&changed, "pkg", "new").unwrap();
+        assert_ne!(changed.digest(), mapped.digest());
+        assert!(imp_store::digest::merge_digests(vec![mapped.clone(), mapped.clone()]).is_ok());
+        assert!(imp_store::digest::merge_digests(vec![mapped, changed]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_action_maps_captured_filesets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::create_dir_all(workspace.path().join("pkg/sub")).unwrap();
+        fs::write(workspace.path().join("pkg/sub/data file"), [0, 255, 42]).unwrap();
+        fs::write(workspace.path().join("pkg/run"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(
+            workspace.path().join("pkg/run"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        symlink("sub/data file", workspace.path().join("pkg/link")).unwrap();
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
+return { tests = { [test.TEST] = core.test_root() } }
+"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("mapping.test.luau"), r#"
+local core = require("@imp/core")
+core.define_mode_axis("opt", { kind = "rebuild", values = { "debug", "release" }, ["default"] = "debug" })
+local files = core.files({ root = "pkg", include = { "**/*" } })
+local empty = core.files({ root = "pkg", include = { "missing" } })
+local subset = core.files({ root = "pkg/sub", include = { "*" } })
+local function task(from, to, source)
+    return core.task({ cache = false, inputs = { files = source, sh = core.native_tool("sh") },
+        run = function(exec, input)
+            exec.action({
+                argv = { "sh", "-c", "true" },
+                inputs = { { source = input.files, from = from, to = to } },
+            })
+        end })
+end
+-- Both sources must be task inputs.
+local function valid()
+    return core.task({ cache = false, inputs = { files = files, empty = empty, sh = core.native_tool("sh") },
+        run = function(exec, input)
+            exec.action({ argv = { "sh", "-c", 'test -d "empty dir" && test -x staged/run && test -f "staged/sub/data file" && test ! -e pkg && staged/run' },
+                inputs = { { source = files, from = "pkg", to = "staged" }, { source = input.empty, from = "pkg", to = "empty dir" } } })
+            exec.action({ argv = { "sh", "-c", 'test -f "root/pkg/sub/data file"' },
+                inputs = { { source = input.files, from = ".", to = "root" } } })
+            exec.action({ argv = { "sh", "-c", 'test -f "pkg/sub/data file"' },
+                inputs = { { source = input.files, from = ".", to = "." } } })
+        end })
+end
+local function rejects(from, to, source, expected, fake)
+    local value = task(from, to, source)
+    local function check()
+        local ok, problem = pcall(core.test.resolve, value)
+        assert(not ok and string.find(tostring(problem), expected, 1, true), tostring(problem))
+    end
+    if fake then core.test.with_fake_run(check) else check() end
+end
+return {
+    core.test.case("real mapping", function() core.test.resolve(valid()) end),
+    core.test.case("fake mapping", function()
+        core.test.with_fake_run(function(host)
+            core.test.resolve(core.configured(valid(), { opt = "release" }))
+            assert(host.runs[1].input_count == 2)
+            assert(host.runs[1].inputs[1].from == "pkg" and host.runs[1].inputs[1].to == "staged")
+            assert(table.find(host.runs[1].inputs[1].paths, "pkg/sub/data file"))
+        end)
+    end),
+    core.test.case("mapping conflicts", function()
+        local conflict = core.task({ cache = false, inputs = { files = files, subset = subset, sh = core.native_tool("sh") },
+            run = function(exec, input)
+                exec.action({ argv = { "sh", "-c", "true" }, inputs = {
+                    { source = input.files, from = "pkg", to = "out" },
+                    { source = input.subset, from = "pkg/sub", to = "out/run" },
+                } })
+            end })
+        for _, fake in ipairs({ false, true }) do
+            local function check()
+                local ok, problem = pcall(core.test.resolve, conflict)
+                assert(not ok and string.find(tostring(problem), "merge conflict", 1, true), tostring(problem))
+            end
+            if fake then core.test.with_fake_run(check) else check() end
+        end
+    end),
+    core.test.case("invalid mappings", function()
+        for _, fake in ipairs({ false, true }) do
+            for _, path in ipairs({ "", "/tmp", "../x", "a/../b", "C:/x", "a//b", "a/./b", "a\\b" }) do
+                rejects("pkg", path, files, "mapping path", fake)
+                rejects(path, "dest", files, "mapping path", fake)
+            end
+            rejects("other", "dest", files, "outside", fake)
+            rejects("pkg", "dest", core.native_tool("sh"), "must be a file set", fake)
+        end
+        local undeclared = core.task({ run = function(exec)
+            exec.action({ argv = { "sh", "-c", "true" }, inputs = { { source = files, from = "pkg", to = "x" } } })
+        end })
+        local ok, problem = pcall(core.test.resolve, undeclared)
+        assert(not ok and string.find(tostring(problem), "declared task input", 1, true), tostring(problem))
+    end),
+}
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await;
+        assert!(report.is_ok(), "{report:?}");
     }
 
     async fn run_luau_test_module(source: &str) -> (tempfile::TempDir, Result<Option<String>>) {

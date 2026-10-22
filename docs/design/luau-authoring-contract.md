@@ -13,6 +13,38 @@ configuration and introspection features. Treat other APIs and behavior in
 this document as planned unless this section or a later section marks them
 available.
 
+## Stage a file set under a prefix
+
+For rule authors, `exec.action` accepts file-set mapping entries in `inputs`:
+
+```luau
+inputs = {
+    input.workspace,
+    { source = input.sources, from = project_path, to = ".imp-pex-sources" },
+}
+```
+
+`source` must be a declared, resolved file-set input. Both directory paths are
+required. Use `"."` for the root. Paths use `/` separators and must be relative;
+absolute paths, drive paths, empty components, and `.` or `..` components are
+not permitted within a path.
+
+The action removes `from` from each captured path, then puts that path below
+`to`. Every source path must be below `from`. A path outside it causes an error.
+An empty file set creates an empty destination directory. The mapping uses the
+same capture as `exec.paths` and `exec.digest`; it does not read source files
+again. It preserves file content, modes, and symlink entries. Relative symlink
+targets are not rewritten. File-set discovery currently omits symlinks;
+this mapping does not change discovery.
+
+Plain input handles keep their paths. Inputs merge by their destination paths:
+identical entries can overlap; different content or entry types cause an error.
+This API is available only in Luau and maps file sets, not task artifacts.
+
+Fake actions validate mappings too. Their `inputs` recorder table has an entry
+at each mapping position with `from`, `to`, and `paths` (the original captured
+source paths). Each mapping counts as one input in `input_count`.
+
 ## Current host capabilities
 
 **Verified:** The current implementation is in
@@ -127,7 +159,8 @@ The recorder tables contain these fields:
   `input_count` (the number of `inputs` handles), `tools` (sorted tool names
   from the task inputs), `inputs` (artifact entries indexed by input position,
   each with `path` and a CAS tree `digest`), and `outputs` (output name to
-  declared path). Non-artifact inputs have no entry in `inputs`. A faked
+  declared path). Plain file-set inputs have no entry in `inputs`. File-set mappings have the
+  entries described in "Stage a file set under a prefix". A faked
   `core.run_program` call adds an entry with `program = true`, `argv` (with
   the program arguments), `display`, `env`, `inputs` (digests), and the run
   policy fields `impure`, `sandbox`, `workspace_cwd`, and `stream`.

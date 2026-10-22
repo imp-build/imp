@@ -57,6 +57,11 @@ IMP_RUNTIME=luau imp run '//:scripts#scripts/demo.py' -- one "two words"
 IMP_RUNTIME=luau imp package //:app
 ```
 
+Python apps stage only their declared source files under `.imp-pex-sources`
+with paths relative to the project. This permits projects at the workspace
+root and avoids a source-copy loop or one build argument per source file.
+UV also receives the declared sources at their original project paths.
+
 `build` stores the PEX artifact in the CAS. `package` publishes it under
 `dist/`. App and source runs stage their inputs in a sandbox and forward
 arguments after `--`. They do not create a workspace `.venv`. Source patterns
