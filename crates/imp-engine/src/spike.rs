@@ -783,6 +783,7 @@ pub(crate) async fn load_workspace_with_runtime(
             .with_context(|| "Luau workspaces require an installed rules tree or IMP_RULES_DIR")?;
         let mut luau = crate::luau::LuauWorkspace::new_with_service(&root, rules_root, service)?;
         live.workspace.graph.roots = luau.load_modules().await?;
+        *live.import_graph.lock().unwrap() = luau.import_graph();
         live.workspace.workspace_config = luau.workspace_config();
         {
             let mut host = live.host_state.lock().unwrap();
@@ -2204,6 +2205,15 @@ async fn resolve_luau_expansion(
     luau.borrow_mut().resolve_expansion_root(root).await
 }
 
+// Lune must keep its RefCell borrow while asynchronous discovery runs.
+#[allow(clippy::await_holding_refcell_ref)]
+async fn walk_luau_changed_graph(
+    luau: &std::cell::RefCell<crate::luau::LuauWorkspace>,
+    roots: &[&GraphRoot],
+) -> Result<GraphWalk> {
+    luau.borrow_mut().changed_graph_walk(roots).await
+}
+
 /// Resolve `selectors` against the graph catalog, then merge in synthetic
 /// `parent#childKey` roots discovered by expanding whatever the selectors
 /// reached — a package/recursive selector picks up every expansion child
@@ -2579,7 +2589,18 @@ pub async fn stale_graph_addresses(
     if all_roots.is_empty() || changed_paths.is_empty() {
         return Ok(GraphChangedResult::default());
     }
-    let walk = walk_graph_for_introspection(live, &all_roots, true, true, None).await?;
+    let walk = if let Some(luau) = &live.luau {
+        let scheduler = live.scheduler.lock().unwrap().clone();
+        let _guard = luau.borrow().scheduler_scope(scheduler.clone());
+        let cancellation = scheduler
+            .as_ref()
+            .map(|scheduler| scheduler.cancellation_flag())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        luau.borrow_mut().begin_graph_run(cancellation);
+        walk_luau_changed_graph(luau, &all_roots).await?
+    } else {
+        walk_graph_for_introspection(live, &all_roots, true, true, None).await?
+    };
     let synthetic = walk.synthetic_children(&all_roots);
     let (stale_ids, covered_paths) = walk.stale_node_ids(changed_paths);
     let addresses = all_roots

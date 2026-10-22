@@ -3,8 +3,8 @@
 //! Maps the files git reports as changed since a ref onto the targets that
 //! own them. Three mechanisms, all provenance rather than declaration:
 //!
-//! - The recorded JS module import graph (a changed rule module invalidates
-//!   every package that transitively imports it; a changed BUILD.js
+//! - The recorded module import graph (a changed rule module invalidates
+//!   every package that transitively imports it; a changed BUILD module
 //!   re-selects exactly its own package). Covers both legacy
 //!   `target()`-declared targets and exported graph-native roots (#65) — a
 //!   package's ownership isn't which target model it uses.
@@ -39,17 +39,22 @@ use anyhow::{bail, Context, Result};
 
 use crate::runtime::LiveWorkspace;
 use crate::spike::{
-    stale_graph_addresses, Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE,
+    stale_graph_addresses, AuthoringRuntime, Workspace, BUILD_FILE, CI_WORKSPACE_FILE,
+    CI_WORKSPACE_LUAU_FILE, WORKSPACE_FILE, WORKSPACE_LUAU_FILE,
 };
 use crate::trace_changed::{LabelChangeContext, TraceIndex};
 
-/// Import edges observed while loading the workspace's JS modules, plus the
+/// Import edges observed while loading workspace modules, plus the
 /// file/package identity needed to map a changed file back into the graph.
 /// Populated by the module resolver (every `import` resolution records an
-/// edge, even for already-cached modules) and seeded with the BUILD.js roots
+/// edge, even for already-cached modules) and seeded with the BUILD roots
 /// that are loaded directly rather than imported.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ImportGraph {
+    /// The selected authoring runtime, independent of source filenames.
+    pub runtime: AuthoringRuntime,
+    /// Canonical modules loaded as workspace configuration.
+    pub workspace_modules: BTreeSet<String>,
     /// Importee module name -> importer module names.
     pub importers: BTreeMap<String, BTreeSet<String>>,
     /// Workspace-relative file path (forward slashes) -> module names that
@@ -58,6 +63,20 @@ pub struct ImportGraph {
     /// BUILD module name -> the package scope it defines (`//dir`, or `//`
     /// for the workspace root package).
     pub build_module_scopes: BTreeMap<String, String>,
+}
+
+impl Default for ImportGraph {
+    fn default() -> Self {
+        Self {
+            runtime: AuthoringRuntime::JavaScript,
+            workspace_modules: [WORKSPACE_FILE.to_owned(), CI_WORKSPACE_FILE.to_owned()]
+                .into_iter()
+                .collect(),
+            importers: BTreeMap::new(),
+            module_files: BTreeMap::new(),
+            build_module_scopes: BTreeMap::new(),
+        }
+    }
 }
 
 impl ImportGraph {
@@ -293,13 +312,13 @@ pub fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<Strin
 }
 
 // ---------------------------------------------------------------------------
-// JS module/package graph
+// Module/package graph
 // ---------------------------------------------------------------------------
 
-/// Map changed workspace-relative paths to target addresses via BUILD.js
-/// package membership and the JS module import graph — a changed rule
+/// Map changed workspace-relative paths to target addresses via BUILD
+/// package membership and the module import graph — a changed rule
 /// module invalidates every package that (transitively) imports it; a
-/// changed `imp.workspace.js` invalidates everything. A package's targets
+/// changed workspace configuration invalidates everything. A package's targets
 /// include both legacy `target()`-declared addresses and exported
 /// graph-native roots (`workspace.graph.roots`) — the import graph doesn't
 /// distinguish target models, so neither should this. Returns the address
@@ -313,23 +332,29 @@ pub(crate) fn module_graph_targets(
 ) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut owners: BTreeSet<String> = BTreeSet::new();
     let mut owned_paths: BTreeSet<String> = BTreeSet::new();
-    // Set when a change invalidates the whole workspace (imp.workspace.js,
+    // Set when a change invalidates the whole workspace (its configuration,
     // directly or as a transitive importer of a changed module). The loop
     // still finishes so `owned_paths` reporting stays complete.
     let mut select_all = false;
+    let luau = graph.runtime == AuthoringRuntime::Luau;
+    let (build_file, workspace_file, ci_workspace_file) = if luau {
+        ("BUILD.luau", WORKSPACE_LUAU_FILE, CI_WORKSPACE_LUAU_FILE)
+    } else {
+        (BUILD_FILE, WORKSPACE_FILE, CI_WORKSPACE_FILE)
+    };
 
     for path in changed {
-        if path == WORKSPACE_FILE || path == CI_WORKSPACE_FILE {
+        if path == workspace_file || path == ci_workspace_file {
             select_all = true;
             owned_paths.insert(path.clone());
             continue;
         }
 
-        // A changed BUILD.js re-declares its whole package.
-        let build_dir = if path == BUILD_FILE {
+        // A changed BUILD module re-declares its whole package.
+        let build_dir = if path == build_file {
             Some("")
         } else {
-            path.strip_suffix(&format!("/{BUILD_FILE}"))
+            path.strip_suffix(&format!("/{build_file}"))
         };
         if let Some(dir) = build_dir {
             let scope = if dir.is_empty() {
@@ -339,18 +364,29 @@ pub(crate) fn module_graph_targets(
             };
             insert_package_roots(workspace, &scope, &mut owners);
             owned_paths.insert(path.clone());
-            // BUILD.js files define their package rather than reusable rule
+            // BUILD files define their package rather than reusable rule
             // modules. Their import edges are dependency declarations, not
-            // reverse invalidation edges, so a BUILD.js change must stay
+            // reverse invalidation edges, so a BUILD change must stay
             // package-scoped.
             continue;
         }
 
-        // A changed JS module invalidates every package that (transitively)
+        if luau && path.ends_with(".test.luau") {
+            let package = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            let scope = if package.is_empty() {
+                "//".to_owned()
+            } else {
+                format!("//{package}")
+            };
+            insert_package_roots(workspace, &scope, &mut owners);
+            owned_paths.insert(path.clone());
+        }
+
+        // A changed module invalidates every package that (transitively)
         // imports it.
         if let Some(modules) = graph.module_files.get(path) {
             for module in reverse_importer_closure(graph, modules) {
-                if module == WORKSPACE_FILE || module == CI_WORKSPACE_FILE {
+                if graph.workspace_modules.contains(&module) {
                     select_all = true;
                 } else if let Some(scope) = graph.build_module_scopes.get(&module) {
                     insert_package_roots(workspace, scope, &mut owners);

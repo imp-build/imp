@@ -15,7 +15,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::graph::GraphRoot;
+use crate::graph::{GraphRoot, GraphWalk, GraphWalkEdge, GraphWalkNode};
 use anyhow::{bail, Context, Result};
 use imp_exec_api::{
     CacheOutcome, ExecAction, ExecIoSpec, ExecToolSpec, ExecutionService, SandboxRetention,
@@ -43,6 +43,39 @@ struct ModuleLoader {
     stack: Rc<RefCell<Vec<String>>>,
     cache: Rc<RefCell<HashMap<String, LuaValue>>>,
     failure: Rc<RefCell<Option<String>>>,
+    import_graph: Rc<RefCell<crate::changed::ImportGraph>>,
+}
+
+impl ModuleLoader {
+    fn record_module(&self, path: &Path, canonical: &str, importer: Option<&str>) {
+        let mut graph = self.import_graph.borrow_mut();
+        if let Some(importer) = importer {
+            graph
+                .importers
+                .entry(canonical.to_owned())
+                .or_default()
+                .insert(importer.to_owned());
+        }
+        if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let scope = if canonical.starts_with("@workspace/")
+                && path.file_name().is_some_and(|name| name == "BUILD.luau")
+            {
+                let package = relative
+                    .strip_suffix("BUILD.luau")
+                    .unwrap()
+                    .trim_end_matches('/');
+                Some(if package.is_empty() {
+                    "//".to_owned()
+                } else {
+                    format!("//{package}")
+                })
+            } else {
+                None
+            };
+            graph.record_module_file(relative, canonical, scope.as_deref());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -401,6 +434,11 @@ impl LuauWorkspace {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph {
+                runtime: crate::spike::AuthoringRuntime::Luau,
+                workspace_modules: Default::default(),
+                ..Default::default()
+            })),
         };
         let host = Rc::new(RefCell::new(HostState {
             cache_details: BTreeMap::new(),
@@ -494,6 +532,17 @@ impl LuauWorkspace {
     pub async fn evaluate(&mut self, address: &str) -> Result<LuaValue> {
         let (path, canonical) = resolve_address(&self.loader, address, None)
             .map_err(|error| anyhow::anyhow!("resolve Luau module '{address}': {error}"))?;
+        self.loader.record_module(&path, &canonical, None);
+        if matches!(
+            address,
+            "@workspace/imp.workspace" | "@workspace/imp.workspace.ci"
+        ) {
+            self.loader
+                .import_graph
+                .borrow_mut()
+                .workspace_modules
+                .insert(canonical.clone());
+        }
         let source = fs::read_to_string(&path)
             .with_context(|| format!("read Luau module {}", path.display()))?;
         self.loader.stack.borrow_mut().push(canonical.clone());
@@ -524,6 +573,222 @@ impl LuauWorkspace {
         self.set_invocation_mode(mode, None)?;
         self.configuration.borrow_mut().invocation_values = None;
         Ok(roots)
+    }
+
+    pub(crate) fn import_graph(&self) -> crate::changed::ImportGraph {
+        self.loader.import_graph.borrow().clone()
+    }
+
+    /// Inspect declared dependencies, running only expansion discovery inputs.
+    pub(crate) async fn changed_graph_walk(&mut self, roots: &[&GraphRoot]) -> Result<GraphWalk> {
+        let mut state = ChangedGraphWalk::default();
+        let scope = invocation_mode(&self.host.borrow());
+        for root in roots {
+            let id = self
+                .walk_changed_node(root.handle_id as u64, &scope, &mut state)
+                .await?;
+            let mut node = state.nodes[&id].clone();
+            node.id = root.handle_id;
+            state.roots.insert(root.handle_id, node);
+        }
+        // Walk-local ids are remapped above the runtime ids after discovery.
+        let offset =
+            u32::try_from(self.host.borrow().next_id).context("too many Luau graph handles")?;
+        let remap = |id: u32| {
+            offset
+                .checked_add(id)
+                .context("too many Luau change-detection nodes")
+        };
+        let mut nodes = Vec::new();
+        for (is_root, mut node) in state
+            .nodes
+            .into_values()
+            .map(|node| (false, node))
+            .chain(state.roots.into_values().map(|node| (true, node)))
+        {
+            if !is_root {
+                node.id = remap(node.id)?;
+            }
+            for edge in &mut node.edges {
+                edge.handle_id = remap(edge.handle_id)?;
+            }
+            for child in node.children.values_mut() {
+                *child = remap(*child)?;
+            }
+            nodes.push(node);
+        }
+        Ok(GraphWalk { nodes })
+    }
+
+    fn walk_changed_node<'a>(
+        &'a mut self,
+        id: u64,
+        parent_scope: &'a ModeScope,
+        state: &'a mut ChangedGraphWalk,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32>> + 'a>> {
+        Box::pin(async move {
+            let (base, scope) = scoped_node(&self.host.borrow(), id, parent_scope);
+            let key = (base, scope.clone());
+            if state.visiting.contains(&key) {
+                bail!("cyclic Luau graph dependency at handle {id}");
+            }
+            if let Some(id) = state.ids.get(&key) {
+                return Ok(*id);
+            }
+            state.visiting.insert(key.clone());
+            let walk_id = u32::try_from(state.ids.len() + 1)
+                .context("too many Luau change-detection nodes")?;
+            state.ids.insert(key.clone(), walk_id);
+            let node = self
+                .host
+                .borrow()
+                .nodes
+                .get(&base)
+                .cloned()
+                .context("unknown Luau graph handle")?;
+            let mut walk = GraphWalkNode {
+                id: walk_id,
+                kind: "input".to_owned(),
+                edges: Vec::new(),
+                children: BTreeMap::new(),
+                data: None,
+                display: None,
+            };
+            let mut inputs = Vec::new();
+            match node {
+                GraphNode::Files(spec) => {
+                    let source_root = spec
+                        .source_root
+                        .as_deref()
+                        .unwrap_or(&self.loader.workspace_root);
+                    if let Ok(prefix) = source_root.strip_prefix(&self.loader.workspace_root) {
+                        let root = crate::spike::path_to_workspace_string(
+                            &prefix.join(crate::spike::workspace_relative_directory(&spec.root)?),
+                        );
+                        walk.kind = "files".to_owned();
+                        walk.data = Some(
+                            serde_json::json!({ "root": root, "include": spec.include, "exclude": spec.exclude }),
+                        );
+                    }
+                }
+                GraphNode::TestRoot { package } => {
+                    walk.kind = "files".to_owned();
+                    walk.data = Some(
+                        serde_json::json!({ "root": package, "include": ["**/*"], "exclude": [] }),
+                    );
+                }
+                GraphNode::Task => {
+                    let task = self
+                        .host
+                        .borrow()
+                        .tasks
+                        .get(&base)
+                        .cloned()
+                        .context("unknown Luau task")?;
+                    collect_changed_input_handles(
+                        &LuaValue::Table(task.inputs),
+                        &mut inputs,
+                        &mut std::collections::HashSet::new(),
+                    )?;
+                }
+                GraphNode::Program(program) => {
+                    collect_changed_input_handles(
+                        &LuaValue::Table(program.inputs),
+                        &mut inputs,
+                        &mut std::collections::HashSet::new(),
+                    )?;
+                }
+                GraphNode::TaskOutput {
+                    task_id: source_id, ..
+                }
+                | GraphNode::Path { source_id, .. }
+                | GraphNode::Tool { source_id, .. } => inputs.push(source_id),
+                GraphNode::ExpansionGet { expansion_id, .. }
+                | GraphNode::ExpansionAll { expansion_id, .. } => {
+                    let expansion = self
+                        .host
+                        .borrow()
+                        .expansions
+                        .get(&expansion_id)
+                        .cloned()
+                        .context("unknown Luau expansion")?;
+                    collect_changed_input_handles(
+                        &LuaValue::Table(expansion.inputs),
+                        &mut inputs,
+                        &mut std::collections::HashSet::new(),
+                    )?;
+                    let projection = self.host.borrow().nodes[&base].clone();
+                    let (selected, workflow, facet) = match projection {
+                        GraphNode::ExpansionGet {
+                            key,
+                            workflow,
+                            facet,
+                            ..
+                        } => (Some(key), workflow, facet),
+                        GraphNode::ExpansionAll {
+                            workflow, facet, ..
+                        } => (None, workflow, facet),
+                        _ => unreachable!(),
+                    };
+                    walk.kind = if selected.is_none() {
+                        "expansion-all"
+                    } else {
+                        "expansion-get"
+                    }
+                    .to_owned();
+                    let (children, _) = discover_mode_expansion(
+                        &self.lua()?,
+                        &self.host,
+                        &self.configuration,
+                        expansion_id,
+                        &scope,
+                        &[],
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("discover Luau change dependencies: {error}")
+                    })?;
+                    let keys = if let Some(key) = &selected {
+                        vec![key.clone()]
+                    } else {
+                        let mut keys = Vec::new();
+                        for pair in children.pairs::<String, LuaValue>() {
+                            keys.push(pair.map_err(|error| anyhow::anyhow!(error.to_string()))?.0);
+                        }
+                        keys.sort();
+                        keys
+                    };
+                    for child_key in keys {
+                        let child = expansion_child_handle(
+                            &self.host.borrow(),
+                            &children,
+                            &child_key,
+                            &workflow,
+                            facet.as_deref(),
+                        )?;
+                        let child = self.walk_changed_node(child, &scope, state).await?;
+                        if selected.is_none() {
+                            walk.children.insert(child_key.clone(), child);
+                        }
+                        walk.edges.push(GraphWalkEdge {
+                            name: child_key,
+                            handle_id: child,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            for input in inputs {
+                let input = self.walk_changed_node(input, &scope, state).await?;
+                walk.edges.push(GraphWalkEdge {
+                    name: "input".to_owned(),
+                    handle_id: input,
+                });
+            }
+            state.visiting.remove(&key);
+            state.nodes.insert(walk_id, walk);
+            Ok(walk_id)
+        })
     }
 
     pub fn mode_registry(
@@ -1647,6 +1912,36 @@ fn validate_config_value(
     }
 }
 
+#[derive(Default)]
+struct ChangedGraphWalk {
+    ids: BTreeMap<(u64, ModeScope), u32>,
+    visiting: std::collections::BTreeSet<(u64, ModeScope)>,
+    nodes: BTreeMap<u32, GraphWalkNode>,
+    roots: BTreeMap<u32, GraphWalkNode>,
+}
+
+fn collect_changed_input_handles(
+    value: &LuaValue,
+    handles: &mut Vec<u64>,
+    tables: &mut std::collections::HashSet<usize>,
+) -> Result<()> {
+    match value {
+        LuaValue::UserData(value) => {
+            if let Ok(handle) = value.borrow::<GraphHandle>() {
+                handles.push(handle.id);
+            }
+        }
+        LuaValue::Table(table) if tables.insert(table.to_pointer() as usize) => {
+            for pair in table.pairs::<LuaValue, LuaValue>() {
+                let (_, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                collect_changed_input_handles(&value, handles, tables)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn install_require(
     lua: &Lua,
     core: LuaTable,
@@ -1659,6 +1954,7 @@ fn install_require(
         }
         let current = loader.stack.borrow().last().cloned();
         let (path, canonical) = resolve_address(&loader, &address, current.as_deref())?;
+        loader.record_module(&path, &canonical, current.as_deref());
         if let Some(value) = loader.cache.borrow().get(&canonical).cloned() {
             return Ok(value);
         }
@@ -6386,6 +6682,196 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn changed_module_provenance_covers_rules_and_workspace_imports() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = root.path().join("rules");
+        fs::create_dir_all(rules.join("sample")).unwrap();
+        fs::write(rules.join("sample/leaf.luau"), "return true\n").unwrap();
+        fs::write(
+            rules.join("sample/index.luau"),
+            "return require('./leaf')\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("settings.luau"), "return {}\n").unwrap();
+        fs::write(root.path().join("imp.workspace.luau"), "local core = require('@imp/core')\ncore.goal('build', function() end)\nreturn require('@workspace/settings')\n").unwrap();
+        for package in ["a", "b"] {
+            fs::create_dir(root.path().join(package)).unwrap();
+            fs::write(root.path().join(package).join("BUILD.luau"), "local core = require('@imp/core')\nrequire('@imp/rules/sample')\nrequire('@workspace/rules/sample/leaf')\nreturn { app = core.task({ inputs = { builtin = core.builtin_files({ root = 'data', include = { '*.txt' } }) }, run = function() end }) }\n").unwrap();
+        }
+        let mut runtime = LuauWorkspace::new(root.path(), &rules).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let workspace = crate::spike::Workspace {
+            graph: crate::graph::GraphCatalog { roots },
+            ..Default::default()
+        };
+        let walk = runtime
+            .changed_graph_walk(&workspace.graph.roots.iter().collect::<Vec<_>>())
+            .await
+            .unwrap();
+        let (stale, covered) = walk.stale_node_ids(&[
+            "rules/data/deleted.txt".to_owned(),
+            "data/deleted.txt".to_owned(),
+        ]);
+        assert!(workspace
+            .graph
+            .roots
+            .iter()
+            .all(|root| stale.contains(&root.handle_id)));
+        assert_eq!(
+            covered,
+            ["rules/data/deleted.txt".to_owned()].into_iter().collect()
+        );
+        let graph = runtime.import_graph();
+        assert_eq!(graph.module_files["rules/sample/leaf.luau"].len(), 2);
+        for path in ["rules/sample/leaf.luau", "settings.luau"] {
+            let (addresses, covered) =
+                crate::changed::module_graph_targets(&workspace, &graph, &[path.to_owned()]);
+            assert_eq!(
+                addresses,
+                ["//a:app".to_owned(), "//b:app".to_owned()]
+                    .into_iter()
+                    .collect(),
+                "{path}"
+            );
+            assert!(covered.contains(path));
+        }
+        for path in ["a/BUILD.js", "imp.workspace.js"] {
+            let (addresses, covered) =
+                crate::changed::module_graph_targets(&workspace, &graph, &[path.to_owned()]);
+            assert!(addresses.is_empty(), "{path}");
+            assert!(covered.is_empty(), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_walk_follows_scoped_outputs_tools_programs_and_nested_expansions() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(root.path().join("BUILD.luau"), r#"
+local core = require('@imp/core')
+local build = require('@imp/rules/workflows/build')
+local run = require('@imp/rules/workflows/run')
+local test = require('@imp/rules/workflows/test')
+core.define_mode_axis('opt', { kind = 'rebuild', default = 'debug', values = { 'debug', 'release' } })
+local source = core.task({
+    inputs = { nested = { core.files({ root = 'src', include = { '*.txt' }, exclude = { 'skip.txt' } }) } },
+    outputs = { value = core.output.value(), directory = core.output.artifact() },
+    run = function() error('source action must not run') end,
+})
+local inputs = { value = source.outputs.value, path = core.path(source.outputs.directory), tool = core.tool(source.outputs.directory, { name = 'fixture' }) }
+local task = core.task({ inputs = inputs, run = function() error('root action must not run') end })
+local inner = core.expand({ create = function()
+    return { child = { [build.BUILD] = task } }
+end })
+local outer = core.expand({
+    inputs = { opt = core.semantic.mode('opt') },
+    create = function(input)
+        return { child = { [build.BUILD] = core.task({
+            inputs = { files = core.files({ root = 'modes', include = { input.opt .. '.txt' } }) },
+            run = function() error('mode action must not run') end,
+        }) } }
+    end,
+})
+local nested = core.expand({ create = function() return { child = { [build.BUILD] = inner:get('child', build.BUILD) } } end })
+return {
+    task = task,
+    external = core.task({ inputs = { files = core.builtin_files({ root = 'src', include = { '*.txt' } }) }, run = function() error('external root must not run') end }),
+    configured = core.configured(task, { opt = 'release' }),
+    program = { [run.RUN] = core.program({ inputs = inputs, describe = function() error('program must not be described') end }) },
+    nested = { [build.BUILD] = nested:all(build.BUILD) },
+    debug = { [build.BUILD] = outer:get('child', build.BUILD) },
+    release = { [build.BUILD] = core.configured(outer:all(build.BUILD), { opt = 'release' }) },
+    tests = { [test.TEST] = core.test_root() },
+}
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        runtime.begin_graph_run(Arc::new(AtomicBool::new(false)));
+        let walk = runtime
+            .changed_graph_walk(&roots.iter().collect::<Vec<_>>())
+            .await
+            .unwrap();
+        let synthetic = walk.synthetic_children(&roots.iter().collect::<Vec<_>>());
+        for (path, wanted) in [
+            (
+                "src/deleted.txt",
+                vec![
+                    "//:task",
+                    "//:configured",
+                    "//:program",
+                    "//:nested",
+                    "//:nested#child",
+                    "//:tests",
+                ],
+            ),
+            ("src/skip.txt", vec!["//:tests"]),
+            ("modes/debug.txt", vec!["//:debug", "//:tests"]),
+            (
+                "modes/release.txt",
+                vec!["//:release", "//:release#child", "//:tests"],
+            ),
+        ] {
+            let (stale, covered) = walk.stale_node_ids(&[path.to_owned()]);
+            let addresses: std::collections::BTreeSet<_> = roots
+                .iter()
+                .chain(&synthetic)
+                .filter(|root| stale.contains(&root.handle_id))
+                .map(|root| root.address.as_str())
+                .collect();
+            assert_eq!(addresses, wanted.into_iter().collect(), "{path}");
+            assert!(covered.contains(path));
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_walk_reports_cycles_and_discovery_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(
+            root.path().join("BUILD.luau"),
+            r#"
+local core = require('@imp/core')
+require('@imp/rules/workflows/build')
+local inputs = {}
+local task = core.task({ inputs = inputs, run = function() error('must not run') end })
+inputs.self = task
+return { cycle = task }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let error = runtime
+            .changed_graph_walk(&roots.iter().collect::<Vec<_>>())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("cyclic Luau graph dependency"),
+            "{error:#}"
+        );
+        fs::write(
+            root.path().join("BUILD.luau"),
+            r#"
+local core = require('@imp/core')
+local build = require('@imp/rules/workflows/build')
+local expansion = core.expand({ create = function() error('fixture discovery failed') end })
+return { bad = { [build.BUILD] = expansion:all(build.BUILD) } }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let error = runtime
+            .changed_graph_walk(&roots.iter().collect::<Vec<_>>())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("fixture discovery failed"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn cli_tool_resolver_preserves_its_module_context_and_restores_the_caller() {
         let root = tempfile::tempdir().unwrap();
         let rules = crate::loader::RulesSource::discover();
@@ -11005,6 +11491,7 @@ return {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
         };
         let error = resolve_address(&loader, "@workspace/../outside", None).unwrap_err();
         assert!(error.to_string().contains("escapes its namespace root"));
@@ -11022,6 +11509,7 @@ return {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
         };
 
         let generated_name = resolve_address(&loader, "@workspace/pkg", None).unwrap();
@@ -11048,6 +11536,7 @@ return {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
         };
 
         let missing = resolve_address(&loader, "@workspace/missing", None).unwrap_err();
@@ -11092,6 +11581,7 @@ return {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
         };
 
         let (path, address) =
@@ -11119,6 +11609,7 @@ return {
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
         };
 
         let error = resolve_address(&loader, "@workspace/escape", None).unwrap_err();
