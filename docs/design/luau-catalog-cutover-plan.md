@@ -321,3 +321,53 @@ The Zola guide documents Luau now. Generated Luau references remain deferred
 to `2026-09-30-integrate-luau-workspace-tests-and-docs`. The Zola task's
 reference-generation acceptance criterion remains incomplete until that work
 lands.
+
+## Python core package port
+
+The Python core package provides Luau project/workspace declarations, runtime
+selection, PEX app builds, pytest roots, and shallow source-run expansions.
+The example and native-wheel fixtures have Luau BUILD modules. JavaScript
+remains available for its runtime, the documentation build, and the pending
+Ruff port. Core graph tests do not require Ruff.
+
+Source runs use explicit expansion selectors, such as
+`//:scripts#scripts/demo.py`. Bare file-path lookup exists only in the
+JavaScript CLI path and remains a Luau integration gap. This package port
+does not change the Rust host, by user decision.
+
+The Python guide documents the Luau API. Generated Luau references remain
+with `2026-09-30-integrate-luau-workspace-tests-and-docs`, as agreed for this
+port. The Python core reference-generation acceptance criterion remains
+incomplete until that work lands.
+
+### Python core verification
+
+Verified on Linux on 2026-10-22, from the repository root:
+
+| Command | Result |
+| --- | --- |
+| `cargo build -p imp` | Exit 0. Built the checkout binary. |
+| `cargo test --workspace` | Exit 0. All workspace and doc tests passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/python:rules_test` | Exit 0. 47/47 units passed. |
+| `IMP_RUNTIME=luau target/debug/imp build //rules/python/example:hello` | Exit 0. Built the example PEX. |
+| `python3 rules/python/testdata/consumer_check.py --imp target/debug/imp` | Exit 0. Guide discovery and real core consumers passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //...` | Exit 0. 578/578 units passed. Four action failures were expected negative-test cases. |
+| `imp test //rules/python:rules_test` | Exit 0. The JavaScript Python rule tests passed. |
+| `imp fmt //...` | Exit 0. 61 unchanged, 0 changed, 0 failed. |
+| `imp lint //...` | Exit 0. 46 clean, 0 fixed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0. 58/58 units passed with the checkout binary. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //docs:quality` | Exit 0. Documentation quality was clean. |
+
+The consumer check covers root and nested PEX builds, packaging, native wheels,
+argument forwarding, process failure, source edits, pytest failure, project
+scripts, and scripts without a project. It checks that actions do not leave
+virtual environments or staging directories in the workspace.
+
+The installed `imp test //...` returned exit 1 with 57/58 units passed. The
+engine environment test failed because the installed executor did not set
+`IMP_CACHE_DIR`. This is an installed-binary environment mismatch. Native
+Windows and macOS execution were not checked.
+
+The port preserves the existing pytest summary parser. If pytest prints only
+passing summaries and then exits with an error, the parser can report success.
+Correcting that behavior requires a separate change.

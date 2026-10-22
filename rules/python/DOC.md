@@ -1,11 +1,115 @@
 The Python rules model projects declared in `pyproject.toml` files and uv
 workspaces that lock several projects together. Applications build into
 self-contained PEX files; tests use the locked workspace environment and run
-pytest. Ruff supplies the format and lint products for application targets.
+pytest. This guide is for rule authors. Luau provides the core Python rules;
+Ruff format and lint products remain available through the JavaScript rules.
 
 <!-- capabilities -->
 
 ## Public API
+
+### Use the Luau core rules
+
+**Verified:** The migration branch provides `@imp/rules/python`. Its public
+functions are `python_workspace`, `python_project`, `python_runtime`,
+`python_app`, `python_test`, and `python_sources`. Options and returned fields
+use `snake_case`. JavaScript remains available during the migration.
+
+**Runnable example:** From a workspace with `pyproject.toml`, a locked
+`uv.lock`, application files under `src/hello`, and pytest files under `tests`,
+register workflows in `imp.workspace.luau`:
+
+```lua
+require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/package")
+require("@imp/rules/workflows/run")
+require("@imp/rules/workflows/test")
+require("@imp/rules/workflows/lockfiles")
+return {}
+```
+
+Declare the workspace and targets in its root `BUILD.luau`:
+
+```lua
+local python = require("@imp/rules/python")
+python.python_runtime("3.13.0")
+local workspace = python.python_workspace({ path = "." })
+local project = python.python_project({ workspace = workspace, path = "." })
+return {
+    workspace = workspace,
+    app = python.python_app({
+        project = project,
+        entry_point = "hello.__main__",
+        sources = { "src/**/*.py" },
+    }),
+    tests = python.python_test({ project = project, sources = { "tests/**/*.py" } }),
+    scripts = python.python_sources({ root = "scripts" }),
+}
+```
+
+From that workspace root, select the Luau runtime:
+
+```sh
+IMP_RUNTIME=luau imp build //:app
+IMP_RUNTIME=luau imp run //:app -- one "two words"
+IMP_RUNTIME=luau imp test //:tests
+IMP_RUNTIME=luau imp run '//:scripts#scripts/demo.py' -- one "two words"
+IMP_RUNTIME=luau imp package //:app
+```
+
+`build` stores the PEX artifact in the CAS. `package` publishes it under
+`dist/`. App and source runs stage their inputs in a sandbox and forward
+arguments after `--`. They do not create a workspace `.venv`. Source patterns
+are relative to the project; `python_sources` accepts direct patterns only.
+Nested script directories require separate declarations.
+
+**Limit:** The Luau CLI requires an explicit expansion selector such as
+`//:scripts#scripts/demo.py`. Bare file-path lookup (`imp run scripts/demo.py`)
+is not available in Luau yet; the JavaScript runtime retains that behavior.
+
+`python_project` accepts paths relative to its uv workspace, or paths already
+prefixed with the workspace path. When `project` is absent, app and test rules
+infer the nearest `pyproject.toml` above `base` (the BUILD package by default)
+and the nearest enclosing `[tool.uv.workspace]` section. Source rules infer
+from `root`. A script without a project uses `uv run --no-project`.
+
+`python_runtime` sets the default CPython version, initially `3.13.0`.
+App, test, and workspace declarations accept `python_version` overrides.
+App and test declarations accept `uv_version`; apps also accept `pex_version`,
+`entry_point`, and `extra_pex_args`. Tests accept `test_args`. Extra PEX and
+pytest arguments retain the existing space-separated shell argument behavior.
+`deps` contains native tool handles, declared with `core.native_tool`.
+
+App targets expose `sources`, `python_sources`, `root`, and the `BUILD`,
+`PACKAGE`, and `RUN` slots. Tests expose `root` and `TEST`. Source declarations
+expose `root` and an expandable `RUN` slot keyed by workspace-relative file
+paths. Workspace declarations expose their identity and `GEN_LOCKFILES`.
+Python app and test hooks receive frozen source information, including
+`source_patterns`; test hooks also receive `python_sources`.
+
+The Luau PEX and uv modules provide graph tools and absolute cache environment
+paths. Rules declare the tools and cache handles as graph inputs. The shared
+caches retain acquired tools, uv data, managed Python, and PEX data.
+
+**Limit:** Ruff is not part of the Luau core port. The JavaScript extension
+examples below do not add format or lint slots to Luau targets. Generated
+references still describe JavaScript; Luau reference extraction remains with
+`2026-09-30-integrate-luau-workspace-tests-and-docs`.
+
+From this repository root, validate the Luau package with the checkout binary:
+
+```sh
+cargo build -p imp
+IMP_RUNTIME=luau target/debug/imp test //rules/python:rules_test
+python3 rules/python/testdata/consumer_check.py --imp target/debug/imp
+```
+
+The consumer check needs network access for pinned tools and locked Python
+dependencies. It checks root and nested PEX builds, a native wheel, package
+publication, script runs, CLI arguments, source edits, and pytest failures in
+a temporary workspace.
+
+## JavaScript public API
 
 Use `pythonWorkspace()` to declare a lock boundary and `pythonProject()` to
 identify one member project. Use `pythonApp()`, `pythonTest()`, and
@@ -16,8 +120,8 @@ helpers are implementation details.
 ## Use the Luau toolchains
 
 Rule authors on the migration branch can use the PEX and uv toolchains from
-Luau. The Python application, runtime, and Ruff examples below still use
-JavaScript. These APIs are separate until their migration tasks are complete.
+Luau. The core examples above also use Luau. Ruff and the remaining examples
+below use JavaScript. Each runtime loads its own rule modules.
 
 In `imp.workspace.luau`, register the lockfile workflow:
 
@@ -65,7 +169,8 @@ IMP_RUNTIME=luau imp goal gen-lockfiles //:pex //:uv
 The command selects the two BUILD exports and writes `locks/pex.lock` and
 `locks/uv.lock`.
 
-Contributors can check target discovery for this example without downloads.
+Contributors can check target discovery for this example and run the core
+consumer checks. The command needs network access for tools and dependencies.
 From the Imp checkout root, after building `target/debug/imp`, run:
 
 ```sh

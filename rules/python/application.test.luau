@@ -1,0 +1,113 @@
+local core = require("@imp/core")
+local python = require("@imp/rules/python")
+local build = require("@imp/rules/workflows/build")
+local package = require("@imp/rules/workflows/package")
+local run = require("@imp/rules/workflows/run")
+local test = require("@imp/rules/workflows/test")
+local lockfiles = require("@imp/rules/workflows/lockfiles")
+local function options()
+	return { base = "rules/python/example", sources = { "src/**/*.py" }, entry_point = "hello.__main__" }
+end
+local function action(host, display)
+	for _, value in ipairs(host.runs) do if value.display == display then return value end end
+	error(`missing action {display}`)
+end
+return {
+	core.test.case("app stages project-relative sources and shared caches", function()
+		core.test.with_fake_toolchain_host(function(host)
+			local app = python.python_app(options())
+			assert(app[build.BUILD] == app[package.PACKAGE])
+			core.test.resolve(app[build.BUILD])
+			local value = action(host, "python-app build rules/python/example")
+			assert(table.find(value.argv, "src/hello/__main__.py"))
+			assert(table.find(value.argv, ".imp-pex-sources"))
+			assert(not table.find(value.argv, "rules/python/example/src/hello/__main__.py"))
+			assert(value.env.UV_CACHE_DIR == "/cache/uv-cache-dir/shared")
+			assert(value.env.PEX_ROOT == "/cache/pex-root/shared")
+			assert(table.find(value.tools, "uv") and table.find(value.tools, "pex"))
+			assert(value.input_count == 2)
+		end)
+	end),
+	core.test.case("run describes a program with the same interpreter", function()
+		core.test.with_fake_toolchain_host(function(host)
+			python.python_runtime("3.12.4")
+			local app = python.python_app(options())
+			local description = core.test.resolve(app[run.RUN])
+			assert(table.find(description.argv, "3.12.4"))
+			assert(description.env.IMP_PYTHON_BUILD_VERSION == "3.12.4")
+			assert(#description.inputs == 1 and #description.tools == 3)
+			assert(table.find(action(host, "python-app build rules/python/example").argv, "3.12.4"))
+			for _, value in ipairs(host.runs) do assert(value.display ~= "python run rules/python/example") end
+		end)
+	end),
+	core.test.case("test reports failed and passed files", function()
+		core.test.with_fake_toolchain_host(function(host)
+			host.set_run_stdout("python test rules/python/example", "FAILED tests/fail.py::test_bad - assertion\nPASSED tests/pass.py::test_ok\nERROR tests/fail.py::test_other\n")
+			host.set_run_exit_code("python test rules/python/example", 1)
+			local value = core.test.resolve(python.python_test({ base = "rules/python/example", sources = { "tests/**/*.py" } })[test.TEST])
+			assert(#value == 2 and value[1].name == "tests/fail.py" and not value[1].ok)
+			assert(string.find(value[1].output, "assertion", 1, true))
+			assert(value[2].ok and value[2].output == nil)
+		end)
+	end),
+	core.test.case("test reports failure before collection", function()
+		core.test.with_fake_toolchain_host(function(host)
+			host.set_run_stderr("python test rules/python/example", "sync failed")
+			host.set_run_exit_code("python test rules/python/example", 2)
+			local value = core.test.resolve(python.python_test({ base = "rules/python/example" })[test.TEST])
+			assert(#value == 1 and not value[1].ok and string.find(value[1].output, "sync failed", 1, true))
+		end)
+	end),
+	core.test.case("test accepts empty successful collection", function()
+		core.test.with_fake_toolchain_host(function()
+			assert(#core.test.resolve(python.python_test({ base = "rules/python/example" })[test.TEST]) == 0)
+		end)
+	end),
+	core.test.case("Windows app and test use Scripts interpreter", function()
+		core.test.with_fake_toolchain_host({ os = "windows", arch = "x86_64" }, function(host)
+			core.test.resolve(python.python_app(options())[build.BUILD])
+			core.test.resolve(python.python_test({ base = "rules/python/example" })[test.TEST])
+			assert(table.find(action(host, "python-app build rules/python/example").argv, ".venv/Scripts/python.exe"))
+			assert(table.find(action(host, "python test rules/python/example").argv, ".venv/Scripts/python.exe"))
+		end)
+	end),
+	core.test.case("hooks receive sources and run once", function()
+		assert(not pcall(python.register_python_app_hook, {}))
+		assert(not pcall(python.register_python_test_hook, "invalid"))
+		local app_calls, test_calls = 0, 0
+		local function app_hook(info)
+			app_calls += 1
+			assert(info.python_sources and info.source_patterns[1] == "src/**/*.py" and table.isfrozen(info))
+			return { extension = true }
+		end
+		python.register_python_app_hook(app_hook)
+		python.register_python_app_hook(app_hook)
+		python.register_python_app_hook(function(info) assert(info.extension) return { second_extension = true } end)
+		python.register_python_test_hook(function(info)
+			test_calls += 1
+			assert(info.python_sources and info.source_patterns[1] == "*.py")
+			return { extension = true }
+		end)
+		assert(python.python_app(options()).second_extension)
+		assert(python.python_test({ base = "rules/python/example" }).extension)
+		assert(app_calls == 1 and test_calls == 1)
+	end),
+	core.test.case("runtime options override shared defaults", function()
+		core.test.with_fake_toolchain_host(function(host)
+			python.python_runtime("3.12.4")
+			local config = options()
+			config.python_version, config.uv_version, config.pex_version = "3.13.0", "0.11.16", "2.101.6"
+			config.deps = { core.native_tool("git") }
+			core.test.resolve(python.python_app(config)[build.BUILD])
+			assert(table.find(action(host, "python-app build rules/python/example").argv, "3.13.0"))
+			assert(table.find(action(host, "python-app build rules/python/example").tools, "git"))
+			core.test.resolve(python.python_test({ base = "rules/python/example", python_version = "3.13.0" })[test.TEST])
+			assert(table.find(action(host, "python test rules/python/example").argv, "3.13.0"))
+			local ws = python.python_workspace({ path = "rules/python/example" })
+			core.test.resolve(ws[lockfiles.GEN_LOCKFILES])
+			assert(table.find(action(host, "lock Python workspace rules/python/example").argv, "3.12.4"))
+			local ok = pcall(python.python_runtime, "")
+			assert(not ok)
+		end)
+	end),
+}
