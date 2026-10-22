@@ -5520,6 +5520,7 @@ struct FakeActionRequest {
     display: String,
     cache: bool,
     allow_failure: bool,
+    cores: u32,
     env: Option<LuaTable>,
     inputs: Option<LuaTable>,
     task_inputs: LuaTable,
@@ -5635,6 +5636,7 @@ fn run_fake_action(
         .set("display", request.display.clone())
         .map_err(lua_error)?;
     record.set("cache", request.cache).map_err(lua_error)?;
+    record.set("cores", request.cores).map_err(lua_error)?;
     record
         .set("allow_failure", request.allow_failure)
         .map_err(lua_error)?;
@@ -5805,6 +5807,22 @@ async fn run_action(
     let action_inputs = options
         .get::<Option<LuaTable>>("inputs")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let cores = match options
+        .get::<LuaValue>("cores")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+    {
+        LuaValue::Nil => 1,
+        LuaValue::Integer(value) if value >= 1 && value <= i64::from(u32::MAX) => value as u32,
+        LuaValue::Number(value)
+            if value.is_finite()
+                && value >= 1.0
+                && value <= f64::from(u32::MAX)
+                && value.fract() == 0.0 =>
+        {
+            value as u32
+        }
+        _ => bail!("exec.action().cores must be an integer of 1 or more within the u32 range"),
+    };
     let fake_run = host.borrow().fakes.run.clone();
     if let Some(recorder) = fake_run {
         return run_fake_action(
@@ -5816,6 +5834,7 @@ async fn run_action(
                 display,
                 cache,
                 allow_failure,
+                cores,
                 env: action_env,
                 inputs: action_inputs,
                 task_inputs,
@@ -5882,6 +5901,10 @@ async fn run_action(
 
     let mut env = configured_base_env(&configuration.borrow())?;
     env.extend(action_env_entries(action_env.as_ref())?);
+    let scheduler = host.borrow().scheduler.clone();
+    let cores = scheduler.as_ref().map_or(cores, |scheduler| {
+        (cores as usize).min(scheduler.jobs()) as u32
+    });
     let action = ExecAction {
         argv,
         display: display.clone(),
@@ -5890,21 +5913,20 @@ async fn run_action(
         input_digest,
         outputs: output_specs,
         tools,
-        cores: 1,
+        cores,
         impure: false,
         force_cache: false,
         no_cache: !cache,
         sandbox_retention: SandboxRetention::OnFailure,
         allow_failure,
     };
-    let scheduler = host.borrow().scheduler.clone();
     let outcome = if let Some(scheduler) = scheduler {
         scheduler
             .run(
                 None,
                 display.clone(),
                 imp_scheduler::TaskKind::Sandbox,
-                1,
+                cores as usize,
                 move |context| {
                     let outcome = service.execute_with_start(
                         &workspace_id,
@@ -11480,6 +11502,65 @@ return {
             error.to_string().to_lowercase().contains("cancel"),
             "{error:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_action_cores_match_scheduler_admission_and_environment() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("imp.workspace.luau"), "return {}\n").unwrap();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+local shell = core.native_tool("sh")
+local function probe(name, requested, expected)
+    return core.task({
+        inputs = { shell = shell },
+        run = function(exec)
+            exec.action({
+                argv = { "sh", "-c", 'test "$IMP_CORES" = "' .. expected .. '" && test "$JOBS" = "$IMP_CORES" && test "$FLAGS" = "-j$IMP_CORES"' },
+                display = name,
+                cores = requested,
+                cache = false,
+                env = { JOBS = "$IMP_CORES", FLAGS = "-j${IMP_CORES}" },
+            })
+        end,
+    })
+end
+return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wide = probe("wide", 1024, 3) }
+"#).unwrap();
+        let live = crate::spike::load_workspace_with_rules(
+            workspace.path(),
+            crate::loader::RulesSource::discover(),
+        )
+        .await
+        .unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(3, cancellation, events);
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        for (name, expected) in [("default", 1), ("narrow", 2), ("wide", 3)] {
+            crate::spike::execute_goal_live(
+                &live,
+                workspace.path(),
+                "build",
+                &[format!("//:{name}")],
+                false,
+                1,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+            let mut lanes = 0;
+            while let Ok(event) = receiver.try_recv() {
+                if let imp_scheduler::TaskEvent::LaneStarted { display, .. } = event {
+                    if display == name || display == format!("↳ {name}") {
+                        lanes += 1;
+                    }
+                }
+            }
+            assert_eq!(lanes, expected, "scheduler lanes for {name}");
+        }
     }
 
     #[test]

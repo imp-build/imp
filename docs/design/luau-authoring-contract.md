@@ -122,7 +122,8 @@ Later code in the same case, and every later case, uses the real host.
 The recorder tables contain these fields:
 
 - `runs`: one entry for each faked action, in call order. An entry has `argv`,
-  `display`, `cache`, `allow_failure`, `env` (the action `env` table only),
+  `display`, `cache`, `allow_failure`, `cores` (the requested count, default 1),
+  `env` (the action `env` table only),
   `input_count` (the number of `inputs` handles), `tools` (sorted tool names
   from the task inputs), `inputs` (artifact entries indexed by input position,
   each with `path` and a CAS tree `digest`), and `outputs` (output name to
@@ -326,6 +327,15 @@ modules:
 | `core.generate_build(check)` | Requires an active goal callback in both check and write modes; otherwise fails with `core.generate_build() can only run in a goal callback`. Runs the registered BUILD generators. When `check` is false, writes the changed `BUILD.luau` files. Returns `{ changed, checked }`: the paths that changed or are stale, and the paths that the generators produced. The workflow reports the result. In check mode, the workflow fails the goal when a path is stale. | None. The JavaScript runtime runs BUILD generators in its host. |
 | `core.write_workspace(path, digest, { from? }?)` | Publishes a CAS artifact to the workspace. Requires an active goal callback; otherwise fails with `core.write_workspace() can only run in a goal callback`. A `core.test.with_fake_write_workspace` scope records calls outside goal callbacks without writing files. | `writeWorkspace` |
 | `core.run_program({ argv, display?, env?, inputs?, tools? })` | Runs one interactive program and returns `{ exit_code, stdout, stderr }`. `inputs` holds digests or artifact tables to stage, and `tools` holds tool handles. The host sets the `run` policy: the program is impure and sandboxed, starts in the real workspace, streams its output, and receives `core.run_args()` after `argv`. A nonzero exit fails the call. Outside a goal function, the call fails with `core.run_program() can only run in a goal callback`, except in a `core.test.with_fake_run` scope. | `runFromTemplate(runTemplate(opts), { args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true })` |
+
+`exec.action({ cores = n })` requests a core budget for one action. The default
+is 1. The value must be a whole number from 1 through 4294967295. Other values
+fail with `exec.action().cores must be an integer of 1 or more within the u32 range`.
+The scheduler limits the request to its `--jobs` budget and reserves that many
+lanes. The command receives the granted count as `IMP_CORES`. Declared environment
+values can use `$IMP_CORES` or `${IMP_CORES}`. Core counts do not change the action
+cache key. Without a scheduler, the executor receives the requested count.
+Test fakes record the requested count and do not simulate scheduler admission.
 
 `exec.action({ allow_failure = true })` reports a nonzero exit code instead of
 failing the task. When the task declares outputs, the result of `exec.action`

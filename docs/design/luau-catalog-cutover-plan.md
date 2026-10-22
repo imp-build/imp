@@ -442,3 +442,16 @@ From the repository root on Linux, with the checkout binary:
 | `PATH="$PWD/target/debug:$PATH" imp fmt //...` | Exit 0; 61 unchanged, 0 changed, 0 failed. |
 | `PATH="$PWD/target/debug:$PATH" imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
 | `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0; 58/58 units passed, including 5 documentation quality tests. |
+
+## Host API test triage outcomes
+
+`2026-10-10-triage-unported-luau-host-api-tests` reviews each deferred case
+separately. The remaining cases are still open.
+
+- **Ported: `action_cores_test.js`.** `rules/imp/action_cores.test.luau` checks
+  action core requests, the default, and invalid values through the existing
+  action fake. The Rust test
+  `luau_action_cores_match_scheduler_admission_and_environment` checks real
+  actions, scheduler lanes, budget limits, and both environment placeholder
+  spellings. Interactive programs remain unchanged. Keep the JavaScript module
+  until QuickJS removal.
