@@ -275,6 +275,12 @@ staleness instead. Thus there is no Luau replacement for
 add `withFakeSelectedTargets` or `withFakeMergeDigests`, because no rule test
 uses them.
 
+Luau does not provide `product()` or `productFor()`. Rule authors declare
+computation through tasks and explicit graph dependencies, and expose roots
+under goal slots. There is no registry that selects product functions by
+target kind and tool. Consumers can share a producer task without repeating
+its execution within the same invocation.
+
 ### Goals and workflows
 
 **Verified:** Goal policy is Luau rule code. The Rust host selects roots,

@@ -456,6 +456,22 @@ separately. The remaining cases are still open.
   spellings. Interactive programs remain unchanged. Keep the JavaScript module
   until QuickJS removal.
 
+### Product test outcomes
+
+Luau keeps explicit graph dependencies and goal slots. It does not add the
+JavaScript product registry. `rules/imp/product.test.luau` provides the graph
+coverage below. Keep `product_test.js` until QuickJS removal. All other
+unresolved host API cases remain open.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| Returns a callable memoized function | Equivalent test: two consumers share a producer task, receive its computed value, and execute the producer once while resolving their common parent. |
+| Different args produce different results | Equivalent test: tasks made by the same computation helper receive different declared inputs and return their expected results. |
+| Product and memo of the same function have independent caches | Dropped: Luau has no product wrapper, and `core.memo` returns its function unchanged. The JavaScript test name says the caches are independent, but its assertion requires a shared cache. |
+| Requires a declared tool token | Dropped: Luau has no product registration API. |
+| Two tools can register the same product and both dispatch | Dropped: Luau selects explicit graph roots instead of registered product functions. |
+| `productFor` rejects a role registered by several tools | Dropped: Luau selects an explicit dependency instead of resolving an implicit product provider. |
+
 ## Odin package port
 
 The Odin port adds Luau compiler and formatter providers, deferred source
