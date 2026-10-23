@@ -4,6 +4,31 @@ The JavaScript rules declare source collections and application graph roots.
 Node and pnpm toolchains provide the runtime and dependency installation;
 Biome adds formatting and lint facets when imported.
 
+## Repository examples
+
+For contributors, `rules/js/example/src/hello.js` and
+`rules/js/example/app/src/index.js` are deliberate JavaScript examples outside
+the Imp authoring catalog. They demonstrate source collection and Node
+application rules. Their source language remains JavaScript when Imp's
+authoring runtime moves to Luau. The TypeScript application also keeps its
+source language.
+
+**Runnable example**
+
+From this repository's root, use the Luau workspace to build the four targets
+and run the applications:
+
+```sh
+IMP_RUNTIME=luau imp build //rules/js/example:hello //rules/js/example:hello_src //rules/js/example:app //rules/js/example:app_ts
+IMP_RUNTIME=luau imp run //rules/js/example:app
+IMP_RUNTIME=luau imp run //rules/js/example:app_ts
+```
+
+The applications print `Hello from the jsApp example!` and
+`Hello from the tsApp example, world!`. The Luau BUILD module adds Biome format
+and lint facets. Builds keep installed dependencies and compiled output in the
+CAS; they do not write `node_modules` or `dist` into the example directories.
+
 ## Public API
 
 ### Luau API

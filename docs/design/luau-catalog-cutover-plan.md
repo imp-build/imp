@@ -98,6 +98,19 @@ The two excluded application files and their `BUILD.js` owner are in
 `example-decision`. No tracked JavaScript file is unassigned. The report must
 be refreshed after a JavaScript file is added, removed, or moved.
 
+## JavaScript example decision
+
+Keep `rules/js/example/src/hello.js` and
+`rules/js/example/app/src/index.js` as deliberate JavaScript examples outside
+the authoring catalog. The first demonstrates a source collection. The second
+demonstrates a Node application. These files are source inputs, not Imp
+authoring modules. They do not require QuickJS.
+
+The example package has a `BUILD.luau` that declares the existing `hello`,
+`hello_src`, `app`, and `app_ts` targets. The TypeScript application keeps its
+TypeScript source. Keep `BUILD.js` during the compatibility period; remove it
+with the other JavaScript authoring modules at QuickJS removal.
+
 ## Import islands and dependencies
 
 The report extracts static `//rules/...` imports, resolves file and directory
