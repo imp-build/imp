@@ -514,3 +514,45 @@ can turn a valid, long single-line procedure with a loop into invalid Odin.
 `odin check` passed before the direct `odinfmt -w` call and failed after it.
 This is a separate formatter defect; the guide records the multiline-block
 workaround. The port does not change the formatter executable or its version.
+
+### Ruff Luau port boundary
+
+The Ruff port adds the toolchain, separate format/lint facets, mapped lint
+inputs, and Python graph/documentation tests. Source selection stays unchanged;
+source paths remain individual argv entries. The guides document Luau.
+Generated Luau references remain with
+`2026-09-30-integrate-luau-workspace-tests-and-docs`. The Ruff
+reference-generation acceptance criterion remains incomplete until that work
+lands. JavaScript modules remain available during migration.
+
+The boundary contains nine Luau authoring modules. Existing Python core tests
+cover the non-Ruff cases from `graph_test.js`; the Ruff graph tests add the
+facet, configuration, mapping, and workflow-result checks. JavaScript tests
+remain available to the default runtime.
+
+**Verified:** From the checkout root with `target/debug` first in `PATH`:
+
+| Command | Result |
+| --- | --- |
+| `IMP_RUNTIME=luau target/debug/imp targets //rules/python/...` | Python and Ruff test roots discovered |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/python:rules_test //rules/python/ruff:rules_test` | 71/71 passed |
+| `python3 rules/python/ruff/testdata/consumer_check.py --imp target/debug/imp` | Ruff consumer check passed |
+| `python3 rules/python/testdata/consumer_check.py --imp target/debug/imp` | Python core consumer check passed |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/...` | 656/656 passed; exit 0 |
+| `imp fmt //...` | 61 unchanged, 0 changed, 0 failed |
+| `imp lint //...` | 46 clean, 0 fixed, 0 failed |
+| `imp test //...` | 59/59 passed |
+| `git diff --check` | Passed |
+
+The Luau rules run also reports four failed sandbox actions from negative
+tests. All test units pass. Native Ruff execution was checked on Linux;
+platform-specific acquisition paths use fake-host tests. No native Windows
+or macOS execution was checked. The tree is not committed or submitted.
+
+An independent review found that local installation copied a directory onto
+itself when the source artifact was already rooted at `captured-ruff`. The
+capture step now skips the copy when the paths are equal. The Ruff consumer
+check uses that directory name for both path-handle and artifact installation,
+and still checks that changed source bytes select a different cache path.
+After this fix, the package tests passed 71/71, the Ruff consumer check
+passed, and `git diff --check` passed.

@@ -1,0 +1,19 @@
+{
+  "tool": "ruff-toolchain",
+  "versions": {
+    "0.16.7": {
+      "linux/x86_64": {
+        "url": "https://locked.example/ruff",
+        "artifact": "ruff",
+        "size": 42,
+        "sha256": "deadbeef"
+      },
+      "windows/x86_64": {
+        "url": "https://locked.example/ruff",
+        "artifact": "ruff",
+        "size": 42,
+        "sha256": "deadbeef"
+      }
+    }
+  }
+}

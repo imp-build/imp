@@ -1,19 +1,25 @@
-Ruff formats and lints targets declared with `pythonApp()`. The two features
-are registered by separate modules: importing `//rules/python/ruff/fmt`
-enables the `fmt` product, importing `//rules/python/ruff/lint` enables the
-`lint` product. The fmt and lint workflows do not import these modules, so
-the workspace must import each one that it uses. A workspace can enable one
-without the other. The tool version comes from the
-rule-provided default Ruff toolchain, so local and CI runs use the same
-formatter and rule set.
+The Ruff rules format and lint `python_app` and `python_test` targets. This
+guide is for rule authors on the Luau migration branch. Import the facets in
+`imp.workspace.luau` before BUILD files declare targets:
+
+```lua
+require("@imp/rules/python/ruff/fmt")
+require("@imp/rules/python/ruff/lint")
+return {}
+```
+
+Each import enables one product. The default toolchain pins Ruff `0.16.7`.
+JavaScript modules remain available during migration.
+
+From the workspace root, select a declared Python target:
 
 ```sh
 # Rewrite Python files owned by the selected application.
-imp fmt //services/acme:app
+IMP_RUNTIME=luau imp fmt //services/acme:app
 
 # Read-only formatting and lint checks.
-imp fmt --check //services/acme:app
-imp lint //services/acme:app
+IMP_RUNTIME=luau imp fmt --check //services/acme:app
+IMP_RUNTIME=luau imp lint //services/acme:app
 ```
 
 Ruff reads the project's own configuration. Formatting and linting stage
@@ -43,7 +49,7 @@ workflow to print diagnostics and a combined summary for every selected
 target.
 
 ```sh
-imp lint --fix //services/acme:app
+IMP_RUNTIME=luau imp lint --fix //services/acme:app
 ```
 
 `--fix` adds `ruff check --fix` and materializes only the changed `.py`
@@ -53,5 +59,49 @@ fixing.
 ## Public API
 
 Import the Ruff formatter or linter facet from the documented entrypoints.
-Users select the resulting products with `imp fmt` and `imp lint`; toolchain
-download helpers are not user BUILD APIs.
+Users select the products with `imp fmt` and `imp lint` after setting
+`IMP_RUNTIME=luau`. Toolchain download helpers are not user BUILD APIs.
+
+## Declare the toolchain
+
+In a root `BUILD.luau`, export a declaration to generate a workspace-owned
+lockfile. This illustrative example pins a version in a custom lockfile:
+
+```lua
+local ruff = require("@imp/rules/python/ruff_toolchain")
+return { ruff = ruff.ruff_toolchain("0.16.7", {
+    default = true,
+    lockfile = "@workspace/locks/ruff.lock",
+}) }
+```
+
+**Warning:** From that workspace root,
+`IMP_RUNTIME=luau imp goal gen-lockfiles //:ruff` writes `locks/ruff.lock`.
+The declaration returns `version`, `lockfile`, and a `GEN_LOCKFILES` root.
+Without a lockfile option, acquisition uses the shipped lockfile. Missing
+entries fail with a generation command. `unverified = true` permits an
+unverified download and logs a warning.
+
+Importing the toolchain module registers `imp @ruff`. Rule tasks use
+`graph_toolchain(version).tool` as an input. Inside the task,
+`ruff_bin(exec, tool)` returns the absolute executable path.
+`install_ruff_toolchain(version, source, options)` accepts a declared directory
+artifact or path handle, with `default` as an option. The directory must
+contain an executable `ruff` (`ruff.exe` on Windows). Its content digest is
+part of the local named-cache key.
+
+Lint maps declared source and configuration file sets under `fixed/` without
+a source-copy loop. Source paths remain individual command arguments, so
+large source sets remain subject to platform argv limits. Source selection
+is unchanged. Ignored and unselected files are not added by the mapping.
+
+Generated references still describe JavaScript. Luau extraction and generated
+Ruff references belong to `2026-09-30-integrate-luau-workspace-tests-and-docs`.
+The reference-generation acceptance criterion remains incomplete.
+
+Contributors can run the real-tool consumer check from the Imp checkout root,
+after building `target/debug/imp`. It needs network access on a cold cache:
+
+```sh
+python3 rules/python/ruff/testdata/consumer_check.py --imp target/debug/imp
+```

@@ -2,7 +2,7 @@ The Python rules model projects declared in `pyproject.toml` files and uv
 workspaces that lock several projects together. Applications build into
 self-contained PEX files; tests use the locked workspace environment and run
 pytest. This guide is for rule authors. Luau provides the core Python rules;
-Ruff format and lint products remain available through the JavaScript rules.
+Ruff format and lint products are available through separate Luau facets.
 
 <!-- capabilities -->
 
@@ -96,10 +96,8 @@ The Luau PEX and uv modules provide graph tools and absolute cache environment
 paths. Rules declare the tools and cache handles as graph inputs. The shared
 caches retain acquired tools, uv data, managed Python, and PEX data.
 
-**Limit:** Ruff is not part of the Luau core port. The JavaScript extension
-examples below do not add format or lint slots to Luau targets. Generated
-references still describe JavaScript; Luau reference extraction remains with
-`2026-09-30-integrate-luau-workspace-tests-and-docs`.
+Generated references still describe JavaScript. Luau reference extraction
+remains with the workspace and documentation integration task.
 
 From this repository root, validate the Luau package with the checkout binary:
 
@@ -125,8 +123,8 @@ helpers are implementation details.
 ## Use the Luau toolchains
 
 Rule authors on the migration branch can use the PEX and uv toolchains from
-Luau. The core examples above also use Luau. Ruff and the remaining examples
-below use JavaScript. Each runtime loads its own rule modules.
+Luau. The core examples above also use Luau. The later JavaScript examples
+remain available during migration. Each runtime loads its own rule modules.
 
 In `imp.workspace.luau`, register the lockfile workflow:
 
@@ -209,6 +207,24 @@ publishes that artifact; the task does not write workspace files directly.
 
 The generated references still describe the JavaScript APIs. Luau reference
 extraction belongs to the workspace and documentation integration task.
+
+## Set up a Luau workspace
+
+To format and lint Python apps and tests, load both Ruff facets before
+BUILD targets are declared. In `imp.workspace.luau`, use:
+
+```lua
+require("@imp/rules/python")
+require("@imp/rules/python/ruff/fmt")
+require("@imp/rules/python/ruff/lint")
+require("@imp/rules/workflows/fmt")
+require("@imp/rules/workflows/lint")
+return {}
+```
+
+Each facet adds its product to `python_app` and `python_test`. Import only
+`fmt` or `lint` when you need one product. See the [Ruff guide](ruff/) for
+configuration discovery, fixes, toolchain declarations, and limits.
 
 ## Set up the workspace
 
