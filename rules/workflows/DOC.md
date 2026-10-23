@@ -25,16 +25,16 @@ workflow handles each target provides.
 
 ## Luau workflow modules
 
-**Verified:** on 2026-10-11, `@imp/rules/workflows/build`, `codegen`, `fmt`,
+**Verified:** on 2026-10-24, `@imp/rules/workflows/build`, `codegen`, `fmt`,
 `generate`, `generate_build`, `lint`, `lockfiles`, `package`, `publish`, `run`,
-and `test` have Luau modules beside the JavaScript modules. JavaScript stays
+`test`, and `vs` have Luau modules beside the JavaScript modules. JavaScript stays
 the default runtime of this repository. To use the Luau modules here, select
 the Luau workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
 
 Each module registers its goal with `core.goal` and exports the slot key:
 `BUILD`, `CODEGEN`, `FMT`, `GENERATE`, `GEN_LOCKFILES`, `LINT`, `PACKAGE`,
-`PUBLISH`, `RUN`, or `TEST`. A BUILD module puts a root under that slot key.
+`PUBLISH`, `RUN`, `TEST`, or `VSCODE`. A BUILD module puts a root under that slot key.
 Rule modules give these result shapes. Luau result fields use `snake_case`:
 
 | Slot | Root result |
@@ -47,6 +47,7 @@ Rule modules give these result shapes. Luau result fields use `snake_case`:
 | `PACKAGE` | One artifact. The goal writes it to `dist/<package>/<target>`, or to `dist/<package>/<filename>` for a shared library. |
 | `PUBLISH` | A task whose actions change a registry. The goal reports the selected roots. |
 | `RUN` | `{ argv, env?, display?, tools?, digest }` for a full program, one executable artifact, or `{ executable, executable_path }`, such as the `run` task of `binary_product()`. |
+| `VSCODE` | Odin metadata with `has_main`, `is_test`, and an optional bundle-relative `executable_path`. |
 | `TEST` | A list of `{ name, ok, output? }` units. `core.test_root()` makes this list from `.test.luau` modules. |
 
 `imp fmt --check`, `imp generate --check`, `imp goal generate-build --check`,
@@ -75,3 +76,37 @@ return {
 	rules_test = { [test.TEST] = core.test_root() },
 }
 ```
+
+## Generate text and publish it
+
+Rule authors can encode a JSON value with `core.json_encode(value)`. It returns
+pretty JSON with a final newline. Use `core.json_decode("[]")` to make an empty
+array, so that it stays an array when encoded. An ordinary empty table encodes
+as an object.
+
+`core.digest_from_text(files)` stores a map of relative file paths to UTF-8
+strings in CAS and returns its directory digest. It writes no workspace files.
+Paths must be normalized and relative. File and directory paths must not
+conflict. Paths and directory prefixes that differ only in case are rejected
+on every host.
+
+**Illustrative example:** inside a goal callback, publish text under a prefix.
+
+```luau
+local digest = core.digest_from_text({
+    ["launch.json"] = launch_text,
+    ["tasks.json"] = tasks_text,
+})
+core.write_workspace(".vscode", digest, { merge = true })
+```
+
+`merge = true` publishes the digest's files and preserves unrelated files.
+An optional `from` selects a directory inside the digest. The merge rejects
+existing symlink destinations and file/directory conflicts before it writes.
+Each file is published atomically; a multi-file write is not one transaction.
+Without `merge`, `write_workspace` keeps its existing replacement behavior.
+Workspace writes are permitted only in goal callbacks.
+
+The `vs` goal aggregates the selected Odin metadata and uses these operations
+to publish two VS Code files. Visual Studio output is deferred. See the [Odin guide](../odin/)
+for imports, package commands, modes, and debugger requirements.

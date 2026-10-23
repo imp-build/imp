@@ -585,3 +585,62 @@ check uses that directory name for both path-handle and artifact installation,
 and still checks that changed source bytes select a different cache path.
 After this fix, the package tests passed 71/71, the Ruff consumer check
 passed, and `git diff --check` passed.
+
+### Odin VS Code Luau port boundary
+
+The port adds six Luau authoring modules for `rules/odin/vscode` and
+`rules/workflows/vs`: two BUILD modules, two implementation modules, and two
+test modules. JavaScript modules remain available during migration. By user
+decision on 2026-10-24, the Luau goal generates VS Code files only. Visual
+Studio output is deferred. The goal keeps the name `vs`.
+
+The Odin hook now supplies a lazy metadata handle as its second argument.
+Existing hooks can keep their one-argument form. Metadata shares the package
+source analysis and binary layout calculation. It does not resolve a selected
+package's compile action. Launch paths refer to files published by `package`,
+including the executable inside a shared-library bundle. Debug and Release
+tasks select `opt=debug` and `opt=release`. Libraries and test packages get
+package tasks without launch entries.
+
+`core.digest_from_text(files)` creates a directory-tree digest from a map of
+relative paths to text. `core.json_encode(value)` performs JSON encoding as a
+separate operation. The goal publishes the digest with
+`core.write_workspace(".vscode", digest, { merge = true })`. The merge preserves
+unrelated files, rejects existing destination symlinks and file/directory
+conflicts before writing, and keeps the old replacement behavior as the
+default. Publication is atomic per file, not across the complete digest.
+
+The consumer check runs all emitted package commands in Debug and Release and
+checks the actual launch paths for standalone and bundled executables. It also
+checks stable output, preserved settings, unchanged `.vs` contents, and source
+edits that add or remove a main entrypoint. Native execution is checked on
+Linux. Windows metadata and debugger fields use fake-host tests; no Windows
+editor or debugger session is checked.
+
+Generated Luau API references remain with
+`2026-09-30-integrate-luau-workspace-tests-and-docs`. This task's reference
+criterion remains incomplete until that work lands.
+
+**Verified:** on 2026-10-24, from the checkout root:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --workspace` | Passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/odin/... //rules/workflows/vs/... //rules/workflows/package/...` | 41/41 units passed. |
+| `python3 rules/odin/vscode/testdata/consumer_check.py --imp target/debug/imp` | VS Code consumer check passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //...` | 665/665 units passed. Four failed sandbox actions are expected negative cases. |
+| `target/debug/imp test //...` | 59/59 units passed. |
+| `target/debug/imp fmt //...` | 61 unchanged, 0 changed, 0 failed. |
+| `target/debug/imp lint //...` | 46 clean, 0 fixed, 0 failed. |
+| `IMP_RUNTIME=luau target/debug/imp fmt //...` | 13 unchanged, 0 changed, 0 failed. |
+| `IMP_RUNTIME=luau target/debug/imp lint //...` | 13 clean, 0 fixed, 0 failed. |
+| `git diff --check` | Passed. |
+
+The independent review found a portability gap in merge preflight: paths such
+as `A` and `a/child` can conflict on a case-insensitive filesystem after a write
+has started. Text-digest creation and merge publication now reject paths and
+directory prefixes that differ only in case on every host. The regression
+failed before the fix and passed after it. It covers file/file,
+file/directory, and directory-prefix aliases, and checks that rejection writes
+no workspace files. The reviewer checked the fix and reported no additional
+findings. The platform and publication limits above remain unchanged.

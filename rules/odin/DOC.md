@@ -197,6 +197,33 @@ serialized target references. Existing declared package directories are not
 generated again. Hidden, build, coverage, dist, obj, target, and vendor
 directories are excluded by default.
 
-The Odin VS Code integration and VS workflow have a separate migration task.
+## Generate VS Code configuration
+
+From a Luau workspace, require `@imp/rules/odin/vscode` in
+`imp.workspace.luau` before BUILD modules declare Odin packages. This extension
+adds the `vs` workflow to each package. From the workspace root, run:
+
+```sh
+IMP_RUNTIME=luau imp vs //...
+```
+
+The goal writes `.vscode/launch.json` and `.vscode/tasks.json`. It replaces
+these two files and preserves other files in `.vscode`. Visual Studio output
+is deferred; this Luau goal does not write `.vs` files. It reads source metadata;
+it does not build the selected packages.
+
+Each target gets Debug and Release package tasks with explicit `opt` axis
+values. A launch task runs the matching package task first and uses the
+executable under `dist/`, including its shared-library bundle when needed.
+Both modes publish to the same location; the last package task determines
+which mode is present. Libraries and test packages get package tasks without
+launch entries. Labels include the full target address.
+
+The editor must find a Luau-capable `imp` on `PATH` and inherit
+`IMP_RUNTIME=luau` during this migration. VS Code uses `cppvsdbg` on Windows
+and `lldb-dap` on other hosts. Install the matching debugger extension.
+Windows document structure is covered by fake-host tests. Running the editor
+and debugger on Windows still requires a Windows validation run.
+
 Generated Luau API references remain with workspace integration. This guide
 covers the Luau API before those references are available.

@@ -3958,6 +3958,46 @@ fn create_core(
         lua.create_function(move |_, address: String| read_addressed_file(&read_loader, &address))?,
     )?;
     core.set(
+        "digest_from_text",
+        lua.create_function(|_, files: LuaTable| {
+            let mut sorted = BTreeMap::new();
+            for pair in files.pairs::<LuaValue, LuaValue>() {
+                let (LuaValue::String(path), LuaValue::String(contents)) = pair? else {
+                    return Err(LuaError::external(
+                        "digest_from_text requires a map of file paths to text strings",
+                    ));
+                };
+                sorted.insert(path.to_str()?.to_owned(), contents.to_str()?.to_owned());
+            }
+            validate_path_case(sorted.keys().map(String::as_str)).map_err(LuaError::external)?;
+            let mut trees = Vec::new();
+            for (path, contents) in sorted {
+                mapping_directory(&path).map_err(LuaError::external)?;
+                if path == "." {
+                    return Err(LuaError::external("digest_from_text paths must name files"));
+                }
+                let digest = imp_store::cache::store_blob(contents.as_bytes(), "file")
+                    .map_err(LuaError::external)?;
+                trees.push(
+                    nest_file(&path, digest, contents.len() as u64, Some(0o644))
+                        .map_err(LuaError::external)?,
+                );
+            }
+            imp_store::digest::merge_digests(trees)
+                .map(|tree| tree.digest().to_owned())
+                .map_err(LuaError::external)
+        })?,
+    )?;
+    core.set(
+        "json_encode",
+        lua.create_function(|lua, value: LuaValue| {
+            let value: serde_json::Value = lua.from_value(value)?;
+            serde_json::to_string_pretty(&value)
+                .map(|text| text + "\n")
+                .map_err(LuaError::external)
+        })?,
+    )?;
+    core.set(
         "json_decode",
         lua.create_function(|lua, text: String| {
             let value: serde_json::Value = serde_json::from_str(&text)
@@ -4306,38 +4346,31 @@ fn create_core(
         lua.create_function(
             move |lua, (path, digest, options): (String, String, Option<LuaTable>)| {
                 validate_output_path(&path)?;
-                let from = match options {
-                    Some(options) => {
-                        let mut from = None;
-                        for pair in options.pairs::<String, LuaValue>() {
-                            let (key, value) = pair?;
-                            if key != "from" {
-                                return Err(LuaError::external(format!(
-                                    "write_workspace options do not accept '{key}'"
-                                )));
+                let mut from = None;
+                let mut merge = false;
+                if let Some(options) = options {
+                    for pair in options.pairs::<String, LuaValue>() {
+                        let (key, value) = pair?;
+                        match (key.as_str(), value) {
+                            ("from", LuaValue::String(value)) => {
+                                from = Some(value.to_str()?.to_owned())
                             }
-                            from = Some(
-                                value
-                                    .as_string()
-                                    .ok_or_else(|| {
-                                        LuaError::external(
-                                            "write_workspace option 'from' must be a string",
-                                        )
-                                    })?
-                                    .to_string_lossy()
-                                    .to_string(),
-                            );
+                            ("merge", LuaValue::Boolean(value)) => merge = value,
+                            _ => {
+                                return Err(LuaError::external(format!(
+                                    "write_workspace invalid option '{key}'"
+                                )))
+                            }
                         }
-                        from
                     }
-                    None => None,
-                };
+                }
                 let recorder = write_host.borrow().fakes.write_workspace.clone();
                 if let Some(recorder) = recorder {
                     let call = lua.create_table()?;
                     call.set("path", path)?;
                     call.set("digest", digest)?;
                     call.set("from", from)?;
+                    call.set("merge", merge)?;
                     return push_record(
                         &recorder.raw_get::<LuaTable>("calls")?,
                         LuaValue::Table(call),
@@ -4347,6 +4380,15 @@ fn create_core(
                     return Err(LuaError::external(
                         "core.write_workspace() can only run in a goal callback",
                     ));
+                }
+                if merge {
+                    return merge_workspace_tree(
+                        &digest,
+                        from.as_deref(),
+                        &workspace_for_write,
+                        &path,
+                    )
+                    .map_err(LuaError::external);
                 }
                 imp_store::cache::write_workspace(
                     &digest,
@@ -4360,6 +4402,89 @@ fn create_core(
         )?,
     )?;
     Ok(LuaValue::Table(core))
+}
+
+// Check directory prefixes too: `A/file` and `a/other` share a directory
+// on a case-insensitive filesystem, even though the full paths differ.
+fn validate_path_case<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let mut owners = BTreeMap::new();
+    for path in paths {
+        let mut prefix = String::new();
+        for part in path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if let Some(previous) = owners.insert(prefix.to_lowercase(), prefix.clone()) {
+                if previous != prefix {
+                    bail!("paths differ only in case: '{previous}' and '{prefix}'");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Validate the complete overlay before publishing any files. A merge must not
+// follow an existing symlink or replace a directory with a file.
+fn merge_workspace_tree(
+    digest: &str,
+    from: Option<&str>,
+    workspace: &Path,
+    prefix: &str,
+) -> Result<()> {
+    mapping_directory(prefix)?;
+    let root = DirectoryDigest::from_digest(digest.to_owned());
+    let tree = match from {
+        Some(path) => match imp_store::digest::resolve_in_trie(root.tree()?, path)? {
+            imp_store::digest::ResolvedEntry::Directory(tree) => tree,
+            _ => bail!("write_workspace merge requires a directory digest"),
+        },
+        None => root,
+    };
+    let files = imp_store::digest::list_files_in_digest(&tree)?;
+    validate_path_case(files.iter().map(String::as_str))?;
+    for file in &files {
+        mapping_directory(file)?;
+        let destination = Path::new(prefix).join(file);
+        let mut current = workspace.to_path_buf();
+        for component in destination.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        bail!(
+                            "write_workspace merge destination contains a symlink: {}",
+                            current.display()
+                        );
+                    }
+                    if current == workspace.join(&destination) {
+                        if meta.is_dir() {
+                            bail!(
+                                "write_workspace merge file conflicts with a directory: {}",
+                                current.display()
+                            );
+                        }
+                    } else if !meta.is_dir() {
+                        bail!(
+                            "write_workspace merge parent is not a directory: {}",
+                            current.display()
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    for file in files {
+        imp_store::cache::write_workspace(
+            tree.digest(),
+            Some(&file),
+            &workspace.join(prefix).join(&file),
+        )?;
+    }
+    Ok(())
 }
 
 /// Read the `core.goal(name, fn, { flags })` option table. Each flag is a
@@ -10781,6 +10906,113 @@ return { nested_task = core.task({ run = function() end }) }
             .collect::<Vec<_>>();
         addresses.sort();
         assert_eq!(addresses, ["//:root_task", "//pkg:nested_task"]);
+    }
+
+    #[tokio::test]
+    async fn text_digests_and_merge_writes_preserve_workspace_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::create_dir_all(workspace.path().join(".vscode")).unwrap();
+        fs::write(workspace.path().join(".vscode/settings.json"), "keep").unwrap();
+        fs::write(workspace.path().join(".vscode/launch.json"), "old").unwrap();
+        fs::write(workspace.path().join("blocked"), "file").unwrap();
+        fs::write(workspace.path().join("imp.workspace.luau"), r#"
+local core = require("@imp/core")
+local files = { ["launch.json"] = "héllo\n", ["nested/empty"] = "" }
+local digest = core.digest_from_text(files)
+assert(digest == core.digest_from_text({ ["nested/empty"] = "", ["launch.json"] = "héllo\n" }))
+assert(core.read_file_in_digest(digest, "launch.json") == files["launch.json"])
+assert(core.read_file_in_digest(digest, "nested/empty") == "")
+local function rejects(fn)
+    local ok = pcall(fn)
+    assert(not ok, "expected rejection")
+end
+for _, path in ipairs({ "", ".", "../escape", "/absolute", "a/../b", "a//b", "a/./b", "C:/drive", "a\\b" }) do
+    rejects(function() core.digest_from_text({ [path] = "bad" }) end)
+end
+rejects(function() core.digest_from_text({ a = "file", ["a/b"] = "conflict" }) end)
+rejects(function() core.digest_from_text({ [1] = "bad" }) end)
+rejects(function() core.digest_from_text({ file = 42 }) end)
+rejects(function() core.digest_from_text({ A = "file", ["a/child"] = "conflict" }) end)
+rejects(function() core.digest_from_text({ ["A/file"] = "file", ["a/other"] = "conflict" }) end)
+rejects(function() core.digest_from_text({ file = "one", FILE = "two" }) end)
+local value = { text = '\"\\\n\t', values = core.json_decode("[]") }
+local decoded = core.json_decode(core.json_encode(value))
+assert(decoded.text == value.text and #decoded.values == 0)
+assert(string.find(core.json_encode(value), '"values": []', 1, true))
+rejects(function() core.write_workspace(".vscode", digest, { merge = true }) end)
+core.goal("probe", function()
+    core.write_workspace(".vscode", digest, { merge = true })
+    rejects(function() core.write_workspace(".vscode", digest, { merge = "yes" }) end)
+    -- Validate every destination before the first file is written.
+    local conflict = core.digest_from_text({ ["aaa/new"] = "must not write", ["blocked/child"] = "bad" })
+    rejects(function() core.write_workspace(".", conflict, { merge = true }) end)
+    core.write_workspace("replace", digest)
+    core.write_workspace("selected", digest, { from = "nested", merge = true })
+    rejects(function() core.write_workspace("invalid", digest, { from = "launch.json", merge = true }) end)
+end, { selection = "none" })
+return {}
+"#).unwrap();
+        fs::create_dir_all(workspace.path().join("replace")).unwrap();
+        fs::write(workspace.path().join("replace/stale"), "remove").unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        runtime
+            .execute_graph(
+                "probe",
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".vscode/launch.json")).unwrap(),
+            "héllo\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".vscode/settings.json")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read(workspace.path().join(".vscode/nested/empty")).unwrap(),
+            b""
+        );
+        assert!(workspace.path().join("selected/empty").is_file());
+        assert!(!workspace.path().join("invalid").exists());
+        assert!(!workspace.path().join("aaa").exists());
+        assert!(!workspace.path().join("replace/stale").exists());
+    }
+
+    #[test]
+    fn merge_writes_reject_case_aliases_before_publication() {
+        validate_path_case(["dir/one", "dir/two"]).unwrap();
+        for paths in [["A", "a/child"], ["A/file", "a/other"], ["file", "FILE"]] {
+            let workspace = tempfile::tempdir().unwrap();
+            let blob = imp_store::cache::store_blob(b"text", "file").unwrap();
+            let trees = paths
+                .into_iter()
+                .map(|path| nest_file(path, blob.clone(), 4, Some(0o644)).unwrap())
+                .collect();
+            let digest = imp_store::digest::merge_digests(trees).unwrap();
+            let error = merge_workspace_tree(digest.digest(), None, workspace.path(), ".")
+                .expect_err("case aliases must fail on every host");
+            assert!(error.to_string().contains("differ only in case"), "{error}");
+            assert_eq!(fs::read_dir(workspace.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_writes_reject_symlink_destinations() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let digest = captured_tree(&[("a/file", "bad"), ("first", "must not write")]);
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("a")).unwrap();
+        assert!(merge_workspace_tree(&digest, None, workspace.path(), ".").is_err());
+        assert!(!outside.path().join("file").exists());
+        assert!(!workspace.path().join("first").exists());
     }
 
     #[tokio::test]

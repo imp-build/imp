@@ -22,5 +22,6 @@ require("@imp/rules/imp/mode")
 require("@imp/rules/c/generate_build")
 require("@imp/rules/odin")
 require("@imp/rules/odin/odinfmt")
+require("@imp/rules/odin/vscode")
 
 return { c = { build_generate = true } }

@@ -33,6 +33,15 @@ local function is_shared_library(path)
 	return string.match(stem, "%.so$") ~= nil
 end
 
+--- Return the binary layout without declaring build tasks.
+local function binary_product_layout(options)
+	local bundled = #(options.shared_libraries or {}) > 0
+	local bundle_dir = `build/{options.namespace}/{options.target_slug}.d`
+	return { bundled = bundled, bundle_dir = bundle_dir,
+		published_executable_path = if bundled then options.executable_name else nil,
+		executable_path = if bundled then `{bundle_dir}/{options.executable_name}` else nil }
+end
+
 --- Plan and finish the common product shape of a native binary.
 ---
 --- The rule gives its stable `namespace` and `target_slug`, because they are
@@ -52,9 +61,8 @@ end
 --- executable_path }` for the `RUN` slot.
 local function binary_product(options)
 	local shared_libraries = options.shared_libraries or {}
-	local bundled = #shared_libraries > 0
-	local bundle_dir = `build/{options.namespace}/{options.target_slug}.d`
-	local executable_path = if bundled then `{bundle_dir}/{options.executable_name}` else nil
+	local layout = binary_product_layout(options)
+	local bundled, bundle_dir, executable_path = layout.bundled, layout.bundle_dir, layout.executable_path
 
 	local function finish(artifact)
 		if not bundled then
@@ -159,5 +167,6 @@ end
 return {
 	PACKAGE = core.goal("package", graph_package_goal),
 	binary_product = binary_product,
+	binary_product_layout = binary_product_layout,
 	graph_package_goal = graph_package_goal,
 }

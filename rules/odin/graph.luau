@@ -252,6 +252,34 @@ local function compile(spec, info, source_closure, native, config, kind)
 		end,
 	})
 end
+local function product_options(spec, info, native)
+	return { namespace = "odin", target_slug = string.gsub(spec.path, "[^%w_]", "_"),
+		executable_name = if core.platform_info().os == "windows" then "output.exe" else "output",
+		shared_libraries = native.shared, bundle_display = `odin bundle {info.path}` }
+end
+local function selected_paths()
+	local inputs = {}
+	for _, candidate in ipairs(packages) do inputs[candidate.key] = candidate.sources end
+	return core.task({ inputs = inputs, outputs = { paths = core.output.value() }, run = function(exec, input)
+		local paths = {} for key, handle in pairs(input) do paths[key] = exec.paths(handle) end
+		return { paths = paths }
+	end }).outputs.paths
+end
+local function metadata_for(spec)
+	return core.expand({ inputs = {}, create = function()
+		local selected = selected_paths()
+		local expanded = core.expand({ inputs = { index = analysis_task.outputs.index, selected = selected }, create = function(input)
+			local info = analyze(spec, input.index, input.selected[spec.key])
+			local native = resources(closure(spec, input.index, input.selected, core.configuration("odin") or {}).specs)
+			local layout = package.binary_product_layout(product_options(spec, info, native))
+			local metadata = core.task({ outputs = { info = core.output.value() }, run = function()
+				return { info = { has_main = info.has_main, is_test = spec.test, executable_path = layout.published_executable_path } }
+			end })
+			return { metadata = { INFO = metadata.outputs.info } }
+		end })
+		return { metadata = { INFO = expanded:get("metadata", "INFO") } }
+	end }):get("metadata", "INFO")
+end
 local function actions(spec, index, selected)
 	local info = analyze(spec, index, selected[spec.key])
 	assert(#info.paths > 0, if spec.test then `odin_test_package at '{spec.path}' has no Odin source files; default globs are *_test.odin and test_*.odin; pass srcs for other names` else `odin_package at '{spec.path}' has no Odin source files; ordinary packages exclude test files`)
@@ -262,8 +290,7 @@ local function actions(spec, index, selected)
 	local product = built.outputs.artifact
 	local executable_path
 	if info.has_main then
-		local plan = package.binary_product({ namespace = "odin", target_slug = string.gsub(spec.path, "[^%w_]", "_"),
-			executable_name = if core.platform_info().os == "windows" then "output.exe" else "output", shared_libraries = native.shared, bundle_display = `odin bundle {info.path}` })
+		local plan = package.binary_product(product_options(spec, info, native))
 		local result = plan.finish(product)
 		product, executable_path = result.artifact, result.executable_path
 	end
@@ -282,13 +309,8 @@ local function expansion_for(spec)
 	-- The outer expansion runs after all BUILD modules load. It declares exact
 	-- source-list inputs for the inner expansion, including later packages.
 	return core.expand({ inputs = {}, create = function()
-		local source_inputs = {}
-		for _, candidate in ipairs(packages) do source_inputs[candidate.key] = candidate.sources end
-		local selected = core.task({ inputs = source_inputs, outputs = { paths = core.output.value() }, run = function(exec, input)
-			local paths = {} for key, handle in pairs(input) do paths[key] = exec.paths(handle) end
-			return { paths = paths }
-		end })
-		local expanded = core.expand({ inputs = { index = analysis_task.outputs.index, selected = selected.outputs.paths }, create = function(input)
+		local selected = selected_paths()
+		local expanded = core.expand({ inputs = { index = analysis_task.outputs.index, selected = selected }, create = function(input)
 			return { actions = actions(spec, input.index, input.selected) }
 		end })
 		local roots = { [build.BUILD] = expanded:get("actions", build.BUILD), [package.PACKAGE] = expanded:get("actions", package.PACKAGE), [lint.LINT] = expanded:get("actions", lint.LINT) }
@@ -316,7 +338,7 @@ local function odin_package(options, is_test)
 	local value = { odin_spec = spec, sources = spec.sources, base = base, version = provider.version,
 		[build.BUILD] = expanded:get("actions", build.BUILD), [package.PACKAGE] = expanded:get("actions", package.PACKAGE), [lint.LINT] = expanded:get("actions", lint.LINT) }
 	value[if is_test then test.TEST else run.RUN] = expanded:get("actions", if is_test then test.TEST else run.RUN)
-	for _, hook in ipairs(hooks) do for name, field in pairs(hook(table.freeze({ sources = spec.sources, base = base, version = provider.version }))) do value[name] = field end end
+	for _, hook in ipairs(hooks) do for name, field in pairs(hook(table.freeze({ sources = spec.sources, base = base, version = provider.version }), function() return metadata_for(spec) end)) do value[name] = field end end
 	return table.freeze(value)
 end
 return { odin_package = odin_package, odin_test_package = function(options) return odin_package(options, true) end,
