@@ -455,3 +455,62 @@ separately. The remaining cases are still open.
   actions, scheduler lanes, budget limits, and both environment placeholder
   spellings. Interactive programs remain unchanged. Keep the JavaScript module
   until QuickJS removal.
+
+## Odin package port
+
+The Odin port adds Luau compiler and formatter providers, deferred source
+analysis and package expansion, native dependency staging, generated sources,
+BUILD generation, examples, and focused tests. It excludes `rules/odin/vscode`
+and the VS workflow. JavaScript modules remain for compatibility and the
+existing reference build. The boundary has 19 Luau authoring modules.
+
+The guides document Luau now. Generated Luau references remain assigned to
+`2026-09-30-integrate-luau-workspace-tests-and-docs`. The Odin task's
+reference-generation acceptance criterion remains incomplete until that work
+lands.
+
+BUILD generation relies on runtime import inference rather than serialized
+cross-target references. Generated test targets include ordinary files from
+their package directory. Existing package directories are left unchanged,
+including when a test file is added after generation. The consumer check
+verifies that repeated generation preserves the existing BUILD file.
+Interactive run roots use `core.program` and preserve
+CLI argument forwarding while loading binaries from their staged sandbox.
+
+### Odin validation commands
+
+From the repository root on Linux, use the checkout binary:
+
+```sh
+cargo build -p imp
+IMP_RUNTIME=luau target/debug/imp test //rules/odin/...
+python3 rules/odin/testdata/consumer_check.py --imp target/debug/imp
+```
+
+The consumer check covers build, run, test, lint, format, package, BUILD
+and lockfile generation, modes and profile defines, native and CMake
+libraries, generated sources, source edits, and failure propagation. Windows
+command construction is covered by focused tests; real Windows execution is
+not validated by the Linux consumer check.
+
+Verified on Linux with the checkout binary:
+
+| Command | Result |
+| --- | --- |
+| `cargo build -p imp` | Exit 0. |
+| `cargo test --workspace` | Exit 0; 578 tests passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //...` | Exit 0; 633/633 units passed. Four action failures are expected CMake negative-test cases. |
+| `python3 rules/odin/testdata/consumer_check.py --imp target/debug/imp` | Exit 0; all consumer scenarios passed. |
+| `imp fmt //...` | Exit 0; 61 unchanged, 0 changed, 0 failed. |
+| `imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0; 59/59 units passed. |
+
+The installed launcher also ran `imp test //...`. It passed 58/59 units.
+The cache-environment test failed because its sandbox did not receive
+`IMP_CACHE_DIR`. The checkout binary passed that test and the full suite.
+
+A direct-tool probe found that the pinned `dev-2026-03` odinfmt executable
+can turn a valid, long single-line procedure with a loop into invalid Odin.
+`odin check` passed before the direct `odinfmt -w` call and failed after it.
+This is a separate formatter defect; the guide records the multiline-block
+workaround. The port does not change the formatter executable or its version.

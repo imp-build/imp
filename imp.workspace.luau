@@ -20,5 +20,7 @@ require("@imp/rules/workflows/test")
 
 require("@imp/rules/imp/mode")
 require("@imp/rules/c/generate_build")
+require("@imp/rules/odin")
+require("@imp/rules/odin/odinfmt")
 
 return { c = { build_generate = true } }

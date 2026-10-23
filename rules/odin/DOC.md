@@ -1,367 +1,202 @@
-The Odin rules build binaries, run test packages, validate source with
-`odin check -vet`, execute a selected binary, publish artifacts, and generate
-source files. Odin packages may depend on other Odin targets, resource targets,
-and CMake libraries; the rule assembles the transitive sources, collection
-flags, native link inputs, and managed tools needed by the sandboxed command.
+The Odin rules let build authors compile packages, run tests, check source,
+run binaries, and publish artifacts through the Luau graph. Import
+`@imp/rules/odin/odinfmt` to add formatting before you declare packages.
 
 <!-- capabilities -->
 
 ## Public API
 
-Use `odinPackage()` and `odinTestPackage()` for Odin build and test roots. The
-`//rules/odin/odinfmt` module adds formatting, and the VS Code workflow adds a
-static project description. Analysis classes and path helpers remain internal
-implementation details.
+Use `odin_package(options)` and `odin_test_package(options)` from
+`@imp/rules/odin`. Options use snake_case. The JavaScript implementation stays
+available during the runtime migration. These examples use Luau.
 
-Pass compile-time defines as a name-to-string map. Imp emits the defines in
-sorted order for every applicable Odin build, test, and lint action:
+An ordinary package provides build, lint, package, and run roots. The run root
+is usable only when the package has a `main` entrypoint. A test package
+provides build, lint, package, and test roots. An imported formatter extension
+adds a format root to both kinds of package.
 
-```js
-export const server = odinPackage({
-    defines: { SHIPPING: "true" },
-});
+## Set up a workspace
+
+Create `imp.workspace.luau` at the workspace root:
+
+```lua
+require("@imp/rules/odin")
+require("@imp/rules/odin/odinfmt")
+require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/test")
+require("@imp/rules/workflows/run")
+require("@imp/rules/workflows/fmt")
+require("@imp/rules/workflows/lint")
+require("@imp/rules/workflows/package")
+require("@imp/rules/workflows/lockfiles")
+return {}
 ```
 
-## Set up the workspace
-
-Import the compiler and formatter rules in `imp.workspace.js`, then load the
-workflows you use. The rules provide pinned defaults:
-
-```js
-import "//rules/odin";
-import "//rules/odin/odinfmt";
-import "//rules/workflows/fmt";
-import "//rules/workflows/lint";
-import "//rules/workflows/package";
-import "//rules/workflows/run";
-import "//rules/workflows/test";
-
-```
-
-Override a default only when needed, for example to select a managed linker.
-Keep that choice on the Odin toolchain so build, test, run, and lint resolve
-the same native environment.
-
-This repository's workspace imports `//rules/imp/mode`: the default profile
-keeps Odin's `-debug` build behavior, while `imp build --profile release ...`
-uses Odin's `-o:speed` optimization mode.
-
-### Select a workspace lockfile
-
-The rules ship a lockfile for each managed tool. It pins the download URL,
-size, and SHA-256 of every release artifact, and it knows only the versions
-the rules ship with. To pin a version that the shipped lockfile does not
-know, give the toolchain the address of a lockfile that this workspace owns.
-The shipped lockfiles stay the default.
-
-```js
-export const odinToolchainDefault = odinToolchain("dev-2026-05", {
-	default: true,
-	lockfile: "//locks/odin.lock",
-});
-export const odinfmtDefault = odinfmtToolchain(undefined, {
-	default: true,
-	lockfile: "//locks/odinfmt.lock",
-});
-```
-
-Export the lockfile generation roots, then write the two files:
-
-```js
-import { odinGenLockfiles } from "//rules/odin";
-import { odinfmtGenLockfiles } from "//rules/odin/odinfmt";
-
-export const odinLockfiles = odinGenLockfiles();
-export const odinfmtLockfiles = odinfmtGenLockfiles();
-```
-
-```sh
-imp goal gen-lockfiles //:odinLockfiles //:odinfmtLockfiles
-```
-
-Each generation root writes to the address that its toolchain declares, so
-the address is given one time only. Downloads stay verified: an address with
-no file, or a lockfile with no entry for the selected version and platform,
-makes the acquire fail and points at `imp goal gen-lockfiles`.
+Select the Luau runtime with `IMP_RUNTIME=luau`. Odin imports register the
+shared `opt` mode axis and its debug and release profiles. Compiler and
+formatter defaults use pinned, verified downloads and shared named caches.
+No host Odin installation is required. Do not create a cache for each task.
 
 ## Declare packages and tests
 
-```js
-import { odinPackage, odinTestPackage } from "//rules/odin";
+In a package's `BUILD.luau`, declare the ordinary sources once:
 
-export const server = odinPackage({
-    path: ".",
-    output: "build/server",
-});
-
-export const server_tests = odinTestPackage({
-    path: ".",
-    deps: [server],
-});
-```
-
-The selected profile may provide default Odin defines. A target's own defines
-override profile values with the same name:
-
-```js
-import { defineProfile } from "imp:core";
-
-defineProfile("shipping", {
-    opt: "release",
-    odin: { defines: { SHIPPING: "true" } },
-});
-```
-
-When one Odin action reaches several declared packages, their define maps are
-merged. Two packages that assign different values to one define are rejected,
-because Odin compiles the complete import closure in one action.
-
-An `odinPackage` defaults to `*.odin` and excludes `*_test.odin` and
-`test_*.odin`. An `odinTestPackage` defaults to exactly those two globs and
-participates in the `test` goal through `odin test`. The two defaults are
-mirror images, so tests beside the code need no `srcs` on either target.
-Override `srcs` and `exclude` with globs relative to `path` when a package uses
-another layout.
-
-Odin compiles a directory as one package, so a test package that shares its
-directory with the package under test cannot link against it — it is the same
-package, compiled with its test files. That is what the `deps: [server]` above
-does: the two source sets land at the same sandbox path and `odin test` sees
-one package. The ordinary sources stay declared one time, rather than in a
-second glob to keep in sync by hand.
-
-A directory that holds only tests needs no such dep — it is an ordinary
-package that happens to be all tests. Give it `srcs` when its files do not
-carry the test suffix, or the default glob matches nothing.
-
-`imp lint --fix` is accepted goal-wide but has no effect for Odin packages:
-`odin check -vet` has no autofix mode, so `--fix` just runs the same plain
-lint.
-
-Set `output` when a package needs a stable workspace-relative executable path.
-`package` publishes the built result below `dist/` according to the target
-address. `run` executes one selected package and rejects ambiguous
-multi-target selections.
-
-```sh
-imp build //apps/server:server
-imp test //apps/server:server_tests
-imp fmt --check //apps/server:server
-imp lint //apps/server:server
-imp run //apps/server:server
-imp package //apps/server:server
-```
-
-## Collections
-
-Use workspace configuration for collection names shared by many packages:
-
-```js
-export const odinConfig = {
-    collections: {
-        core: "src/core",
-        vendor: "third_party/odin",
-    },
-};
-```
-
-The schema is a dynamic `map<string, string>`: collection names are not fixed
-in advance, but every key and path is validated. Paths are workspace-relative.
-
-Package-local collection entries belong on the target and override a
-workspace entry with the same name:
-
-```js
-export const editor = odinPackage({
-    collections: {
-        generated: "generated/odin",
-    },
-});
-```
-
-Local collections may also use collection target handles or `{ name, path }`
-entries when a plain name-to-path object is not sufficient. Collection
-directories are included as declared sandbox inputs, not merely converted into
-compiler flags: the rule walks the package's imports transitively and declares
-every directory it reaches, whether that directory is a declared
-`odinPackage()` or an undeclared tree such as a vendored library. Only the
-collections those imports actually use become `-collection:` flags. An import
-that resolves to a workspace path with no Odin package behind it fails the
-build with the importing package and the resolved path, rather than reaching
-the compiler as a broken collection flag.
-
-## Generate sources and BUILD files
-
-Generated sources come from `codegen()` in `//rules/imp/codegen`, which is not
-Odin-specific — it declares files a command writes into the graph, for any
-ecosystem. `generatedSrcs` takes its result directly and stages every file the
-result declares. Exclude a generated path from any overlapping `odinPackage()`
-glob so one file has one owner:
-
-```js
-import { codegen } from "//rules/imp/codegen";
-import { nativeTool } from "//rules/imp/native-tool";
-import { odinPackage } from "//rules/odin";
-import { files } from "imp:core";
-
-const bindings = codegen({
-    display: "generate Odin bindings",
-    tools: { generator: nativeTool("schema-to-odin") },
-    inputs: { schema: files({ root: "app", include: ["schema.json"] }) },
-    outputPaths: ["app/generated/bindings.odin"],
-    argv: (exec, { generator }) => [
-        exec.tool(generator, "schema-to-odin"),
-        "app/schema.json",
-        "app/generated/bindings.odin",
-    ],
-});
-
-export const app = odinPackage({
-    path: "app",
-    exclude: ["generated/bindings.odin"],
-    generatedSrcs: [bindings],
-});
-```
-
-`outputPaths` are workspace-relative, and a nested path needs no `mkdir` — the
-executor creates the parent directory of each declared output before the
-program starts. The older explicit form, `generatedSrcs: [{ artifact, path }]`
-with `path` relative to the package, still works.
-
-To write generated files into the workspace instead of into the graph — for
-committed, drift-gated codegen — use `generatedFiles()` from
-`//rules/imp/generate` and `imp generate`.
-
-A package's `generatedSrcs` follow it through the source closure, like its
-native deps: declare a generated source on the package that owns it, and every
-package that reaches it gets the file staged. Two packages may name the same
-artifact at the same workspace path — that is one input — but two different
-artifacts claiming one path is a declaration error, since one would overwrite
-the other in the sandbox.
-
-Separately, `imp goal generate-build` can create declarations for unowned
-Odin sources. Opt in with `odinConfig.buildGenerate: true`; it is disabled by
-default.
-
-## Native (`ccLibrary`/CMake) dependencies
-
-`deps` also accepts a raw `ccLibrary()` result, or a `cmakeLibraryDep()`
-adapting a CMake target (see `//rules/c`, `//rules/c/cmake`). Its built
-archive is staged into the sandbox at its real workspace-relative path, so a
-`foreign import` can reference it directly — resolved, per the Odin
-compiler, relative to the importing `.odin` file's own directory:
-
-```js
-import { ccLibrary } from "//rules/c";
-import { odinPackage } from "//rules/odin";
-
-export const sqlite = ccLibrary({ path: "vendor/sqlite" });
-
-export const app = odinPackage({
-    deps: [sqlite],
-});
-```
-
-```odin
-// app.odin (at the odinPackage's own path "."): ccLibrary()'s archive
-// always lands at "build/c/<slug>.a", workspace-root-relative regardless of
-// the library's own path — adjust the "../" prefix for the importing
-// package's own directory depth.
-foreign import sqlite "build/c/vendor_sqlite.a"
-```
-
-A native dep belongs to the package whose own source names it. One `odin build`
-compiles the whole import closure, so an archive that any package in that
-closure needs is staged for the compilation — and a package inherits the
-archives and `transitiveLinkopts` of every Odin package it reaches, whether by
-`deps` or by a bare `import`. Declare a native dep one time, on the package
-whose `foreign import` names it; consumers declare only what their own sources
-need.
-
-### Shared libraries
-
-A `ccLibrary({ shared: true })` dep works the same way, with one addition. An
-archive becomes part of the executable, but a shared library stays a separate
-file that the loader must find again at run time. So a binary that reaches one
-gets a **directory** product: it holds the executable plus every shared library
-the closure contributed, and Odin links every binary with an `$ORIGIN` rpath,
-which makes the loader look in the executable's own directory.
-
-```js
-export const mathlib = ccLibrary({ path: "vendor/mathlib", shared: true });
-
-export const app = odinPackage({ deps: [mathlib] });
-```
-
-```odin
-// On Linux, a shared library lands at "build/c/lib<slug>.so".
-// On Windows, it lands at "build/c/<slug>.dll", with an import library at
-// "build/c/<slug>.lib". Odin links with MSVC link.exe, which cannot link
-// against a DLL, so name the import library there.
-when ODIN_OS == .Windows {
-	foreign import mathlib "build/c/vendor_mathlib.lib"
-} else {
-	foreign import mathlib "build/c/libvendor_mathlib.so"
+```lua
+local odin = require("@imp/rules/odin")
+local lib = odin.odin_package({})
+return {
+    lib = lib,
+    lib_tests = odin.odin_test_package({ deps = { lib } }),
 }
 ```
 
-`imp package` publishes the directory, so the library travels with the binary.
-A binary with no shared dep keeps the single-file product it has always had.
+`path` defaults to the BUILD directory. `base` overrides that directory.
+`srcs` and `exclude` contain glob patterns relative to `path`.
+`odin_package` defaults to `*.odin` and excludes `*_test.odin` and
+`test_*.odin`. `odin_test_package` defaults to those two test globs and
+excludes nothing. Set `srcs` when tests use other filenames.
 
-`odin test` is the exception: it compiles and runs in one step, so there is no
-product to carry the library in. Each platform finds the staged library in a
-different way, and neither needs anything from you:
+Odin compiles a directory as one package. A same-directory test package needs
+the ordinary package in `deps`, as above, so both source sets reach one sandbox
+directory. A library builds an archive. A package with a `main` entrypoint
+builds an executable. Build outputs stay in CAS until a publishing goal writes
+them to the workspace.
 
-| Platform | How the `odin test` executable finds the library |
-| --- | --- |
-| Linux | The library's own directory is put on `LD_LIBRARY_PATH` for that action. |
-| Windows | The test executable is written into the DLL's own directory (`-out:`), which the loader searches first. |
+From the workspace root, with the runtime selected:
 
-On Windows, every DLL that an `odin test` loads must be staged in one
-directory. If they are not, the `odin test` action fails with an error. Every
-`ccLibrary({ shared: true })` writes to `build/c/`.
-
-`deps` also takes a plain graph handle — a `files()` set of fixture data, a
-task output — and stages it into the sandbox as it is:
-
-```js
-const test_pem = files({ include: ["testdata/*.pem"] });
-
-export const client_tests = odinTestPackage({ deps: [client, test_pem] });
+```sh
+IMP_RUNTIME=luau imp build //src/lib:lib
+IMP_RUNTIME=luau imp test //src/lib:lib_tests
+IMP_RUNTIME=luau imp lint //src/lib:lib
+IMP_RUNTIME=luau imp fmt --check //src/lib:lib
+IMP_RUNTIME=luau imp package //src/lib:lib
 ```
 
-A dep of no recognized shape is a declaration error. It would otherwise
-contribute nothing, which reads the same as never declaring it, and shows up
-as a missing file much later.
+For a binary target, `imp run //src/app:app -- one "two words"` forwards the
+arguments. `--profile release` or `--axis opt=release` selects `-o:speed`;
+the default uses `-debug`. Each Odin action reserves four cores and passes
+matching compiler and test-runner thread limits. Lint uses `odin check -vet`
+and does not apply optimization flags. Lint has no autofix operation.
 
-`unsafeSystemPaths` is the one thing that does **not** travel that path. It
-bypasses a guard, so every package states its own — the same rule `//rules/c`
-already applies to `ccLibrary()` and `ccBinary()`.
+## Configure collections and defines
 
-A dep's own `transitiveLinkopts` (e.g. a `cmakeLibraryDep({linkopts: [...]})`
-wrapping a shared library that itself depends on host system packages) fold
-into the final `odin build`'s own linker invocation automatically, as a
-single `-extra-linker-flags:` argument. The default GCC toolchain
-(`//rules/c/gcc`) is a Bootlin external toolchain whose compiler wrapper
-rejects any `-L` flag pointing under `/usr/lib` — since Odin links via that
-same toolchain, pass `unsafeSystemPaths: true` on the `odinPackage()` itself
-to bypass that guard for its own linker invocation (independent of, and in
-addition to, `unsafeSystemPaths` on any `ccLibrary()`/`cmakeProject()` dep —
-see `//rules/c`'s own docs):
+Workspace configuration maps collection names to workspace-relative paths:
 
-```js
-import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
-import { odinPackage } from "//rules/odin";
-
-const project = cmakeProject({ path: "third_party/webview", unsafeSystemPaths: true });
-
-export const app = odinPackage({
-    deps: [
-        cmakeLibraryDep(project, "webview", {
-            includeDirs: ["third_party/webview/include"],
-            linkopts: ["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1", "-lgtk-3"],
-        }),
-    ],
-    unsafeSystemPaths: true,
-});
+```lua
+return { odin = { collections = { lib = "library" } } }
 ```
+
+A target's `collections` overrides workspace mappings. Its paths are relative
+to `base`. Use a name-to-path map or a list of `{ name, path }` entries.
+
+```lua
+local odin = require("@imp/rules/odin")
+return {
+    app = odin.odin_package({ collections = { local_lib = "vendor" },
+        defines = { SHIPPING = "true" } }),
+}
+```
+
+Tree-sitter analysis follows transitive relative and mapped collection imports.
+It includes declared packages and undeclared source directories. Unmapped
+collections, such as `core`, remain the compiler's responsibility. A mapped
+or relative import with no package produces an error before compilation.
+
+Profiles can supply default defines:
+
+```lua
+local core = require("@imp/core")
+core.define_profile("shipping", {
+    opt = "release", odin = { defines = { SHIPPING = "true" } },
+})
+```
+
+Define names must be identifiers and values must be strings. Target defines
+override profile values. Packages compiled together must agree on each define;
+a conflict produces an error. Arguments use sorted define names.
+
+## Select toolchains and workspace lockfiles
+
+`odin_toolchain(version, options)` declares a provider with `tool`, `version`,
+linker settings, and a lockfile-generation root. Give the provider or a version
+string to a package's `toolchain` option. An explicit provider retains its own
+version and linker settings when the workspace default changes.
+
+In the root `BUILD.luau`, export generation roots to make them selectable:
+
+```lua
+local odin = require("@imp/rules/odin")
+local fmt = require("@imp/rules/odin/odinfmt")
+local compiler = odin.odin_toolchain("dev-2026-03", {
+    default = true, lockfile = "@workspace/locks/odin.lock",
+})
+fmt.odinfmt_toolchain(nil, { lockfile = "@workspace/locks/odinfmt.lock" })
+return { compiler = compiler, formatter_lock = fmt.odinfmt_gen_lockfiles() }
+```
+
+From the workspace root:
+
+```sh
+IMP_RUNTIME=luau imp goal gen-lockfiles //:compiler //:formatter_lock
+```
+
+The shipped lockfiles are the default. A custom lockfile pins download URLs,
+sizes, and SHA-256 values. Missing files or entries fail acquisition and name
+the lockfile and generation goal. `unverified = true` explicitly permits an
+unverified download. `imp @odin` and `imp @odinfmt` select the current defaults
+when their modules are loaded.
+
+Odin and odinfmt releases cover Linux and macOS on x86_64 and aarch64, and
+Windows on x86_64. The package rule also requires the managed GCC linker
+provider. Its current platform limits apply; a compiler release alone does
+not establish package execution on that platform.
+
+## Add native dependencies and generated sources
+
+`deps` accepts Odin packages, graph handles, `{ sources }` or `{ resources }`
+records, and Luau C/CMake library records. Archives, shared libraries, Windows
+import libraries, and linker flags travel through the transitive source
+closure. Each distinct resource is staged once. Unsupported dependency shapes
+produce an error.
+
+Use `cc_library` from `@imp/rules/c`, or `cmake_library_dep` from
+`@imp/rules/c/cmake`. An Odin `foreign import` must name the captured artifact
+path relative to the importing source file. A binary with shared dependencies
+is packaged with its libraries beside the executable. Linux tests receive
+`LD_LIBRARY_PATH`; Windows tests write the executable beside the DLLs and
+reject DLLs from multiple directories.
+
+Set `linker` on `odin_toolchain` to a managed mold provider on Linux. On
+Windows, `lld_on_windows = true` selects bundled lld-link. Add `mingw_crt = true`
+only when the native dependencies require MinGW CRT archives. Without that
+option, Odin retains its normal CRT selection. `unsafe_system_paths = true`
+on a package selects GCC aliases that bypass the host-path guard. This option
+does not propagate from dependency packages.
+
+`generated_srcs` accepts codegen results or `{ artifact, path }` entries. An
+entry's `path` is relative to the package directory. The producing action's
+output path must match it exactly. Exclude generated paths from source globs.
+Generated sources travel with imported packages. Two artifacts cannot claim
+one path. Generated source imports are not scanned; declare their required
+sources and native inputs through `deps` or `collections`.
+
+## Generate BUILD modules
+
+Require `@imp/rules/workflows/generate_build` and set
+`odin = { build_generate = true }` in workspace configuration. Then run:
+
+```sh
+IMP_RUNTIME=luau imp goal generate-build
+IMP_RUNTIME=luau imp goal generate-build --check
+```
+
+The generator writes `BUILD.luau` declarations for unowned source directories.
+Test declarations include their directory's ordinary sources. Relative and
+collection dependencies use the package rule's import inference, rather than
+serialized target references. Existing declared package directories are not
+generated again. Hidden, build, coverage, dist, obj, target, and vendor
+directories are excluded by default.
+
+The Odin VS Code integration and VS workflow have a separate migration task.
+Generated Luau API references remain with workspace integration. This guide
+covers the Luau API before those references are available.
