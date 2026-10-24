@@ -697,3 +697,55 @@ check. An unrelated sentinel file must stay unchanged throughout.
 | `PATH="$PWD/target/debug:$PATH" imp lint //...` | 46 clean, 0 fixed, 0 failed. |
 | `PATH="$PWD/target/debug:$PATH" imp test //...` | 59/59 units passed. |
 | `git diff --check` | Passed. |
+
+## Built-in lockfile aggregator port
+
+The Luau `@imp/rules/workflows/builtin_lockfiles` module imports all shipped
+toolchain modules. Its `gen-builtin-lockfiles` goal uses a selectorless roots
+provider to declare authoritative regeneration tasks for every registered
+lockfile. The shared lockfile callback publishes their resolved artifacts.
+The repository Luau workspace imports this workflow. JavaScript modules remain
+available during the compatibility period.
+
+The authoring boundary is the aggregator and the existing lockfile test
+module. Tests check all 18 shipped registrations, the platform matrices, and
+regeneration to the registered versions. Downloads are faked in these tests.
+The consumer check uses a local HTTP artifact and the same selectorless-goal
+and lockfile runtime APIs. It checks the actual SHA-256 and size, removal of
+stale versions, repeatable bytes, and preservation after a failed download.
+It does not download the shipped toolchain archives.
+
+Focused validation commands from the repository root:
+
+```sh
+cargo test -p imp-engine selectorless_goal_roots_resolve_before_publication
+IMP_RUNTIME=luau target/debug/imp test //rules/workflows/lockfiles:rules_test
+python3 rules/workflows/lockfiles/testdata/consumer_check.py --imp target/debug/imp
+```
+
+**Deferred:** generated references still use JavaScript extraction. On
+2026-10-24, the user chose to defer Luau extraction from this task. The workflow
+guide and authoring contract describe the Luau API, but the generated-reference
+acceptance criterion remains unmet. A later task submission must report that
+gap and remain in review.
+
+Validation on 2026-10-24:
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p imp-engine selectorless_goal_roots_resolve_before_publication` | Passed. Covers ordered results, validation before execution, provider/task failures, and workspace-write boundaries. |
+| `cargo test --workspace` | Passed on the final Rust source. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/workflows/lockfiles:rules_test` | 27/27 units passed. |
+| `python3 rules/workflows/lockfiles/testdata/consumer_check.py --imp target/debug/imp` | Passed, including the expected HTTP 404 failure case. |
+| `target/debug/imp fmt //...` | 61 unchanged, 0 changed, 0 failed on the final run. |
+| `target/debug/imp lint //...` | 46 clean, 0 fixed, 0 failed after the options-struct fix. |
+
+The first broad `target/debug/imp test //...` run passed 58/59 units.
+`spike::tests::graph_expansion_all_children_start_concurrently` observed one
+active child where it expected two. This existing JavaScript test passed in
+both workspace Rust runs. Its source was not changed by this port.
+
+The final `target/debug/imp test //...` retry passed 59/59 units.
+`target/debug/imp lint //docs:quality` also passed after the documentation
+updates. The earlier concurrency assertion failure remains recorded above as
+an intermittent test observation; this task does not change that test.

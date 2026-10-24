@@ -110,3 +110,24 @@ Workspace writes are permitted only in goal callbacks.
 The `vs` goal aggregates the selected Odin metadata and uses these operations
 to publish two VS Code files. Visual Studio output is deferred. See the [Odin guide](../odin/)
 for imports, package commands, modes, and debugger requirements.
+
+## Regenerate shipped toolchain lockfiles
+
+**Verified:** on 2026-10-24, the Luau `gen-builtin-lockfiles` goal is available when the
+workspace requires `@imp/rules/workflows/builtin_lockfiles`. It imports each
+shipped toolchain module and regenerates all registered versions, independent
+of workspace toolchain targets. Existing versions outside that list are removed.
+
+> **Warning:** This command downloads toolchain artifacts and replaces shipped
+> lockfiles in the workspace.
+
+From this repository root, with the Luau workspace:
+
+```sh
+IMP_RUNTIME=luau imp goal gen-builtin-lockfiles
+```
+
+The goal declares graph tasks through its `roots` provider. Imp resolves all
+roots before the goal callback publishes their artifacts. A download failure
+stops the invocation before publication. Publication uses the existing lockfile
+goal behavior; writes across multiple lockfiles are not one transaction.

@@ -1,6 +1,8 @@
 local core = require("@imp/core")
 local lockfiles = require("@imp/rules/workflows/lockfiles")
 
+local builtin = require("@imp/rules/workflows/builtin_lockfiles")
+
 local TESTDATA = "@imp/rules/workflows/lockfiles/testdata"
 
 local PLATFORMS = {
@@ -85,6 +87,92 @@ local function contains(text, part)
 end
 
 return {
+
+	core.test.suite("shipped toolchains", {
+		core.test.case("registers every shipped lockfile and declares its root", function()
+			local specs = lockfiles.builtin_lockfiles()
+			local roots = builtin.builtin_lockfile_roots()
+			local names = {}
+			assert(#roots == #specs)
+			for i, item in ipairs(specs) do
+				table.insert(names, item.name)
+				assert(#item.versions > 0)
+				assert(string.sub(item.lockfile, 1, 11) == "@imp/rules/")
+				assert(roots[i].address == item.lockfile)
+			end
+			table.sort(names)
+			assert(table.concat(names, ",") == "biome-toolchain,cmake,crane,gcc,gcc-windows,kache,mold,nasm,node-toolchain,odin,odinfmt,pex-toolchain,pnpm-toolchain,ruff-toolchain,rust,uv-toolchain,zig,zola")
+		end),
+		core.test.case("all declared roots regenerate exactly their registered versions", function()
+			local specs = lockfiles.builtin_lockfiles()
+			local roots = builtin.builtin_lockfile_roots()
+			core.test.with_fake_run(function(run)
+				for _, item in ipairs(specs) do
+					for _, version in ipairs(item.versions) do
+						for _, plat in ipairs(item.platforms) do
+							run.set_run_stdout(`lock {item.name} {version} {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+						end
+					end
+				end
+				for i, entry in ipairs(roots) do
+					local result = core.test.resolve(entry.root)
+					local versions = table.clone(specs[i].versions)
+					table.sort(versions)
+					assert(result.lock.tool == specs[i].name)
+					assert(sorted_keys(result.lock.versions) == table.concat(versions, ","))
+				end
+			end)
+		end),
+		core.test.case("platforms: odin/toolchain", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/odin/toolchain").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: c/cmake/toolchain", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/c/cmake/toolchain").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: c/gcc", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/c/gcc").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: c/mold", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/c/mold").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: c/zig", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/c/zig").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: zola", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/zola").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+		end),
+		core.test.case("platforms: rust/toolchain", function()
+			local keys = {}
+			for _, plat in ipairs(require("@imp/rules/rust/toolchain").supported_platforms()) do
+				table.insert(keys, `{plat.os}/{plat.arch}`)
+			end
+			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+		end),
+	}),
 	core.test.suite("graph_generate_tool_lockfile", {
 		core.test.case("pins the url, artifact, size, and sha256 of each platform", function()
 			local task = lockfiles.graph_generate_tool_lockfile(spec({ version = "2.0.0" }))

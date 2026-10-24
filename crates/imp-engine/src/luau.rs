@@ -241,8 +241,16 @@ struct LuauGoal {
     /// Declared boolean flags and their optional descriptions.
     flags: BTreeMap<String, Option<String>>,
     /// True for `selection = "none"`: the goal takes no target selectors,
-    /// and the driver calls its callback with an empty roots array.
+    /// and the driver uses its declared roots or an empty roots array.
     selectorless: bool,
+    roots: Option<LuaFunction>,
+}
+
+#[derive(Default)]
+struct GoalOptions {
+    flags: BTreeMap<String, Option<String>>,
+    selectorless: bool,
+    roots: Option<LuaFunction>,
 }
 
 /// The state of the goal that the generic driver is running.
@@ -1216,12 +1224,12 @@ impl LuauWorkspace {
         roots: &[GraphRoot],
         flags: &serde_json::Value,
     ) -> Result<Option<String>> {
-        let (callback, selectorless) = self
+        let (callback, selectorless, provider) = self
             .host
             .borrow()
             .goals
             .get(goal)
-            .map(|goal| (goal.callback.clone(), goal.selectorless))
+            .map(|goal| (goal.callback.clone(), goal.selectorless, goal.roots.clone()))
             .with_context(|| {
                 format!(
                     "goal '{goal}' has no registered Luau workflow; require @imp/rules/workflows/{}",
@@ -1234,6 +1242,58 @@ impl LuauWorkspace {
             return Ok(None);
         }
         let lua = self.lua()?;
+        let provided;
+        let roots = if let Some(provider) = provider {
+            let value = provider
+                .call_async::<LuaValue>(())
+                .await
+                .map_err(lua_err)
+                .with_context(|| format!("goal '{goal}' roots provider"))?;
+            let invalid = |index| {
+                anyhow::anyhow!("goal '{goal}' roots entry {index} must have a non-empty address and a task root")
+            };
+            let LuaValue::Table(entries) = value else {
+                bail!("goal '{goal}' roots provider must return an array");
+            };
+            let count = entries.raw_len();
+            for pair in entries.clone().pairs::<LuaValue, LuaValue>() {
+                let (key, _) = pair.map_err(lua_err)?;
+                if !matches!(key, LuaValue::Integer(i) if i >= 1 && i as usize <= count) {
+                    bail!("goal '{goal}' roots provider must return a dense array");
+                }
+            }
+            let mut declared = Vec::new();
+            for index in 1..=count {
+                let entry = entries
+                    .raw_get::<LuaTable>(index)
+                    .map_err(|_| invalid(index))?;
+                let LuaValue::String(address) = entry
+                    .raw_get::<LuaValue>("address")
+                    .map_err(|_| invalid(index))?
+                else {
+                    return Err(invalid(index));
+                };
+                let address = address.to_str().map_err(|_| invalid(index))?.to_owned();
+                let root = entry
+                    .raw_get::<LuaAnyUserData>("root")
+                    .map_err(|_| invalid(index))?;
+                let handle = root.borrow::<GraphHandle>().map_err(|_| invalid(index))?;
+                if address.is_empty() || handle.kind != "task" {
+                    return Err(invalid(index));
+                }
+                declared.push(GraphRoot {
+                    address,
+                    workflow: goal.to_owned(),
+                    facet: None,
+                    handle_id: handle.id as u32,
+                    is_default: false,
+                });
+            }
+            provided = declared;
+            provided.as_slice()
+        } else {
+            roots
+        };
         let case_filter = flags.get("case").and_then(serde_json::Value::as_str);
         let suite_filter = flags.get("suite").and_then(serde_json::Value::as_str);
         let entries = lua.create_table().map_err(lua_err)?;
@@ -4231,9 +4291,13 @@ fn create_core(
                         "core.goal name '{name}' must use lowercase letters, digits, and '-'"
                     )));
                 }
-                let (flags, selectorless) = match options {
+                let GoalOptions {
+                    flags,
+                    selectorless,
+                    roots,
+                } = match options {
                     Some(options) => parse_goal_options(&name, options)?,
-                    None => (BTreeMap::new(), false),
+                    None => GoalOptions::default(),
                 };
                 let mut host = goal_host.borrow_mut();
                 if host.goals.contains_key(&name) {
@@ -4247,6 +4311,7 @@ fn create_core(
                         callback,
                         flags,
                         selectorless,
+                        roots,
                     },
                 );
                 Ok(goal_slot_key(&name))
@@ -4487,7 +4552,7 @@ fn merge_workspace_tree(
     Ok(())
 }
 
-/// Read the `core.goal(name, fn, { flags })` option table. Each flag is a
+/// Read the `core.goal(name, fn, { flags, selection, roots })` options. Each flag is a
 /// boolean CLI flag with an optional description.
 /// CLI options that every goal accepts. A goal flag with one of these names
 /// would make the goal command line ambiguous.
@@ -4506,12 +4571,10 @@ const RESERVED_GOAL_FLAGS: &[&str] = &[
     "trace-inputs",
 ];
 
-fn parse_goal_options(
-    goal: &str,
-    options: LuaTable,
-) -> LuaResult<(BTreeMap<String, Option<String>>, bool)> {
+fn parse_goal_options(goal: &str, options: LuaTable) -> LuaResult<GoalOptions> {
     let mut flags = BTreeMap::new();
     let mut selectorless = false;
+    let mut roots = None;
     for pair in options.pairs::<String, LuaValue>() {
         let (key, value) = pair?;
         if key == "selection" {
@@ -4523,6 +4586,15 @@ fn parse_goal_options(
                     )))
                 }
             }
+            continue;
+        }
+        if key == "roots" {
+            let LuaValue::Function(provider) = value else {
+                return Err(LuaError::external(format!(
+                    "core.goal('{goal}') roots must be a function"
+                )));
+            };
+            roots = Some(provider);
             continue;
         }
         if key != "flags" {
@@ -4572,7 +4644,16 @@ fn parse_goal_options(
             flags.insert(flag, description);
         }
     }
-    Ok((flags, selectorless))
+    if roots.is_some() && !selectorless {
+        return Err(LuaError::external(format!(
+            "core.goal('{goal}') roots require selection = \"none\""
+        )));
+    }
+    Ok(GoalOptions {
+        flags,
+        selectorless,
+        roots,
+    })
 }
 
 /// Which host replacement a `core.test.with_fake_*` scope installs.
@@ -11827,6 +11908,106 @@ return {}
         .unwrap();
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         runtime.evaluate("@workspace/probe").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn selectorless_goal_roots_resolve_before_publication() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("probe.luau"), r#"
+local core = require("@imp/core")
+local calls = 0
+local function task(value)
+    return core.task({ outputs = { value = core.output.value() }, run = function()
+        local ok = pcall(core.write_workspace, "forbidden", core.digest_from_text({ file = "bad" }))
+        assert(not ok)
+        return { value = value }
+    end })
+end
+local first, second = task("first"), task("second")
+core.goal("probe", function(roots)
+    assert(calls == 1)
+    assert(roots[1].address == "first" and roots[1].result == "first")
+    assert(roots[2].address == "second" and roots[2].result == "second")
+    core.write_workspace("published", core.digest_from_text({ file = "ok" }))
+    return "published"
+end, { selection = "none", roots = function()
+    calls += 1
+    local ok = pcall(core.write_workspace, "forbidden", core.digest_from_text({ file = "bad" }))
+    assert(not ok)
+    return { { address = "first", root = first }, { address = "second", root = second } }
+end })
+for name, case in pairs({
+    ["missing-selection"] = {
+        options = { roots = function() return {} end },
+        expected = 'roots require selection = "none"',
+    },
+    ["invalid-provider"] = {
+        options = { selection = "none", roots = {} },
+        expected = "roots must be a function",
+    },
+}) do
+    local ok, err = pcall(core.goal, name, function() end, case.options)
+    assert(not ok and string.find(tostring(err), case.expected, 1, true), tostring(err))
+end
+local function failing(name, provider)
+    core.goal(name, function() error("publication reached") end, { selection = "none", roots = provider })
+end
+failing("bad-array", function() return { extra = true } end)
+failing("bad-entry", function()
+    return {
+        { address = "must-not-run", root = core.task({ run = function() error("task ran before validation") end }) },
+        { address = "", root = first },
+    }
+end)
+failing("bad-address", function() return { { address = 123, root = first } } end)
+failing("bad-return", function() return false end)
+failing("provider-error", function() error("provider failed") end)
+failing("task-error", function()
+    return { { address = "broken", root = core.task({ run = function() error("task failed") end }) } }
+end)
+return {}
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        runtime.evaluate("@workspace/probe").await.unwrap();
+        let report = runtime
+            .execute_graph(
+                "probe",
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.as_deref(), Some("published"));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("published/file")).unwrap(),
+            "ok"
+        );
+        assert!(!workspace.path().join("forbidden").exists());
+        for (goal, expected) in [
+            ("bad-array", "dense array"),
+            ("bad-entry", "entry 2"),
+            ("bad-address", "entry 1"),
+            ("bad-return", "must return an array"),
+            ("provider-error", "provider failed"),
+            ("task-error", "task failed"),
+        ] {
+            let error = runtime
+                .execute_graph(
+                    goal,
+                    &[],
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap_err();
+            let text = format!("{error:#}");
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("publication reached"), "{text}");
+        }
     }
 
     #[tokio::test]

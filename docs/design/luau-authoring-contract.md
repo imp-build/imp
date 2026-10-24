@@ -1061,3 +1061,25 @@ format and requires POSIX tools, GNU tar, `jq`, and `sha256sum`.
 returns its installed executable path inside a task. See the
 [OCI guide](../../rules/oci/DOC.md) for options and validation commands.
 Generated Luau reference extraction remains part of workspace integration.
+
+## Roots of selectorless goals
+
+A selectorless goal can declare tasks without workspace target selectors:
+
+```luau
+core.goal("refresh", publish, {
+    selection = "none",
+    roots = function()
+        return { { address = "refresh-result", root = refresh_task() } }
+    end,
+})
+```
+
+This is an illustrative example. `publish` and `refresh_task` are supplied by
+the rule. The optional `roots` function requires `selection = "none"`. It runs
+once per invocation after workspace loading and returns a dense array of
+entries with a non-empty diagnostic `address` and a task `root`. Imp validates
+the full array before execution, resolves tasks in array order, and calls the
+goal callback with `{ address, result }` entries. Workspace writes are allowed
+only in the final goal callback. A declaration or task failure prevents that
+callback. Without a roots provider, a selectorless goal receives an empty array.
