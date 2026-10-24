@@ -281,6 +281,14 @@ under goal slots. There is no registry that selects product functions by
 target kind and tool. Consumers can share a producer task without repeating
 its execution within the same invocation.
 
+Luau does not provide JavaScript `Target` attribute schemas, target schema
+inheritance, or the `targetSchemas()` registry. Rule functions construct
+explicit graph handles. Workspace configuration schemas validate workspace
+settings; they do not validate rule options or target attributes. The
+[target schema test outcomes](luau-catalog-cutover-plan.md#target-schema-test-outcomes)
+record the individual test exclusions and the deferred `imp rules schema`
+decision for QuickJS removal.
+
 ### Goals and workflows
 
 **Verified:** Goal policy is Luau rule code. The Rust host selects roots,

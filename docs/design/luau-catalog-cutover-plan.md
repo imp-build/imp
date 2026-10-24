@@ -485,6 +485,35 @@ unresolved host API cases remain open.
 | Two tools can register the same product and both dispatch | Dropped: Luau selects explicit graph roots instead of registered product functions. |
 | `productFor` rejects a role registered by several tools | Dropped: Luau selects an explicit dependency instead of resolving an implicit product provider. |
 
+### Target schema test outcomes
+
+Luau uses explicit graph handles and rule functions. It does not add the
+JavaScript `Target` attribute schema model or its target-kind registry.
+Each test in `rules/imp/target_schema_test.js` is excluded below. Keep the
+JavaScript module until QuickJS removal. The other unresolved host API cases
+remain open.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| fills declared defaults | Dropped: Luau has no `Target` attribute schema that applies defaults to target attributes. |
+| throws on a missing required field | Dropped: Luau has no `Target` attribute schema that declares required target attributes. |
+| throws on an undeclared attrs key | Dropped: Luau has no `Target` attribute schema that restricts target attribute keys. |
+| throws on a type mismatch | Dropped: Luau has no `Target` attribute schema that declares target attribute types. |
+| keeps a target-typed field as the live handle, not a validated copy | Dropped: Luau passes graph handles through explicit dependencies; it has no target-typed attribute schema field to validate or copy. |
+| targetSchemas() reflects the declared schema by kind | Dropped: Luau has no target-kind schema registry to inspect. |
+| a subclass without its own schema inherits its ancestor's | Dropped: Luau has no `Target` class hierarchy or inherited target attribute schemas. |
+| a subclass's schema merges over its ancestor's, own fields winning | Dropped: Luau has no `Target` subclass schema composition or field overrides. |
+| targetSchemas() reports the composed shape for a subclass kind | Dropped: Luau has no composed subclass schemas or target-kind schema registry. |
+
+Workspace configuration schemas validate workspace settings. They do not
+replace target attribute schemas, so their tests are not replacement coverage
+for these exclusions.
+
+**Planned:** `2026-09-30-remove-quickjs-after-luau-cutover` must decide the
+future of `imp rules schema` before removing its JavaScript target schema
+registry. This triage records that follow-up; it does not select replacement
+CLI behavior or change the command.
+
 ## Odin package port
 
 The Odin port adds Luau compiler and formatter providers, deferred source
