@@ -644,3 +644,56 @@ failed before the fix and passed after it. It covers file/file,
 file/directory, and directory-prefix aliases, and checks that rejection writes
 no workspace files. The reviewer checked the fix and reported no additional
 findings. The platform and publication limits above remain unchanged.
+
+## Imp generate validation port
+
+This boundary completes `rules/imp/generate_test.js` in the existing
+`rules/imp/generate.test.luau` module. It owns one Luau authoring module. The
+JavaScript tests remain available during the compatibility period. No public
+API or host change is required.
+
+| JavaScript behavior | Luau evidence |
+| --- | --- |
+| Graph handle with one file for each output path | The resolved task has `out1` and `out2` artifact userdata and a workspace `before` digest. |
+| One action output for each path; tools separate from inputs | The run fake records named output slots, tool names, and input counts. The mounted odinfmt case declares no source inputs. |
+| Mounted Odin formatter | The toolchain fake resolves the verified formatter provider and records its mounted executable. The consumer runs the real formatter. |
+| Generator takes no check flag | The fake records the same command and cache policy in both modes. The consumer verifies zero fresh actions when switching modes. |
+| Required output paths and argv; conflicting tool/input names | Focused cases check the Luau diagnostics. |
+| Empty, exact-path, and ancestor-directory diffs | Scoped diff cases check staleness and exclude unrelated paths. |
+| Publish every declared file | The write fake checks both files, their digests, and their `from` paths, even when only one file is stale. |
+| Check mode never publishes; errors name only stale files | The write fake records no calls. The consumer checks absent files and unchanged drifted content. |
+| Invalid generate root | The workflow case checks the root address and diagnostic. |
+
+The Luau action fake has no `materialize` field. The consumer instead verifies
+that a failed first `generate --check` leaves every output absent. Thus it
+checks the CAS-only behavior through the public goal boundary.
+
+Run the consumer from the checkout root:
+
+```sh
+python3 rules/imp/testdata/generate_consumer_check.py --imp target/debug/imp
+```
+
+It uses a temporary workspace and the normal Imp cache. A shell generator
+writes two files. The check verifies first-run drift, publication, unchanged
+check results, one-file drift, repair, and source-change invalidation. Warm
+runs must report zero fresh sandbox actions and at least one cached action.
+A second root uses the shipped, verified `dev-2026-03` odinfmt toolchain. It
+formats a generated copy, preserves the source, and passes a subsequent
+check. An unrelated sentinel file must stay unchanged throughout.
+
+**Verified:** on 2026-10-24, from the checkout root:
+
+| Command | Result |
+| --- | --- |
+| `cargo build` | Passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/imp:rules_test //rules/odin/odinfmt:rules_test` | 146/146 units passed. |
+| `python3 rules/imp/testdata/generate_consumer_check.py --imp target/debug/imp` | Consumer check passed, including real odinfmt and cached generation after drift. |
+| `IMP_RUNTIME=luau target/debug/imp test //...` | 671/671 units passed. Four failed CMake scan actions are expected negative cases in `rules/c/cmake/scan.test.luau`. |
+| `PATH="$PWD/target/debug:$PATH" imp fmt //...` | 61 unchanged, 0 changed, 0 failed. |
+| `IMP_RUNTIME=luau target/debug/imp fmt //...` | 13 unchanged, 0 changed, 0 failed. |
+| `IMP_RUNTIME=luau target/debug/imp lint //...` | 13 clean, 0 fixed, 0 failed. |
+| `cargo test --workspace` | All suites passed. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //...` | 46 clean, 0 fixed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | 59/59 units passed. |
+| `git diff --check` | Passed. |
