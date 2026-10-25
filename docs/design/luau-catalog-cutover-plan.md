@@ -505,6 +505,25 @@ These outcomes add no host API or runtime behavior. Action caching remains
 separate from task result reuse. The other unresolved host API cases remain
 open.
 
+### Test resolution diagnostic outcome
+
+Luau retains the invalid-handle check from `rules/imp/graph_identity_test.js`.
+The `graph handles` suite in `rules/imp/graph_identity.test.luau` checks the
+Imp diagnostic instead of the mlua argument-conversion text. Keep the
+JavaScript module until QuickJS removal.
+
+| JavaScript test | Outcome |
+| --- | --- |
+| resolveGraphHandle rejects a value that is not a graph handle | Equivalent Luau coverage: tables, strings, numbers, booleans, functions, nil, missing arguments, and non-graph userdata fail with core.test.resolve expects a task, task output, or program graph handle. Unsupported graph handles add their actual kind. |
+
+The suite checks files and native-tool rejection, task and output resolution,
+and program descriptions without process execution. The Rust test
+`luau_test_resolve_checks_test_scope_before_arguments` verifies that calls
+outside a test case report the test-case guard before argument validation,
+including for supported handles. Existing program-description tests retain
+their execution-effect checks. No host API or test fake is added. This outcome
+does not complete the parent inventory audit or authorize JavaScript removal.
+
 ### File argument diagnostic outcomes
 
 Luau retains declaration-time validation for glob file selections. The
@@ -522,8 +541,9 @@ The suite checks valid named glob options too. Existing exact-file tests keep
 the valid empty `paths` list, rejected combinations of exact and glob options,
 and exact-selection error precedence. Exact-selection checks run before the
 new glob checks. Other field conversions and unknown string-key behavior are
-unchanged. No host API or test fake is added. The `test.resolve` diagnostic
-case remains separate work.
+unchanged. No host API or test fake is added. The
+[test resolution diagnostic outcome](#test-resolution-diagnostic-outcome)
+records the separate invalid-handle case.
 
 ### Tracked API test outcomes
 

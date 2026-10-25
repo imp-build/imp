@@ -4842,23 +4842,26 @@ fn install_test_host_api(
     let resolve_configuration = Rc::clone(&configuration);
     test_api.set(
         "resolve",
-        lua.create_async_function(move |lua, handle: LuaAnyUserData| {
+        lua.create_async_function(move |lua, handle: LuaValue| {
             let host = Rc::clone(&resolve_host);
             let configuration = Rc::clone(&resolve_configuration);
             async move {
                 require_active_test_case(&host.borrow(), "core.test.resolve")?;
+                const EXPECTED_HANDLE: &str =
+                    "core.test.resolve expects a task, task output, or program graph handle";
+                let LuaValue::UserData(handle) = handle else {
+                    return Err(LuaError::external(EXPECTED_HANDLE));
+                };
                 let id = {
-                    let handle = handle.borrow::<GraphHandle>().map_err(|_| {
-                        LuaError::external(
-                            "core.test.resolve requires a task or task output handle",
-                        )
-                    })?;
+                    let handle = handle
+                        .borrow::<GraphHandle>()
+                        .map_err(|_| LuaError::external(EXPECTED_HANDLE))?;
                     if handle.kind != "task"
                         && handle.kind != "task_output"
                         && handle.kind != "program"
                     {
                         return Err(LuaError::external(format!(
-                            "core.test.resolve requires a task or task output handle, got {}",
+                            "{EXPECTED_HANDLE}, got {}",
                             handle.kind
                         )));
                     }
@@ -8861,6 +8864,44 @@ return {
     }
 
     #[tokio::test]
+    async fn luau_test_resolve_checks_test_scope_before_arguments() {
+        let (_, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+local calls = 0
+local task = core.task({ outputs = { value = core.output.value() }, run = function()
+    calls += 1
+    return { value = 42 }
+end })
+local program = core.program({ describe = function()
+    calls += 1
+    return { argv = { "must-not-launch" } }
+end })
+local probes = {
+    function() return core.test.resolve() end,
+    function() return core.test.resolve(nil) end,
+}
+for _, value in ipairs({ {}, "bad", 42, false, function() end, core.output.value(),
+    core.files({ include = { "*" } }), task, task.outputs.value, program }) do
+    table.insert(probes, function() return core.test.resolve(value) end)
+end
+local results = {}
+for _, probe in ipairs(probes) do
+    local ok, problem = pcall(probe)
+    table.insert(results, { ok = ok, problem = tostring(problem) })
+end
+return { core.test.case("test scope before arguments", function()
+    for _, result in ipairs(results) do
+        assert(not result.ok)
+        assert(string.find(result.problem, "core.test.resolve can only run inside a running core.test.case", 1, true), result.problem)
+    end
+    assert(calls == 0)
+end) }
+"#).await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
     async fn luau_test_fakes_control_goal_flags_action_status_and_programs() {
         let (_workspace_root, report) = run_luau_test_module(
             r#"
@@ -10489,7 +10530,7 @@ return {
     end),
     core.test.case("resolve non-task", function()
         expect_error(
-            "core.test.resolve requires a task or task output handle, got native_tool",
+            "core.test.resolve expects a task, task output, or program graph handle, got native_tool",
             core.test.resolve,
             core.native_tool("sh")
         )

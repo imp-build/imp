@@ -139,7 +139,7 @@ writes. The `core.test` table provides these functions:
 
 | Function | Effect | Replaces in JavaScript |
 | --- | --- | --- |
-| `core.test.resolve(handle)` | Runs a task or task output handle and returns its result table or output value. | `resolveGraphHandle(handle)` and the toolchain host `resolve(handle)` method |
+| `core.test.resolve(handle)` | Runs a task or task output handle and returns its result table or output value. For a program handle, returns its description without launching it. | `resolveGraphHandle(handle)` and the toolchain host `resolve(handle)` method |
 | `core.test.with_fake_run(fn)` | Records each `exec.action` call instead of running it. | `withFakeRun`, and `globalThis.__host_run` patches such as `withFakeGraphRun` |
 | `core.test.with_fake_toolchain_host([platform,] fn)` | Fakes `exec.action` as `with_fake_run` does, and replaces `platform_info()`. `platform` defaults to `{ os = "linux", arch = "x86_64" }`. | `withFakeToolchainHost` |
 | `core.test.with_fake_write_workspace(fn)` | Records each `write_workspace` call instead of writing to the workspace. | `withFakeWriteWorkspace` |
@@ -251,9 +251,16 @@ Each function fails with a deterministic message when it is used incorrectly:
 - A toolchain platform without non-empty `os` and `arch` strings fails and
   names the missing field. A platform table without a function fails with
   `core.test.with_fake_toolchain_host expects ([platform,] fn)`.
-- `core.test.resolve` with a handle that is not a task or task output fails
-  and names the handle kind. An argument that is not a handle, or a fake body
-  that is not a function, fails with the Luau argument conversion error.
+- `core.test.resolve` first requires a running test case, regardless of its
+  argument. Otherwise it fails with
+  `core.test.resolve can only run inside a running core.test.case`.
+- Inside a test case, a non-handle argument or non-graph userdata fails with
+  `core.test.resolve expects a task, task output, or program graph handle`.
+  This includes a missing argument and `nil`. An unsupported graph handle
+  adds `, got <kind>` to that message. Tasks, task outputs, and program
+  handles remain accepted.
+- A fake body that is not a function fails with the Luau argument conversion
+  error.
 
 **Limits:** The fakes do not provide the JavaScript `setRunOutputFiles`
 control. Placeholder artifacts of a faked action have no content that
@@ -492,8 +499,9 @@ before glob argument validation. `core.glob` and `core.builtin_files` still
 reject `paths` with `exact paths require core.files({ paths })`.
 
 The [file argument diagnostic outcomes](luau-catalog-cutover-plan.md#file-argument-diagnostic-outcomes)
-record the cutover coverage. The separate `core.test.resolve` diagnostic task
-is unchanged.
+record the glob validation coverage. The
+[test resolution diagnostic outcome](luau-catalog-cutover-plan.md#test-resolution-diagnostic-outcome)
+records the separate `core.test.resolve` argument checks.
 
 ### Select exact workspace files
 

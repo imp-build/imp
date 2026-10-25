@@ -137,14 +137,55 @@ return {
 		end),
 
 		core.test.case("core.test.resolve rejects a value that is not a graph handle", function()
-			local text = error_text(core.test.resolve, { nope = true })
-			assert(contains(text, "error converting Lua table to userdata"), text)
+			local expected = "core.test.resolve expects a task, task output, or program graph handle"
+			for _, value in ipairs({ { nope = true }, "bad", 42, 1.5, false, function() end }) do
+				local text = error_text(core.test.resolve, value)
+				assert(contains(text, expected), text)
+			end
+			assert(contains(error_text(core.test.resolve, nil), expected))
+			assert(contains(error_text(core.test.resolve), expected))
 		end),
 
-		core.test.case("core.test.resolve rejects a handle that is not a task", function()
-			local files = core.files({ root = "rules/imp", include = { "*.luau" } })
-			local text = error_text(core.test.resolve, files)
-			assert(contains(text, "requires a task or task output handle, got files"), text)
+		core.test.case("core.test.resolve rejects non-graph userdata", function()
+			local text = error_text(core.test.resolve, core.output.value())
+			assert(contains(text, "core.test.resolve expects a task, task output, or program graph handle"), text)
+		end),
+
+		core.test.case("core.test.resolve rejects unsupported graph handle kinds", function()
+			for _, case in ipairs({
+				{ core.files({ include = { "*.luau" } }), "files" },
+				{ core.native_tool("sh"), "native_tool" },
+			}) do
+				local text = error_text(core.test.resolve, case[1])
+				assert(contains(text, "core.test.resolve expects a task, task output, or program graph handle, got " .. case[2]), text)
+			end
+		end),
+
+		core.test.case("core.test.resolve accepts tasks, outputs, and program descriptions", function()
+			local calls = 0
+			local task = core.task({
+				outputs = { value = core.output.value() },
+				run = function()
+					calls += 1
+					return { value = 42 }
+				end,
+			})
+			local described = 0
+			local program = core.program({
+				describe = function()
+					described += 1
+					return { argv = { "resolve-probe-must-not-launch" } }
+				end,
+			})
+			core.test.with_fake_run(function(host)
+				assert(core.test.resolve(task).value == 42)
+				assert(core.test.resolve(task.outputs.value) == 42)
+				assert(calls == 1)
+				local description = core.test.resolve(program)
+				assert(description.argv[1] == "resolve-probe-must-not-launch")
+				assert(described == 1)
+				assert(#host.runs == 0)
+			end)
 		end),
 
 		core.test.case("files() rejects an empty include list", function()
