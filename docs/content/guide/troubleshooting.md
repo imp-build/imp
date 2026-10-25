@@ -43,7 +43,7 @@ in commands or environment values.
 ## Compare repository and environment failures
 
 If the same focused command fails with a fresh cache, inspect the selected
-`BUILD.js`, workspace imports, declared tools, source paths, and platform. If a
+`BUILD.luau`, workspace imports, declared tools, source paths, and platform. If a
 clean workspace or another supported platform succeeds, compare those inputs
 before changing Imp.
 

@@ -93,7 +93,9 @@ toolchain.register("zola", function()
 end)
 
 return {
-	ZOLA = KIND, zola_toolchain = zola_toolchain, graph_toolchain = graph_toolchain,
+	ZOLA = KIND,
+	--- @category configuration
+	zola_toolchain = zola_toolchain, graph_toolchain = graph_toolchain,
 	zola_bin = zola_bin, cache_key = cache_key, artifact_name = artifact_name,
 	download_url = download_url, supported_platforms = supported_platforms,
 	default_version = KIND.default_version, resolve_version = KIND.resolve_version,

@@ -112,6 +112,20 @@ impl GrammarRegistry {
         Ok(id)
     }
 
+    /// Inspect one parsed tree while the registry keeps its grammar alive.
+    pub fn inspect_tree<T>(
+        &self,
+        tree_id: u32,
+        inspect: impl FnOnce(tree_sitter::Node<'_>, &str) -> Result<T>,
+    ) -> Result<T> {
+        let inner = self.inner.lock().unwrap();
+        let stored = inner
+            .trees
+            .get(&tree_id)
+            .with_context(|| format!("no tree loaded with handle {tree_id}"))?;
+        inspect(stored.tree.root_node(), &stored.source)
+    }
+
     /// S-expression dump of the tree's root node, for debugging/simple
     /// structural checks.
     pub fn tree_sexp(&self, tree_id: u32) -> Result<String> {

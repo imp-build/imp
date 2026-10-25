@@ -2,6 +2,9 @@
 # Regenerate with: imp generate //ci:docs_workflow
 
 name: Deploy docs
+env:
+  IMP_RUNTIME: luau
+  IMP_RULES_DIR: ${{ github.workspace }}/rules
 
 on:
   push:
@@ -88,7 +91,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp/named/shared
-          key: imp-toolchains-v2-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          key: imp-toolchains-v2-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
           restore-keys: imp-toolchains-v2-check-${{ runner.os }}-
 
       - name: Cache imp store
@@ -97,9 +100,9 @@ jobs:
           path: |
             ~/.cache/imp
             !~/.cache/imp/named/shared
-          key: imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
             imp-store-v6-check-${{ runner.os }}-
 
       - name: Check generated files
@@ -113,6 +116,9 @@ jobs:
 
       - name: Test
         run: ./imp test //... --changed-since "$IMP_CHANGED_SINCE"
+
+      - name: Check Luau workspace coverage
+        run: python3 ci/check_luau_workspace.py --imp ./imp
 
       - name: Documentation quality
         run: ./imp lint //docs && ./imp test //docs
@@ -179,7 +185,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp/named/shared
-          key: imp-toolchains-v2-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          key: imp-toolchains-v2-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
           restore-keys: imp-toolchains-v2-package-${{ runner.os }}-
 
       - name: Cache imp store
@@ -188,9 +194,9 @@ jobs:
           path: |
             ~/.cache/imp
             !~/.cache/imp/named/shared
-          key: imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
             imp-store-v6-package-${{ runner.os }}-
 
       - name: Package docs site

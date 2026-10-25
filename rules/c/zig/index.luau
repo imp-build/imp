@@ -488,5 +488,7 @@ return {
 	reset_for_test = reset_for_test,
 	resolve_version = ZIG.resolve_version,
 	supported_platforms = supported_platforms,
+
+	--- @category configuration
 	zig_toolchain = zig_toolchain,
 }

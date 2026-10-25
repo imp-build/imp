@@ -39,6 +39,12 @@ local json_grammar_fixture = grammar_fixture("json", "treesitter/testdata/tree-s
 --- Build the Odin grammar, including its external scanner.
 local odin_grammar_fixture = grammar_fixture("odin", "treesitter/testdata/tree-sitter-odin", { "parser.c", "scanner.c", "tree_sitter/*.h" })
 
+--- Compile the pinned Luau grammar for static reference extraction.
+local luau_grammar = grammar_fixture("luau", "treesitter/grammars/luau", { "parser.c", "scanner.c", "tree_sitter/*.h" })
+
+--- Declare the Luau reference syntax extractor.
+local luau_reference = rust.cargo_package({ path = "treesitter", bin = "imp-luau-reference", builtin = true })
+
 --- Declare the round-trip executable. PACKAGE resolves to its binary artifact.
 local imp_treesitter = rust.cargo_package({ path = "treesitter", bin = "treesitter-roundtrip", builtin = true })
 
@@ -59,6 +65,8 @@ local roundtrip_run = core.task({
 })
 
 return {
+	luau_grammar = luau_grammar,
+	luau_reference = luau_reference,
 	json_grammar_fixture = json_grammar_fixture,
 	odin_grammar_fixture = odin_grammar_fixture,
 	imp_treesitter = imp_treesitter,

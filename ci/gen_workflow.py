@@ -2,8 +2,8 @@
 """Generates the repository's GitHub workflows from structured job/step data.
 
 A small, stdlib-only stand-in for the codegen->workspace pattern this repo's
-imp supports via generatedFiles()/writeWorkspace() — see //ci:docs_workflow
-in ci/BUILD.js. `imp generate //ci:docs_workflow --check` fails the
+imp supports via generated_files()/write_workspace() — see //ci:docs_workflow
+in ci/BUILD.luau. `imp generate //ci:docs_workflow --check` fails the
 build if this script's output ever drifts from the committed workflow files.
 
 Jobs chain: `build` compiles the imp binary once and uploads it as an
@@ -112,9 +112,7 @@ BUILD_STEPS = [
 # toolchain installer's wrapper set (like #98's added ranlib wrapper) is
 # invisible to an already-populated cache; only a key bump forces reinstall.
 TOOLCHAIN_SCOPE_PATH = "~/.cache/imp/named/shared"
-TOOLCHAIN_PINS_HASH = (
-    "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}"
-)
+TOOLCHAIN_PINS_HASH = "${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}"
 
 
 def cache_toolchains_step(job):
@@ -149,7 +147,7 @@ def cache_toolchains_step(job):
 # that job's additions would silently never persist.
 def cache_imp_step(job):
     prefix = f"imp-store-v6-{job}-${{{{ runner.os }}}}"
-    pins = "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}"
+    pins = "${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}"
     return {
         "name": "Cache imp store",
         "uses": "actions/cache@v4",
@@ -206,7 +204,7 @@ CHECK_STEPS = [
     {
         "name": "Check generated files",
         "run": (
-            f'./imp generate {SITE_CHECK_TARGET} '
+            f"./imp generate {SITE_CHECK_TARGET} "
             '--changed-since "$IMP_CHANGED_SINCE" --check'
         ),
     },
@@ -221,6 +219,10 @@ CHECK_STEPS = [
     {
         "name": "Test",
         "run": './imp test //... --changed-since "$IMP_CHANGED_SINCE"',
+    },
+    {
+        "name": "Check Luau workspace coverage",
+        "run": "python3 ci/check_luau_workspace.py --imp ./imp",
     },
     {
         "name": "Documentation quality",
@@ -254,12 +256,10 @@ PACKAGE_SMOKE_STEPS = [
     *DOWNLOAD_IMP_STEPS,
     {
         "name": "Stage release tree",
-        "run": "\n".join(
-            [
-                "mkdir -p stage/bin stage/share/imp",
-                "mv imp stage/bin/imp",
-                "cp -r rules stage/share/imp/rules",
-            ]
+        "run": (
+            "mkdir -p stage/bin stage/share/imp\n"
+            "mv imp stage/bin/imp\n"
+            "cp -r rules stage/share/imp/rules"
         ),
     },
     {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
@@ -324,6 +324,7 @@ JOBS = [
     },
 ]
 
+
 # Release archives contain a self-consistent prefix, not a bare binary: the
 # rule library is no longer compiled in, so it has to travel with the
 # executable. `bin/` + `share/imp/rules/` is exactly what RulesSource's
@@ -370,7 +371,11 @@ def stage_windows_release_steps(target, archive_cmd):
     stage = stage_dir(target)
     checks = "\n".join(
         f'if (-not (Test-Path "{stage}/share/imp/{f}")) {{ throw "missing {f}" }}'
-        for f in ("rules/rust/rust.lock", "rules/imp/codegen/index.js")
+        for f in (
+            "rules/rust/rust.lock",
+            "rules/imp/codegen/index.luau",
+            "rules/treesitter/grammars/luau/parser.c",
+        )
     )
     return [
         {
@@ -619,6 +624,9 @@ def render_workflow():
     lines = [
         *GENERATED_HEADER,
         "name: Deploy docs",
+        "env:",
+        "  IMP_RUNTIME: luau",
+        "  IMP_RULES_DIR: ${{ github.workspace }}/rules",
         "",
         "on:",
         "  push:",
@@ -647,6 +655,8 @@ def render_release_workflow():
     lines = [
         *GENERATED_HEADER,
         "name: Build release artifacts",
+        "env:",
+        "  IMP_RUNTIME: luau",
         "",
         # Was `push: branches: [main]`, which rebuilt both platforms on every
         # commit — ~92 billed min/day — to feed a rolling draft release nobody

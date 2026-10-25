@@ -14,9 +14,9 @@ Edit the maintained source that owns the content:
 
 - Use `docs/content/` for authored site pages.
 - Use `rules/*/DOC.md` for rule-specific guides.
-- Use source JSDoc, schemas, capabilities, and rule guides for generated API
+- Use source Luau documentation, schemas, and rule guides for generated API
   references.
-- Use `docs/BUILD.js` to change how the site and generated references are
+- Use `docs/BUILD.luau` to change how the site and generated references are
   assembled.
 - Use `ci/gen_workflow.py` for the generated GitHub workflow files.
 
@@ -44,18 +44,18 @@ From the repository root, use the focused documentation checks while editing:
 **Runnable example**
 
 ```sh
-imp fmt //docs
-imp lint //docs
-imp test //docs
-imp package //docs:site
+IMP_RUNTIME=luau imp fmt //docs
+IMP_RUNTIME=luau imp lint //docs
+IMP_RUNTIME=luau imp test //docs
+IMP_RUNTIME=luau imp package //docs:site
 ```
 
-`docs/BUILD.js` extracts JavaScript and user API references from source files, schemas,
-capabilities, and rule guides before Zola builds the site. Packaging therefore checks both authored
+`docs/BUILD.luau` extracts Luau code and user API references from Luau source files, schemas,
+and rule guides before Zola builds the site. Packaging therefore checks both authored
 pages and generated reference inputs.
 
-`imp lint //docs` checks source links, rendered links and fragments, guide navigation, generated
-reference output, and example status labels. `imp test //docs` tests the checker. These checks do
+`IMP_RUNTIME=luau imp lint //docs` checks source links, rendered links and fragments, guide navigation, generated
+reference output, and example status labels. `IMP_RUNTIME=luau imp test //docs` tests the checker. These checks do
 not execute arbitrary documentation commands. A **Runnable example** must include complete setup
 and expected context. An **Illustrative example** is an intentional code fragment that does not
 claim to run as written.
@@ -81,3 +81,16 @@ large sections.
 Before submitting, check heading order, descriptive link text, command context, platform limits, and
 generated-file ownership. Follow the complete checklist in
 [`docs/EDITORIAL.md`](../../EDITORIAL.md).
+
+## Preview automatic rebuilds
+
+From the repository root, select Luau and run the preview target. It packages
+the site before serving, rebuilds on source edits, and restarts Zola only when
+the published content changes. A failed rebuild keeps the last successful
+site available. Ctrl-C stops the supervisor and its child processes.
+
+**Runnable example**
+
+```sh
+IMP_RUNTIME=luau imp run //docs:site_serve
+```

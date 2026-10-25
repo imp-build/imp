@@ -1,0 +1,31 @@
+local asset = require("@imp/rules/asset")
+local core = require("@imp/core")
+local codegen = require("@imp/rules/imp/codegen")
+return {
+	generated_stamp = codegen.stamp_file({ output = "generated/imp-stamp.txt", text = "imp build ran" }),
+	engineAssets = asset.resource_package({ srcs = { "crates/imp-engine/src/imp_core.js",
+		"crates/imp-engine/src/graph_core.js", } }),
+	rulesTree = asset.resource_package({ srcs = { "rules/**/*" } }),
+	luauWorkspace = asset.resource_package({ srcs = { "imp.workspace.luau", "imp.workspace.ci.luau", "BUILD.luau", "crates/**/BUILD.luau", "docs/core_api.luau" } }),
+	testTar = core.native_tool("tar"),
+	testGzip = core.native_tool("gzip"),
+	testCmake = core.native_tool("cmake"),
+	testAs = core.native_tool("as"),
+	testLd = core.native_tool("ld"),
+	testAr = core.native_tool("ar"),
+	testMkdir = core.native_tool("mkdir"),
+	testNinja = core.native_tool("ninja"),
+	testDirname = core.native_tool("dirname"),
+	testCp = core.native_tool("cp"),
+	testCtest = core.native_tool("ctest"),
+	testSed = core.native_tool("sed"),
+	testSha256sum = core.native_tool("sha256sum"),
+	testCurl = core.native_tool("curl"),
+	testWc = core.native_tool("wc"),
+	testXz = core.native_tool("xz"),
+	testChmod = core.native_tool("chmod"),
+	testSleep = core.native_tool("sleep"),
+	testCat = core.native_tool("cat"),
+	testSh = core.native_tool("sh"),
+	testGit = core.native_tool("git"),
+}

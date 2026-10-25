@@ -14,5 +14,7 @@ local function native_tool(name)
 end
 
 return {
+
+	--- @category target
 	native_tool = native_tool,
 }

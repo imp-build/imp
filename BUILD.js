@@ -31,7 +31,7 @@ export const rulesTree = resourcePackage({
 // imp-engine tests load the repository Luau workspace (imp.workspace.luau and
 // the BUILD.luau modules in the rule tree) and run its Luau tests.
 export const luauWorkspace = resourcePackage({
-	srcs: ["imp.workspace.luau"],
+	srcs: ["imp.workspace.luau", "docs/core_api.luau"],
 });
 
 export const testTar = nativeTool("tar");

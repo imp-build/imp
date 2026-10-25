@@ -95,8 +95,3 @@ the version is unchanged. Declare the local toolchain before targets that
 consume it; later declarations replace the version for subsequent consumers.
 
 ## Migration limits
-
-JavaScript modules remain available during migration. The generated API
-references still read JavaScript sources. Luau extraction and Biome generated
-references belong to `2026-09-30-integrate-luau-workspace-tests-and-docs`.
-See the [JavaScript rules](https://imps.build/reference/user-api/js/) for application configuration.

@@ -9,5 +9,5 @@ New to imp? Start with [Installing Imp](/guide/installing/), then follow
 your first target. For advanced workflows, see [toolchains and
 caches](/guide/toolchains-and-caches/), [CI](/guide/continuous-integration/),
 and [troubleshooting](/guide/troubleshooting/). Rule authors can jump to the
-[User API reference](/reference/user-api/) or the [JS code
-reference](/reference/js-api/).
+[User API reference](/reference/user-api/) or the [Luau code
+reference](/reference/luau-api/).

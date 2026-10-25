@@ -33,13 +33,6 @@ CAS; they do not write `node_modules` or `dist` into the example directories.
 
 ### Luau API
 
-For BUILD authors, `@imp/rules/js` exports `js_sources`, `js_app`, and
-`ts_app`. Use `imp.workspace.luau` and select it with `IMP_RUNTIME=luau`.
-The JavaScript modules remain available while the catalog migration is in
-progress. The generated API references still describe JavaScript. Luau
-reference extraction belongs to the workspace and documentation integration
-task.
-
 **Illustrative example**
 
 In `imp.workspace.luau`, register the workflows:
@@ -124,30 +117,3 @@ store tool as an input before requesting its absolute environment settings.
 The shared `pnpm-store/shared` cache is seeded once and has empty `bin_dirs`,
 so it does not enter `PATH`. Application install does not use this optional
 shared store.
-
-### JavaScript API
-
-Use `jsSources()` for a shallow source collection, `jsApp()` for a JavaScript
-application, and `tsApp()` for a TypeScript application. An application needs
-`package.json` and a frozen pnpm lockfile. A TypeScript application also needs
-`tsconfig.json` with `outDir: "dist"` and a TypeScript dependency.
-
-**Illustrative example**
-
-```js
-import { tsApp } from "//rules/js";
-
-export const app = tsApp({
-    src: "app",
-    entry: "main.js",
-    sources: ["src/**/*.ts"],
-});
-```
-
-Application source patterns default to direct JavaScript and TypeScript files
-under the app root. Declare nested directories explicitly with patterns such as
-`src/**/*.js` or `src/**/*.ts`; ignored files are never staged.
-
-The `registerJsSourcesHook()` and `registerJsAppHook()` exports are extension
-hooks. They are not application BUILD APIs. Toolchain declarations belong to
-the `//rules/js/node`, `//rules/js/pnpm`, and `//rules/js/biome` modules.

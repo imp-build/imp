@@ -10,7 +10,7 @@ publish them to a registry or deployment system by itself.
 
 ## Package a target
 
-Declare a package-capable target in a `BUILD.js` file, then select it from the
+Declare a package-capable target in a `BUILD.luau` file, then select it from the
 workspace root:
 
 **Illustrative example**
@@ -27,17 +27,18 @@ change the cached graph result.
 ## Export graph-generated files
 
 Use `imp codegen` to inspect outputs from selected `codegen()` declarations.
-The declaration must be exported from its `BUILD.js` file:
+The declaration must be exported from its `BUILD.luau` file:
 
 **Illustrative example**
 
-```js
-import { codegen } from "//rules/imp/codegen";
-
-export const bindings = codegen({
-    outputPaths: ["app/generated/bindings.odin"],
-    // Declare the generator's tools, inputs, and argv.
-});
+```luau
+local core = require("@imp/core")
+local codegen = require("@imp/rules/imp/codegen")
+return { bindings = codegen.codegen({
+    tools = { sh = core.native_tool("sh") },
+    output_paths = { "app/generated/bindings.odin" },
+    argv = function() return { "sh", "-c", "echo generated > app/generated/bindings.odin" } end,
+}) }
 ```
 
 For a Luau workspace, return the declaration from `BUILD.luau`. Require

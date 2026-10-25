@@ -93,7 +93,9 @@ toolchain.register("crane", function()
 end)
 
 return {
-	CRANE = KIND, crane_toolchain = crane_toolchain, graph_toolchain = graph_toolchain,
+	CRANE = KIND,
+	--- @category configuration
+	crane_toolchain = crane_toolchain, graph_toolchain = graph_toolchain,
 	crane_bin = crane_bin, cache_key = cache_key, artifact_name = artifact_name,
 	download_url = download_url, supported_platforms = supported_platforms,
 	default_version = KIND.default_version, resolve_version = KIND.resolve_version,

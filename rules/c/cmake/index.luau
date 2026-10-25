@@ -7,10 +7,16 @@ local expansion = require("./expansion")
 local toolchain = require("./toolchain")
 
 return {
+
+	--- @category target
 	cmake_library_dep = expansion.cmake_library_dep,
+
+	--- @category target
 	cmake_project = expansion.cmake_project,
 	cmake_project_expansion = expansion.cmake_project_expansion,
 	cmake_project_specs = expansion.cmake_project_specs,
+
+	--- @category configuration
 	cmake_toolchain = toolchain.cmake_toolchain,
 	default_graph_toolchain = toolchain.default_graph_toolchain,
 	graph_toolchain = toolchain.graph_toolchain,

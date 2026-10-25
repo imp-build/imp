@@ -1,4 +1,4 @@
-{# Nested nav tree for generated JS reference sections: mirrors the source
+{# Nested nav tree for generated Luau reference sections: mirrors the source
    directory structure, collapsed except for the branch containing the
    current page/section. Callers must `{% import "partials/nav_macros.html"
    as nav %}` before including this partial - Tera resolves macro
@@ -8,7 +8,7 @@
 {% elif section is defined and section.path is starting_with("/reference/user-api") %}
 {% set api_root = get_section(path="reference/user-api/_index.md") %}
 {% else %}
-{% set api_root = get_section(path="reference/js-api/_index.md") %}
+{% set api_root = get_section(path="reference/luau-api/_index.md") %}
 {% endif %}
 {% if page is defined %}
 {% set current_relpath = page.relative_path %}

@@ -28,12 +28,13 @@ Imp](docs/content/guide/contributing.md). Maintainers can also read the
 [release workflow](docs/content/guide/releases.md) and [documentation
 workflow](docs/content/guide/documentation-workflow.md).
 
-Create `imp.workspace.js` at the workspace root, import the rule modules your
+Create `imp.workspace.luau` at the workspace root, import the rule modules your
 workspace uses, and build a target:
 
-```js
-import "//rules/c";
-import "//rules/workflows/test";
+```luau
+require("@imp/rules/c")
+require("@imp/rules/workflows/test")
+return {}
 ```
 
 Then run:

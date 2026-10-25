@@ -50,7 +50,3 @@ The external consumer check also builds the Odin grammar and analyzer,
 checks source edits, and checks failure propagation. Native execution is
 validated on Linux. Native Windows and macOS execution is not verified by
 this check.
-
-The JavaScript modules remain for the current Odin rules and documentation
-build. Generated Luau references are deferred to the workspace integration
-task; this package does not yet meet that part of its documentation criterion.

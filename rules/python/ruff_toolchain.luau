@@ -131,7 +131,9 @@ local function install_ruff_toolchain(version, source, options)
 end
 
 return {
-	RUFF = KIND, ruff_toolchain = ruff_toolchain, graph_toolchain = graph_toolchain,
+	RUFF = KIND,
+	--- @category configuration
+	ruff_toolchain = ruff_toolchain, graph_toolchain = graph_toolchain,
 	ruff_bin = ruff_bin, cache_key = cache_key,
 	artifact_name = artifact_name, download_url = download_url, supported_platforms = supported_platforms,
 	default_version = KIND.default_version, resolve_version = KIND.resolve_version,

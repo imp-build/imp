@@ -5,4 +5,6 @@ local function python_runtime(value)
 	assert(type(value) == "string" and value ~= "", "python_runtime(version) requires a non-empty version string")
 	version = value
 end
-return { python_runtime = python_runtime, default_python_runtime_version = function() return version end }
+return {
+	--- @category configuration
+	python_runtime = python_runtime, default_python_runtime_version = function() return version end }

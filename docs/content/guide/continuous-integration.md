@@ -15,7 +15,7 @@ can cache Imp's toolchain and build store.
 
 ## Prepare the job
 
-Commit `imp.workspace.js` and the `BUILD.js` files that define the targets.
+Commit `imp.workspace.luau` and the `BUILD.luau` files that define the targets.
 Use `setup-imp` or install a published Imp archive before running the job.
 
 Run the checks from the workspace root:

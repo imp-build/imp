@@ -27,8 +27,7 @@ workflow handles each target provides.
 
 **Verified:** on 2026-10-24, `@imp/rules/workflows/build`, `codegen`, `fmt`,
 `generate`, `generate_build`, `lint`, `lockfiles`, `package`, `publish`, `run`,
-`test`, and `vs` have Luau modules beside the JavaScript modules. JavaScript stays
-the default runtime of this repository. To use the Luau modules here, select
+`test`, and `vs` have Luau modules beside the JavaScript modules. The repository CI selects
 the Luau workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
 
@@ -65,7 +64,7 @@ graph was declared. Toolchain modules register their shipped lockfiles with
 `stdout`, and `stderr` into a `TEST` unit list. Run the action with
 `allow_failure = true`, so that a failing test does not stop the task.
 
-**Illustrative example:** a BUILD module whose `.test.luau` modules sit in the
+**Illustrative example** a BUILD module whose `.test.luau` modules sit in the
 same directory.
 
 ```luau
@@ -90,7 +89,7 @@ Paths must be normalized and relative. File and directory paths must not
 conflict. Paths and directory prefixes that differ only in case are rejected
 on every host.
 
-**Illustrative example:** inside a goal callback, publish text under a prefix.
+**Illustrative example** inside a goal callback, publish text under a prefix.
 
 ```luau
 local digest = core.digest_from_text({

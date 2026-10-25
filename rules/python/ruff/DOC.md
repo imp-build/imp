@@ -95,10 +95,6 @@ a source-copy loop. Source paths remain individual command arguments, so
 large source sets remain subject to platform argv limits. Source selection
 is unchanged. Ignored and unselected files are not added by the mapping.
 
-Generated references still describe JavaScript. Luau extraction and generated
-Ruff references belong to `2026-09-30-integrate-luau-workspace-tests-and-docs`.
-The reference-generation acceptance criterion remains incomplete.
-
 Contributors can run the real-tool consumer check from the Imp checkout root,
 after building `target/debug/imp`. It needs network access on a cold cache:
 

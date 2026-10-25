@@ -9972,6 +9972,42 @@ return {
         assert_eq!(report, "Published 1 target:\n  //:image");
     }
 
+    #[tokio::test]
+    async fn core_reference_declarations_match_live_exports() {
+        fn collect(table: LuaTable, prefix: &str, names: &mut std::collections::BTreeSet<String>) {
+            for pair in table.pairs::<String, LuaValue>() {
+                let (key, value) = pair.unwrap();
+                let name = format!("{prefix}.{key}");
+                if let LuaValue::Table(nested) = value {
+                    collect(nested, &name, names);
+                } else {
+                    names.insert(name);
+                }
+            }
+        }
+        let (_, _, runtime) = hello_goal_workspace().await;
+        let lua = runtime.lua().unwrap();
+        let core: LuaTable = lua.load("return require('@imp/core')").eval().unwrap();
+        let mut actual = std::collections::BTreeSet::new();
+        collect(core, "core", &mut actual);
+        let rules = crate::loader::RulesSource::discover();
+        let root = rules
+            .root()
+            .expect("tests need the repository rules tree")
+            .parent()
+            .unwrap();
+        let source = fs::read_to_string(root.join("docs/core_api.luau")).unwrap();
+        let declared = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("--- @host "))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            declared, actual,
+            "update the documentation-only host declarations"
+        );
+    }
+
     /// The Luau workspace of this repository loads, and every rule test root
     /// (`core.test_root()`) in it passes. Product test roots, such as the
     /// CMake example ctest roots, need real toolchains and are left to

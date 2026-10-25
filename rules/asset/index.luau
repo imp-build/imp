@@ -45,6 +45,9 @@ local function source_files(options, name)
 	})
 end
 
+--- Capture a source collection and expose its BUILD workflow.
+--- @param options Source globs, base, path, and exclusions.
+--- @returns A table with sources and a BUILD task.
 local function asset(options)
 	options = options or {}
 	local sources = source_files(options, "asset")
@@ -66,6 +69,9 @@ local function asset(options)
 	}
 end
 
+--- Capture resource files for use as explicit graph dependencies.
+--- @param options Source globs, base, path, and exclusions.
+--- @returns An asset table with a files handle.
 local function resource_package(options)
 	options = options or {}
 	if type(options.srcs) ~= "table" or #options.srcs == 0 then
@@ -77,7 +83,11 @@ local function resource_package(options)
 end
 
 return {
+
+	--- @category target
 	asset = asset,
+
+	--- @category target
 	resource_package = resource_package,
 	workflow = build.BUILD,
 }

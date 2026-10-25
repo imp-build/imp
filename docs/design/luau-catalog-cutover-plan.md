@@ -969,3 +969,23 @@ warning behavior.
 The generated-file snapshot and shared tree-listing follow-ups above remain
 outside this delivery. The JavaScript tests and the other pending host API
 cases remain in place.
+
+## Workspace integration checks
+
+The Luau repository declarations cover the root resources, Cargo packages, CI
+generation, documentation, and shipped rule packages.
+`ci/check_luau_workspace.py` checks missing BUILD counterparts against explicit
+exclusions and verifies target workflows with the checkout CLI. It also
+checks Odin libraries without RUN children and enabled C, Rust, and Odin
+generators. A zero-file generation check means the declarations already own
+the relevant source directories; it is not a count of enabled generators.
+
+The remaining JavaScript-only BUILD files are formatting inventories, the
+QuickJS test harness and its build-workflow tests, and the illustrative
+`examples/proposed-rules` proposal. The check records the reason for each
+exclusion. JavaScript application example sources remain application inputs.
+
+Generated references use the pinned Luau Tree-sitter grammar, source `---`
+comments, and the documentation-only host declarations. The generated public
+reference replaces the JavaScript reference. The rule library still ships
+as files beside the executable. QuickJS removal remains a separate task.

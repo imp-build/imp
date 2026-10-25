@@ -5,37 +5,35 @@ template = "page.html"
 +++
 
 This page is for users who have installed `imp` and want to create a workspace
-and build a first target. You will create `imp.workspace.js`, declare a small C
+and build a first target. You will create `imp.workspace.luau`, declare a small C
 test target, and run it from the workspace root.
 
 You need an Imp installation and a supported compiler toolchain. The C rules
 use a pinned managed toolchain by default; the first build may download it.
 See [Installing Imp](../installing/) if the `imp` command is not available.
 
-Create `imp.workspace.js` at the workspace root. Import the rule modules your
-`BUILD.js` files will use (see [The workspace file](../workspace-file/) for
+Create `imp.workspace.luau` at the workspace root. Import the rule modules your
+`BUILD.luau` files will use (see [The workspace file](../workspace-file/) for
 the other configuration options):
 
 **Illustrative example**
 
-```js
-import "//rules/c";
-import "//rules/workflows/test";
+```luau
+require("@imp/rules/c")
+require("@imp/rules/workflows/test")
+return {}
 ```
 
-Create a `BUILD.js` file in the same directory:
+Create a `BUILD.luau` file in the same directory:
 
 **Illustrative example**
 
-```js
-import { ccTest } from "//rules/c";
-
-export const hello_test = ccTest({
-    srcs: ["hello_test.c"],
-});
+```luau
+local c = require("@imp/rules/c")
+return { hello_test = c.cc_test({ srcs = { "hello_test.c" } }) }
 ```
 
-Add the test program. A `ccTest()` target passes when its executable returns
+Add the test program. A `cc_test()` target passes when its executable returns
 zero:
 
 **Illustrative example**
@@ -46,7 +44,7 @@ int main(void) {
 }
 ```
 
-Imp discovers `BUILD.js` files anywhere below the workspace root. List the
+Imp discovers `BUILD.luau` files anywhere below the workspace root. List the
 target before running it:
 
 **Runnable example**

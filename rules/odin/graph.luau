@@ -314,9 +314,20 @@ local function expansion_for(spec)
 			return { actions = actions(spec, input.index, input.selected) }
 		end })
 		local roots = { [build.BUILD] = expanded:get("actions", build.BUILD), [package.PACKAGE] = expanded:get("actions", package.PACKAGE), [lint.LINT] = expanded:get("actions", lint.LINT) }
-		roots[if spec.test then test.TEST else run.RUN] = expanded:get("actions", if spec.test then test.TEST else run.RUN)
+		if spec.test then roots[test.TEST] = expanded:get("actions", test.TEST) end
 		return { actions = roots }
 	end })
+end
+-- RUN has dynamic membership: a library has no executable to launch.
+local function run_for(spec)
+    return core.expand({ inputs = {}, create = function()
+        local selected = selected_paths()
+        local programs = core.expand({ inputs = { index = analysis_task.outputs.index, selected = selected }, create = function(input)
+            if not analyze(spec, input.index, input.selected[spec.key]).has_main then return {} end
+            return { program = { [run.RUN] = actions(spec, input.index, input.selected)[run.RUN] } }
+        end })
+        return { programs = { [run.RUN] = programs:all(run.RUN) } }
+    end }):get("programs", run.RUN)
 end
 --- Declare an Odin package with source, dependency, and toolchain options.
 local function odin_package(options, is_test)
@@ -337,7 +348,7 @@ local function odin_package(options, is_test)
 	local expanded = expansion_for(spec)
 	local value = { odin_spec = spec, sources = spec.sources, base = base, version = provider.version,
 		[build.BUILD] = expanded:get("actions", build.BUILD), [package.PACKAGE] = expanded:get("actions", package.PACKAGE), [lint.LINT] = expanded:get("actions", lint.LINT) }
-	value[if is_test then test.TEST else run.RUN] = expanded:get("actions", if is_test then test.TEST else run.RUN)
+	if is_test then value[test.TEST] = expanded:get("actions", test.TEST) else value[run.RUN] = run_for(spec) end
 	for _, hook in ipairs(hooks) do for name, field in pairs(hook(table.freeze({ sources = spec.sources, base = base, version = provider.version }), function() return metadata_for(spec) end)) do value[name] = field end end
 	return table.freeze(value)
 end

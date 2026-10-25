@@ -120,7 +120,9 @@ toolchain.register("pex", function()
 end)
 
 return {
-	PEX = KIND, pex_toolchain = pex_toolchain, graph_toolchain = graph_toolchain,
+	PEX = KIND,
+	--- @category configuration
+	pex_toolchain = pex_toolchain, graph_toolchain = graph_toolchain,
 	pex_bin = pex_bin, cache_env = cache_env, cache_key = cache_key,
 	artifact_name = artifact_name, download_url = download_url, supported_platforms = supported_platforms,
 	default_version = KIND.default_version, resolve_version = KIND.resolve_version,

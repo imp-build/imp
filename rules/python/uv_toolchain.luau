@@ -125,7 +125,9 @@ toolchain.register("uv", function()
 end)
 
 return {
-	cache_tool = data_tool, UV = KIND, uv_toolchain = uv_toolchain, graph_toolchain = graph_toolchain,
+	cache_tool = data_tool, UV = KIND,
+	--- @category configuration
+	uv_toolchain = uv_toolchain, graph_toolchain = graph_toolchain,
 	uv_bin = uv_bin, cache_env = cache_env, cache_key = cache_key,
 	artifact_name = artifact_name, download_url = download_url, supported_platforms = supported_platforms,
 	default_version = KIND.default_version, resolve_version = KIND.resolve_version,

@@ -155,7 +155,3 @@ hand-written BUILD file.
 Generation is disabled by default. `rust.doctest` defaults to true and can
 disable doctests for the workspace. Import the generator to register these
 Rust settings even when generation stays disabled.
-
-Generated Luau API references are deferred to separate documentation work.
-This guide is the Luau API documentation for this port. The existing
-JavaScript reference continues to describe the compatibility modules.

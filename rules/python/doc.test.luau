@@ -2,7 +2,7 @@ local core = require("@imp/core")
 return {
 	core.test.case("Python Luau setup enables both Ruff products", function()
 		local guide = core.read_file("@imp/rules/python/DOC.md")
-		local setup = assert(string.match(guide, "## Set up a Luau workspace(.-)## Set up the workspace"))
+		local setup = assert(string.match(guide, "## Set up a Luau workspace(.-)## Run goals"))
 		local code = assert(string.match(setup, "```lua\n(.-)```"))
 		for module in string.gmatch(code, 'require%("([^"]+)"%)') do require(module) end
 		local python = require("@imp/rules/python")

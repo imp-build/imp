@@ -1,7 +1,7 @@
 # Imp documentation editorial standard
 
 This standard applies to maintained Markdown, rule `DOC.md` files, and source
-JSDoc that generates the Imp API references. It applies to human authors,
+Luau documentation that generates the Imp API references. It applies to human authors,
 reviewers, and AI agents. It does not apply to vendored files or generated
 reference output. Change the source input instead of generated output.
 
@@ -14,7 +14,7 @@ organizational boundaries. One person may have more than one role.
 - **Users** install, configure, run, observe, troubleshoot, and consume Imp.
   This includes build engineers and other people who operate Imp in local,
   CI, daemon, packaging, or deployment environments.
-- **Rule authors** write JavaScript rule modules and expose graph-native APIs.
+- **Rule authors** write Luau rule modules and expose graph-native APIs.
 - **Contributors** change the repository, rules, tests, documentation, and
   workflows.
 - **Maintainers** review changes, manage releases, own compatibility, and
@@ -71,7 +71,7 @@ Do not present implementation-only exports as user API examples.
 Use the current command form. For example:
 
 ```sh
-# From the workspace root, after you create imp.workspace.js:
+# From the workspace root, after you create imp.workspace.luau:
 imp build //:hello
 ```
 
@@ -137,7 +137,7 @@ status when known, and link to the migration guidance.
 - [ ] Capability markers and links remain in the format consumed by the docs
       build.
 
-### Source JSDoc
+### Source Luau documentation
 
 - [ ] Each public export has a concise summary that states its action or
       result.
@@ -149,5 +149,14 @@ status when known, and link to the migration guidance.
       the export belongs in the curated API reference.
 - [ ] Examples and terminology follow this standard and describe current
       behavior.
-- [ ] The wording remains clear in both the generated user API and JS code
+- [ ] The wording remains clear in both the generated user API and Luau code
       reference; do not rely on source-only context.
+
+## Luau reference comments
+
+Use contiguous `---` comments before a public declaration or exported field.
+Use `@param name description`, `@returns description`, and `@category target`,
+`configuration`, or `api`. Exported aliases retain the definition's comments.
+Field comments can add category tags. Document the Rust host surface in the
+documentation-only `docs/core_api.luau` file; host-export tests check its names.
+The Tree-sitter extractor rejects syntax errors and unresolved public exports.

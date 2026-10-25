@@ -582,8 +582,14 @@ end
 return {
 	DEFAULT_CPP_HDRS = DEFAULT_CPP_HDRS,
 	DEFAULT_CPP_SRCS = DEFAULT_CPP_SRCS,
+
+	--- @category target
 	cc_binary = cc_binary,
+
+	--- @category target
 	cc_library = cc_library,
+
+	--- @category target
 	cc_test = cc_test,
 	cc_workload_specs = cc_workload_specs,
 }

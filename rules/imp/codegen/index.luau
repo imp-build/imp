@@ -193,9 +193,13 @@ local function stamp_file(options)
 end
 
 return {
+
+	--- @category target
 	codegen = codegen,
 	normalize_generated_srcs = normalize_generated_srcs,
 	dedupe_generated_srcs = dedupe_generated_srcs,
 	assert_generated_src_path = assert_generated_src_path,
+
+	--- @category target
 	stamp_file = stamp_file,
 }

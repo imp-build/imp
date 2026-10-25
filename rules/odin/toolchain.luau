@@ -85,7 +85,9 @@ toolchain.register("odin", function()
 	return core.task({ inputs = { tool = graph_toolchain().tool }, outputs = { value = core.output.value() },
 		run = function(exec, input) return { value = bin(exec, input.tool) } end }).outputs.value
 end)
-return { odin_toolchain = declare, odin_gen_lockfiles = gen_lockfiles, graph_toolchain = graph_toolchain,
+return {
+	--- @category configuration
+	odin_toolchain = declare, odin_gen_lockfiles = gen_lockfiles, graph_toolchain = graph_toolchain,
 	default_version = function() return resolve_version() end, resolve_version = resolve_version,
 	bin = bin, artifact_name = artifact_name, download_url = download_url, cache_key = cache_key,
 	supported_platforms = supported_platforms, command_name = command_name,

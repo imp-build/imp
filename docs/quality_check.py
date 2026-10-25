@@ -13,7 +13,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)|href=[\"']([^\"']+)")
 FENCE_RE = re.compile(r"^\s*```")
 STATUS_RE = re.compile(r"^\s*\*\*(Runnable|Illustrative) example\*\*\s*$")
@@ -42,7 +41,9 @@ def _route_for_html(path: Path) -> str:
 
 
 def _html_routes(site: Path) -> dict[str, Path]:
-    return {_route_for_html(path.relative_to(site)): path for path in site.rglob("*.html")}
+    return {
+        _route_for_html(path.relative_to(site)): path for path in site.rglob("*.html")
+    }
 
 
 class PageParser(HTMLParser):
@@ -60,7 +61,9 @@ class PageParser(HTMLParser):
         if values.get("id"):
             self.ids.add(values["id"] or "")
         if tag == "a" and values.get("href"):
-            self.links.append((html.unescape(values["href"] or ""), self._sidebar_depth > 0))
+            self.links.append(
+                (html.unescape(values["href"] or ""), self._sidebar_depth > 0)
+            )
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "nav" and self._sidebar_depth:
@@ -105,7 +108,6 @@ def check_rendered_links(site: Path) -> list[str]:
     for path, parser in pages.items():
         base = _route_for_html(path.relative_to(site))
         for href, _ in parser.links:
-            parsed = urlsplit(href)
             if _is_external(href):
                 continue
             route, fragment = _resolve_route(base, href)
@@ -113,7 +115,9 @@ def check_rendered_links(site: Path) -> list[str]:
             if target is None:
                 target = site / route.lstrip("/")
                 if not target.is_file():
-                    errors.append(f"{path.relative_to(site)}: missing link target {href}")
+                    errors.append(
+                        f"{path.relative_to(site)}: missing link target {href}"
+                    )
                     continue
             if fragment:
                 target_parser = pages.get(target)
@@ -127,7 +131,9 @@ def check_rendered_links(site: Path) -> list[str]:
 def check_navigation(site: Path) -> list[str]:
     routes = _html_routes(site)
     pages = _load_pages(site)
-    guide_routes = {route for route in routes if route.startswith("/guide/") and route != "/guide/"}
+    guide_routes = {
+        route for route in routes if route.startswith("/guide/") and route != "/guide/"
+    }
     sidebar_routes: set[str] = set()
     for path, parser in pages.items():
         if not _route_for_html(path.relative_to(site)).startswith("/guide/"):
@@ -135,7 +141,6 @@ def check_navigation(site: Path) -> list[str]:
         for href, in_sidebar in parser.links:
             if not in_sidebar:
                 continue
-            parsed = urlsplit(href)
             if _is_external(href):
                 continue
             route, _ = _resolve_route(_route_for_html(path.relative_to(site)), href)
@@ -152,8 +157,7 @@ def _source_route(path: Path) -> str | None:
         return "/"
     if value.startswith("docs/content/") and value.endswith(".md"):
         value = value[len("docs/content/") : -len(".md")]
-        if value.endswith("/_index"):
-            value = value[: -len("/_index")]
+        value = value.removesuffix("/_index")
         return "/" + value.strip("/") + "/"
     return None
 
@@ -162,7 +166,9 @@ def check_source_links(root: Path, files: list[Path]) -> list[str]:
     errors: list[str] = []
     for path in files:
         route = _source_route(path.relative_to(root))
-        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
             for match in LINK_RE.finditer(line):
                 href = match.group(1) or match.group(2) or ""
                 parsed = urlsplit(href)
@@ -176,7 +182,9 @@ def check_source_links(root: Path, files: list[Path]) -> list[str]:
                 if route is None:
                     target = (path.parent / parsed.path).resolve()
                     if not target.is_file() and not target.is_dir():
-                        errors.append(f"{path}:{line_number}: missing source link target {href}")
+                        errors.append(
+                            f"{path}:{line_number}: missing source link target {href}"
+                        )
                     continue
                 target_route, _ = _resolve_route(route, href)
                 if target_route.startswith("/reference/"):
@@ -185,9 +193,13 @@ def check_source_links(root: Path, files: list[Path]) -> list[str]:
                 if target_route == "/":
                     target_path = root / "docs/content/_index.md"
                 elif not target_path.is_file():
-                    target_path = root / "docs/content" / target_route.strip("/") / "_index.md"
+                    target_path = (
+                        root / "docs/content" / target_route.strip("/") / "_index.md"
+                    )
                 if not target_path.is_file():
-                    errors.append(f"{path}:{line_number}: missing source link target {href}")
+                    errors.append(
+                        f"{path}:{line_number}: missing source link target {href}"
+                    )
     return errors
 
 
@@ -235,7 +247,10 @@ def check_api_reference(root: Path, api_reference: Path) -> list[str]:
     source_paths = sorted(manifest.get("sources", []))
     missing_sources = [path for path in source_paths if not (root / path).is_file()]
     if missing_sources:
-        errors.append("generated API manifest names missing sources: " + ", ".join(missing_sources))
+        errors.append(
+            "generated API manifest names missing sources: "
+            + ", ".join(missing_sources)
+        )
     actual_pages = sorted(
         path.relative_to(api_reference).as_posix()
         for path in api_reference.rglob("*.md")
@@ -246,9 +261,27 @@ def check_api_reference(root: Path, api_reference: Path) -> list[str]:
             "generated API page set differs from manifest: "
             f"expected {len(expected_pages)}, found {len(actual_pages)}"
         )
-    empty_pages = [path for path in actual_pages if not (api_reference / path).read_text(encoding="utf-8").strip()]
+    empty_pages = [
+        path
+        for path in actual_pages
+        if not (api_reference / path).read_text(encoding="utf-8").strip()
+    ]
     if empty_pages:
         errors.append("generated API pages are empty: " + ", ".join(empty_pages))
+    return errors
+
+
+def check_luau_authoring(files: list[Path]) -> list[str]:
+    """Reject obsolete authoring setup in maintained user documentation."""
+    obsolete = ("imp.workspace.js", "BUILD.js", "imp:core", "/reference/js-api/")
+    errors = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for token in obsolete:
+            if token in text:
+                errors.append(
+                    f"{path}: obsolete JavaScript authoring instruction: {token}"
+                )
     return errors
 
 
@@ -264,6 +297,7 @@ def validate(root: Path, site: Path, api_reference: Path) -> list[str]:
     errors.extend(check_rule_namespace_guides(root))
     errors.extend(check_source_links(root, source_files))
     errors.extend(check_examples(source_files))
+    errors.extend(check_luau_authoring(source_files))
     errors.extend(check_api_reference(root, api_reference))
     errors.extend(check_rendered_links(site))
     errors.extend(check_navigation(site))
@@ -281,7 +315,9 @@ def main(argv: list[str]) -> int:
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-    print("documentation quality: links, navigation, examples, and generated references are clean")
+    print(
+        "documentation quality: links, navigation, examples, and generated references are clean"
+    )
     return 0
 
 

@@ -30,6 +30,12 @@ core.register_build_rule({ rule = "js_sources", module = "@imp/rules/js" })
 core.register_build_rule({ rule = "js_app", module = "@imp/rules/js" })
 core.register_build_rule({ rule = "ts_app", module = "@imp/rules/js" })
 return {
-	js_sources = js_sources, js_app = graph.js_app, ts_app = graph.ts_app,
+
+	--- @category target
+	js_sources = js_sources,
+	--- @category target
+	js_app = graph.js_app,
+	--- @category target
+	ts_app = graph.ts_app,
 	register_js_sources_hook = register_js_sources_hook, register_js_app_hook = graph.register_js_app_hook,
 }

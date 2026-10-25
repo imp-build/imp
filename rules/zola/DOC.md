@@ -71,34 +71,3 @@ applicable hash and extraction tools.
 
 Luau uses graph-tool inputs. It does not provide local cache installation,
 legacy tool descriptors, or `imp @tool` dispatch.
-
-## JavaScript compatibility
-
-The existing JavaScript documentation build remains available during the
-migration. It uses this declaration:
-
-```js
-import { zolaToolchain } from "//rules/zola";
-
-export const zola = zolaToolchain("0.22.1", { default: true });
-```
-
-JavaScript rules use `zolaGraphTool()` for a graph input. The generated API
-references still describe JavaScript. Luau reference extraction belongs to
-`2026-09-30-integrate-luau-workspace-tests-and-docs`.
-
-## Validate the package
-
-From the Imp source checkout, build the current binary and run:
-
-```sh
-cargo build -p imp
-IMP_RUNTIME=luau IMP_RULES_DIR="$PWD/rules" target/debug/imp test //rules/zola:rules_test
-python3 rules/zola/testdata/consumer_check.py --imp target/debug/imp
-```
-
-The focused tests check platform mappings and acquisition with fake actions.
-The consumer check acquires the real default release, builds and packages a
-minimal site, checks source edits, and checks failure propagation. It needs
-network access on a cache miss. Native execution on other platforms requires
-separate validation.

@@ -10,17 +10,16 @@ workspace setup is enough for a first build.
 
 ## Use managed toolchains
 
-Import a language rule in `imp.workspace.js` to enable its default toolchain.
+Import a language rule in `imp.workspace.luau` to enable its default toolchain.
 The rule provides a pinned version and downloads it as a graph artifact on
 first use. To select a different version known by the shipped lockfile, make
 that version the workspace default:
 
 **Illustrative example**
 
-```js
-import { rustToolchain } from "//rules/rust/toolchain";
-
-export const rust = rustToolchain("1.93.0", { default: true });
+```luau
+require("@imp/rules/rust/toolchain").rust_toolchain("1.93.0", { default = true })
+return {}
 ```
 
 The same pattern applies to the language-specific toolchain factories. Use the
@@ -35,13 +34,12 @@ generate the lockfile:
 
 **Illustrative example**
 
-```js
-import { rustToolchain } from "//rules/rust/toolchain";
-
-export const rust = rustToolchain("1.91.0", {
-    default: true,
-    lockfile: "//toolchains/rust.lock",
-});
+```luau
+local rust = require("@imp/rules/rust/toolchain")
+return { rust = rust.rust_toolchain("1.91.0", {
+    default = true,
+    lockfile = "@workspace/toolchains/rust.lock",
+}) }
 ```
 
 ```sh
@@ -52,30 +50,13 @@ The generated lockfile records the download URL, artifact name, size, and
 SHA-256 for the selected platform. A missing entry is a toolchain configuration
 failure, not permission to use an unverified download.
 
-## Use an existing toolchain path
+## Use an existing toolchain artifact
 
-For a toolchain already installed outside Imp, seed the matching named cache
-with its absolute path, then declare the same version. The source path must be
-the toolchain root expected by the rule. This is useful for an air-gapped build
-or a locally provisioned toolchain; the path is not copied into the workspace.
-
-**Illustrative example**
-
-```js
-import { gccToolchain, installGccToolchain } from "//rules/c/gcc";
-
-installGccToolchain("local-2026.08-1", "/opt/toolchains/gcc-local-2026.08-1");
-export const gcc = gccToolchain("local-2026.08-1", {
-    default: true,
-    unverified: true,
-});
-```
-
-Use the rule-specific installation helper for the selected toolchain. Do not
-use a path from one platform as if it were a portable toolchain; toolchain
-layouts and executable names are platform-specific. The custom version is a
-user-owned cache key, so keep it the same in both calls and use `unverified:
-true` when no lockfile entry exists for it.
+Use a rule-specific Luau installer when the rule exposes one. For example,
+Ruff and Biome accept captured executable or directory artifacts. Declare
+those handles as graph dependencies. Do not pass a raw host path as if it
+were a portable toolchain. See the corresponding user API page for the
+installer's accepted shape and cache identity.
 
 ## Inspect the local cache
 

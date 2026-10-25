@@ -14,12 +14,12 @@ Start in these directories:
 
 - `crates/` — Rust implementation, including the CLI, graph engine, executor,
   and content-addressed store.
-- `rules/` — JavaScript rule packages and their `DOC.md` guides.
+- `rules/` — Luau rule packages and their `DOC.md` guides.
 - `docs/` — the documentation site and its build definition.
 - `ci/` — workflow generators and repository checks.
 - `examples/`, `probes/`, and `testdata/` — fixtures and focused experiments.
 
-Rule packages expose their public API from a directory's `index.js`. Keep
+Rule packages expose their public API from a directory's `index.luau`. Keep
 private helpers below that entrypoint. If a behavior belongs to a rule, fix the
 rule; if it belongs to graph evaluation or execution, fix the corresponding
 crate.
@@ -32,7 +32,8 @@ in the cache. Keep those boundaries intact when changing code.
 
 ## Develop and test
 
-Run commands from the repository root. The executable must be able to find the
+Run commands from the repository root. Select Luau during the transition with
+`export IMP_RUNTIME=luau`. The executable must be able to find the
 built-in `rules/` tree. For checkout development, install the local shim with
 `./install.sh --local`; it rebuilds Imp and sets `IMP_RULES_DIR` to this
 checkout's `rules/` directory. A copied or released `imp` binary does not
@@ -43,7 +44,7 @@ A Cargo build in this checkout (`target/debug/imp` or `target/release/imp`)
 finds the checkout's `rules/` from its own path. Set
 `IMP_RULES_DIR="$PWD/rules"` only when you build with a different
 `CARGO_TARGET_DIR`. Without a rules path, a command can stop while it loads a
-rule that calls `builtinFiles()`, before it runs the selected graph actions.
+rule that calls `builtin_files()`, before it runs the selected graph actions.
 Treat `no built-in rules directory available` as a rules-path setup failure,
 not as a lint or test result.
 
@@ -82,7 +83,7 @@ arbitrary documentation commands.
 
 Edit the source, then regenerate the output:
 
-- Generated API pages come from JavaScript, schemas, capabilities, and rule
+- Generated API pages come from Luau source comments, schemas, and rule
   guides. Edit those inputs, not `docs/content/reference/`.
 - `.github/workflows/docs.yml` and `.github/workflows/release.yml` come from
   `ci/gen_workflow.py`. Run `imp generate //ci:docs_workflow` after changing
@@ -92,4 +93,4 @@ Edit the source, then regenerate the output:
 Keep the diff focused. In the review, say what changed, which checks you ran,
 and whether a platform or environment limited the result. Follow
 [`docs/EDITORIAL.md`](../../EDITORIAL.md) for documentation, rule guides, and
-source JSDoc.
+source Luau documentation.

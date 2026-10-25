@@ -83,6 +83,10 @@ local function make_graph(version)
 		version = version, toolchain_id = id,
 	})
 end
+--- Declare a Rust version and optional linker, cache, and lockfile settings.
+--- @param version A version present in the selected lockfile.
+--- @param options Optional default, lockfile, link_driver, linker, and kache settings.
+--- @returns The declaration with a GEN_LOCKFILES root.
 local function rust_toolchain(version, options)
 	pinned(version)
 	options = options or {}
@@ -127,7 +131,9 @@ toolchain.register("rust", function()
 end)
 
 return {
-	RUST = RUST, rust_toolchain = rust_toolchain, graph_toolchain = graph_toolchain,
+	RUST = RUST,
+	--- @category configuration
+	rust_toolchain = rust_toolchain, graph_toolchain = graph_toolchain,
 	graph_tool_env = graph_tool_env, artifact_name = artifact_name, download_url = download_url,
 	cache_key = cache_key, toolchain_id = toolchain_id, supported_platforms = supported_platforms,
 	resolve_version = RUST.resolve_version, default_version = RUST.default_version,

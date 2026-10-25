@@ -2,6 +2,8 @@
 # Regenerate with: imp generate //ci:docs_workflow
 
 name: Build release artifacts
+env:
+  IMP_RUNTIME: luau
 
 on:
   push:
@@ -82,7 +84,8 @@ jobs:
       - name: Smoke test packaged tree
         run: |
           if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/rust/rust.lock")) { throw "missing rules/rust/rust.lock" }
-          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/imp/codegen/index.js")) { throw "missing rules/imp/codegen/index.js" }
+          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/imp/codegen/index.luau")) { throw "missing rules/imp/codegen/index.luau" }
+          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/treesitter/grammars/luau/parser.c")) { throw "missing rules/treesitter/grammars/luau/parser.c" }
           ./imp-x86_64-pc-windows-msvc/bin/imp.exe --help
 
       - name: Package

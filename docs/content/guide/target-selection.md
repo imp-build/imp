@@ -79,9 +79,9 @@ imp lint --changed-since HEAD~1
 ```
 
 Imp requires a Git checkout for this option. A changed source file selects
-every target whose source globs own it. Changing a `BUILD.js` file selects its
-whole package; changing `imp.workspace.js` selects the whole workspace.
-Changing an imported JavaScript rule module selects packages that transitively
+every target whose source globs own it. Changing a `BUILD.luau` file selects its
+whole package; changing `imp.workspace.luau` selects the whole workspace.
+Changing an imported Luau rule module selects packages that transitively
 import it. Files with no owner produce a warning but do not fail the command.
 
 Use `--changed-dependents direct` to include targets that directly depend on

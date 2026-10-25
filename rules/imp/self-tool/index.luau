@@ -4,5 +4,6 @@ local core = require("@imp/core")
 
 return {
 	--- Graph tool handle for the running Imp executable. Actions run it as `imp`.
+	--- @category target
 	imp_tool = core.self_tool(),
 }

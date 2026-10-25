@@ -1,29 +1,22 @@
 # Asset rules
 
-The asset rules declare workspace files that another graph target consumes.
-They keep source ownership in the graph and expose the same files to legacy
-Odin and Rust rules during the migration.
+Declare workspace source files as graph handles. The asset build captures
+files without writing build products into the workspace.
 
 ## Public API
 
-Use `asset()` for a graph-native source collection. Use `resourcePackage()` when
-a legacy-compatible resource target is required. Both APIs accept workspace-
-relative glob patterns and reject paths that leave the workspace.
+`asset({ srcs, base?, path?, exclude? })` returns `sources` and a BUILD root.
+`resource_package(options)` also exposes the source handle as `files` for
+resource dependencies. Paths must stay within the workspace.
 
 **Illustrative example**
 
-```js
-import { asset } from "//rules/asset";
-
-export const webAssets = asset({
-    srcs: ["**/*.css", "**/*.js"],
-    base: "web",
-});
+```luau
+local asset = require("@imp/rules/asset")
+return {
+    web_assets = asset.asset({ base = "web", srcs = { "**/*.css", "**/*.js" } }),
+}
 ```
 
-The returned `.sources` or `.files` handle stays in the graph. The asset build
-does not write files into the workspace.
-
-`ResourcePackage` and `resources` are compatibility implementation details.
-Use the `resourcePackage()` function instead of constructing the class or
-calling the memoized adapter directly.
+Use the returned handles in task inputs. Declare tools separately. Asset
+ownership follows the selected source globs and the workspace ignore rules.

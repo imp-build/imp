@@ -494,6 +494,8 @@ return {
 	nasm_download_url = nasm_download_url,
 	nasm_graph_tool = nasm_graph_tool,
 	nasm_supported_platforms = nasm_supported_platforms,
+
+	--- @category configuration
 	nasm_toolchain = nasm_toolchain,
 	parse_msvc_host = parse_msvc_host,
 	reset_for_test = reset_for_test,

@@ -13,6 +13,8 @@
 #   <staging-dir>/share/imp/rules/...
 
 set -eu
+# Select each runtime explicitly, independent of the caller.
+export IMP_RUNTIME=js
 
 stage="${1:?usage: ci/smoke_package.sh <staging-dir>}"
 case "$stage" in
@@ -107,12 +109,15 @@ grep -q 'test: 1/1 unit(s) passed' "$work/test-out" || {
   exit 1
 }
 
-# Exercise the installed Luau loader and asset rule from a separate workspace.
+# Exercise the installed Luau catalog from a separate workspace.
+export IMP_RUNTIME=luau
 # This also proves that the Luau rule files ship in the release tree.
 [ -f "$rules/asset/index.luau" ] || fail "missing $rules/asset/index.luau"
 mkdir -p "$work/luau"
 cat >"$work/luau/imp.workspace.luau" <<'EOF'
 local core = require("@imp/core")
+local modules = { "asset", "c", "c/cmake", "c/generate_build", "imp/codegen", "imp/generate", "imp/lockfile", "js", "js/biome", "js/node", "js/pnpm", "oci", "odin", "odin/odinfmt", "odin/vscode", "python", "python/ruff/fmt", "python/ruff/lint", "rust", "rust/generate_build", "rust/kache", "treesitter", "workflows/builtin_lockfiles", "workflows/generate_build", "workflows/test", "workflows/vs", "zola" }
+for _, name in ipairs(modules) do require("@imp/rules/" .. name) end
 
 core.define_config_schema("smoke", {
     build_generate = core.field.bool({ default = false }),
@@ -140,10 +145,21 @@ return { smoke = { build_generate = true } }
 EOF
 cat >"$work/luau/BUILD.luau" <<'EOF'
 local asset = require("@imp/rules/asset")
+local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
 
 return {
+    rules_test = { [test.TEST] = core.test_root() },
     assets = asset.asset({ srcs = { "*.txt" } }),
 }
+EOF
+cat >"$work/luau/packaged.test.luau" <<'EOF'
+local core = require("@imp/core")
+return { core.test.case("installed Luau catalog resolves", function()
+    assert(type(require("@imp/rules/python").python_app) == "function")
+    assert(type(require("@imp/rules/rust").cargo_package) == "function")
+    assert(core.configuration_schemas().rust ~= nil)
+end) }
 EOF
 mkdir -p "$work/luau/pkg"
 cat >"$work/luau/pkg/shared.luau" <<'EOF'
@@ -213,5 +229,11 @@ XDG_CACHE_HOME="$work/cache" "$bin" build //generated:generated_assets >"$work/l
     cat "$work/luau-generated-build-err" >&2
     exit 1
 }
+
+XDG_CACHE_HOME="$work/cache" "$bin" test //:rules_test >"$work/luau-test-out" 2>"$work/luau-test-err" || {
+    cat "$work/luau-test-out" "$work/luau-test-err" >&2
+    fail "installed Luau tests failed"
+}
+grep -q 'test: 1/1 unit(s) passed' "$work/luau-test-out" || fail "installed Luau test did not run"
 
 echo "smoke: ok — $bin resolved packaged JS and Luau rules from $rules"

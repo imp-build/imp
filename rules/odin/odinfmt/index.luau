@@ -25,5 +25,7 @@ local function odin_fmt_root(source)
 	}).outputs.result
 end
 odin.register_odin_package_hook(function(source) return { [fmt.FMT] = odin_fmt_root(source) } end)
-return { odinfmt_toolchain = toolchain.odinfmt_toolchain, odinfmt_gen_lockfiles = toolchain.odinfmt_gen_lockfiles,
+return {
+	--- @category configuration
+	odinfmt_toolchain = toolchain.odinfmt_toolchain, odinfmt_gen_lockfiles = toolchain.odinfmt_gen_lockfiles,
 	odin_fmt_root = odin_fmt_root, default_odinfmt_toolchain_version = toolchain.default_version }

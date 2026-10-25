@@ -222,6 +222,8 @@ return {
 	download_url = download_url,
 	graph_tool = graph_tool,
 	graph_toolchain = graph_toolchain,
+
+	--- @category configuration
 	mold_toolchain = mold_toolchain,
 	odin_linker_env = odin_linker_env,
 	reset_for_test = reset_for_test,

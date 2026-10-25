@@ -199,4 +199,6 @@ local function cargo_package(options)
 	return table.freeze(value)
 end
 
-return { cargo_package = cargo_package, cargo_package_specs = package_specs }
+return {
+	--- @category target
+	cargo_package = cargo_package, cargo_package_specs = package_specs }

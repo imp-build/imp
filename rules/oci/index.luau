@@ -318,6 +318,16 @@ local function oci_mirror(options)
 end
 
 return {
-	oci_pull = oci_pull, oci_build = oci_build, oci_push = oci_push, oci_mirror = oci_mirror,
+
+	--- @category target
+	oci_pull = oci_pull,
+	--- @category target
+	oci_build = oci_build,
+	--- @category target
+	oci_push = oci_push,
+	--- @category target
+	oci_mirror = oci_mirror,
+
+	--- @category configuration
 	crane_toolchain = crane.crane_toolchain, default_version = crane.default_version, resolve_version = crane.resolve_version,
 }

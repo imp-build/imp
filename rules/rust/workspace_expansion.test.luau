@@ -18,6 +18,8 @@ local function count(host, display)
 	return n
 end
 local function with_workspace(fn, flags)
+	-- These cases test doctest aggregation, independent of repository settings.
+	core.configure("rust", { doctest = true })
 	core.test.with_fake_goal_flags(flags or {}, function()
 		core.test.with_fake_toolchain_host(function(host)
 			host.set_run_stdout("cargo metadata .", METADATA)

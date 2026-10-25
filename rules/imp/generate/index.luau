@@ -232,6 +232,8 @@ end
 return {
 	plan_generated_outputs = plan_generated_outputs,
 	generator_task = generator_task,
+
+	--- @category target
 	generated_files = generated_files,
 	generated_root_files = generated_root_files,
 	generated_file_is_stale = generated_file_is_stale,

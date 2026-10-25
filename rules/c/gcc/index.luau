@@ -629,6 +629,8 @@ return {
 	default_graph_toolchain = default_graph_toolchain,
 	default_version = GCC.default_version,
 	download_url = download_url,
+
+	--- @category configuration
 	gcc_toolchain = gcc_toolchain,
 	graph_tool = graph_tool,
 	graph_toolchain = graph_toolchain,

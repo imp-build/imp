@@ -4,231 +4,80 @@ weight = 3
 template = "page.html"
 +++
 
-This page is for users who need to select rules, workflows, toolchains, or
-execution limits. It explains the workspace file that controls those choices.
+This page is for users who configure rules, toolchains, execution limits, and
+BUILD generation. Create `imp.workspace.luau` at the workspace root. Imp loads
+it before the workspace's `BUILD.luau` modules.
 
-`imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file.
+## Enable workflows and rules
 
-Imports here are what enable things. Importing a workflow module enables its
-goal; importing a rule module registers that rule's configuration schema and
-supplies its pinned default toolchain, so `BUILD.js` files can use it.
+Require each workflow and rule that your BUILD modules use. Rule imports can
+register schemas, toolchain defaults, and extensions.
 
 **Illustrative example**
 
-```js
-import "//rules/workflows/build";
-import "//rules/workflows/fmt";
-import "//rules/workflows/lint";
-import "//rules/workflows/test";
-
-import "//rules/c/cmake";
-import { odinToolchain } from "//rules/odin";
-import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt";
-
-export const odin = odinToolchain("dev-2026-05", { default: true });
-export const odinfmt = defaultOdinfmtToolchain();
-```
-
-A bare `import` is enough when the rule's pinned default is what you want. Use
-a named import when the workspace exports a toolchain of its own, as below.
-
-Static, known-shape configuration uses an export named after its schema
-namespace. For example, an Odin collections configuration is declared as:
-
-```js
-export const odin = {
-    collections: { lib: "library" },
-};
-```
-
-When the namespace is also used by another workspace export, use the
-`<namespace>Config` form instead:
-
-```js
-export const odinConfig = {
-    collections: { lib: "library" },
-};
-```
-
-The built-in `imp` configuration also accepts `jobs`, `jsWorkers`, and
-`fsJobs`. `fsJobs` sets the number of filesystem workers that materialize
-sandbox files. It can be overridden for one goal with `--fs-jobs`, just as
-`--jobs` overrides `jobs`.
-
-`passthroughEnv` adds explicit environment entries to every sandboxed action in
-the workspace. A bare name forwards the current host value when it is set. A
-`NAME=value` entry supplies a fixed value. The normal built-in baseline remains
-in place; an empty list adds no configurable host variables.
-
-```js
-export const impConfig = {
-    passthroughEnv: ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"],
-};
-```
-
-Use label data when one selectable target needs additional entries. Those
-entries are added to the workspace list for actions run by that label:
-
-```js
-import { label } from "imp:core";
-
-export const guiCheck = label({
-    data: { passthroughEnv: ["GPU_DEVICE", "CHECK_MODE=gui"] },
-});
-```
-
-Imp includes the resolved environment in the action identity, so a changed
-passthrough value does not reuse an incompatible cached result. Environment
-values do not appear in ordinary action diagnostics.
-
-## Luau workspace configuration
-
-For a Luau workspace, create `imp.workspace.luau` and return a table keyed by
-configuration namespace. Luau field names use `snake_case`; the JavaScript
-workspace file keeps its existing field names.
-
-```lua
-return {
-    imp = {
-        jobs = 8,
-        js_workers = 2,
-        fs_jobs = 4,
-        passthrough_env = { "DISPLAY", "WAYLAND_DISPLAY" },
-        log_level = "info",
-    },
-    cache = {
-        gc_max_age_days = 30,
-    },
-}
-```
-
-The `imp` namespace matches the JavaScript settings `jsWorkers`, `jobs`,
-`fsJobs`, `passthroughEnv`, and `logLevel`. The `cache` namespace maps
-`gc_max_age_days` to `gcMaxAgeDays`. Luau rule modules register other
-namespaces with `define_config_schema` from `@imp/core`. The loader validates
-declared fields and applies defaults. On GitHub Actions, values from
-`imp.workspace.ci.luau` deep-merge over the base table.
-
-Use `imp config schema` to inspect registered schemas. Add `--effective` to
-include the resolved configuration. CLI overrides keep their existing flag
-names: `--jobs`, `--fs-jobs`, and `--js-workers`; `--level` sets log verbosity.
-Use `imp cache gc --max-age` to override `gc_max_age_days`.
-
-## Luau BUILD modules
-
-In a Luau workspace, Imp discovers each `BUILD.luau` file and gives its
-returned task handles canonical target addresses. The root file is
-`@workspace/BUILD`; a nested file at `pkg/BUILD.luau` is
-`@workspace/pkg/BUILD`. Exported task names become target addresses such as
-`//:app` and `//pkg:library`.
-
-Use `require()` to import a workspace helper or an installed rule:
-
 ```luau
-local asset = require("@imp/rules/asset")
-
+require("@imp/rules/c")
+require("@imp/rules/workflows/test")
+require("@imp/rules/odin/odinfmt")
+require("@imp/rules/odin").odin_toolchain("dev-2026-03", { default = true })
 return {
-    assets = asset.asset({ srcs = { "*.txt" } }),
+    imp = { jobs = 8, fs_jobs = 4, js_workers = 1, log_level = "info" },
+    cache = { gc_max_age_days = 7 },
+    odin = { collections = { lib = "library" } },
 }
 ```
 
-`@workspace/...` modules belong to the current workspace. `@imp/rules/...`
-modules belong to the installed Imp rules tree. The Luau loader does not use a
-workspace file as a fallback for an installed rule. The Luau authoring
-contract in `docs/design/luau-authoring-contract.md` defines address, cache,
-package ownership, and BUILD generator behavior.
+Configuration fields use `snake_case`. Return a table keyed by configuration
+namespace. The loader validates fields and applies registered defaults. On
+GitHub Actions, `imp.workspace.ci.luau` deep-merges over the base configuration.
+The returned configuration does not declare selectable targets; put those in
+BUILD modules.
 
-Luau rule modules can register generators that return targets for one or more
-workspace `BUILD.luau` files. Imp combines the targets and uses registered
-rule exports to render each file. Set the generator's `build_generate`
-configuration field to `true` to enable it.
+`jobs` is a core budget. Actions declare their cost through `exec.action({ cores = n })`.
+`fs_jobs` controls filesystem workers. CLI `--jobs`, `--fs-jobs`, `--js-workers`,
+and `--level` override their corresponding settings.
 
-Run this check from the workspace root to find generated files that need an
-update:
+`imp.passthrough_env` accepts bare environment names and fixed `NAME=value`
+entries. The resolved environment contributes to action identity. Declare
+only variables that the workspace needs.
+
+**Runnable example**
+
+```sh
+# From a configured workspace root:
+imp config schema --effective
+```
+
+## Import graph declarations
+
+Use `@workspace/pkg/BUILD` to require a nested BUILD module. Use
+`@workspace/helpers` for workspace helpers and `@imp/rules/...` for installed
+rules. A workspace cannot replace installed rule modules. Each resolved source
+has one cached module value.
+
+## Generate BUILD declarations
+
+Require the generator and enable its namespace's `build_generate` field.
+For example, require `@imp/rules/rust/generate_build` and return
+`rust = { build_generate = true }` in the workspace configuration.
+
+**Runnable example**
 
 ```sh
 imp goal generate-build --check
 ```
 
-**Warning:** `imp goal generate-build` writes generated `BUILD.luau` files
-into the workspace. Imp refuses to replace a hand-written BUILD file.
+**Warning:** `imp goal generate-build` writes generated `BUILD.luau` files.
+Imp refuses to replace a hand-written BUILD file. Already declared source
+owners are excluded from generator discovery.
 
-`jobs` is a budget of cores, not a count of actions: an action declares what it
-costs with `exec.action({ cores })` (default 1), so one wide action can hold
-several of the lanes `jobs` allows.
+## Run a managed tool directly
 
-```js
-export const impConfig = {
-    fsJobs: 8,
-};
-```
+`imp @odin ...`, `imp @ruff ...`, and other registered tools resolve the final
+workspace default through the Luau toolchain registry. Import the toolchain
+module and declare a default version before using the command. No fixed CLI
+list of rule-owned tool names is required. See [Toolchains and caches](../toolchains-and-caches/).
 
-## Exported declarations are workspace targets
-
-An `export const name = ...` at the top level of `imp.workspace.js` gets a stable address, `//:name`, exactly like an export from a root `BUILD.js` file. `workspaceTargets()` and the target graph see it; nothing about it is workspace-file-specific beyond where it's declared.
-
-Rule-owned default toolchains have no workspace address until you export their
-getter result. This is optional for normal targets, which use the default
-automatically:
-
-```js
-import { defaultOdinToolchain } from "//rules/odin";
-
-export const odin = defaultOdinToolchain();
-```
-
-Use an explicit `{ default: true }` declaration only when a workspace needs a
-different version or toolchain options:
-
-```js
-import { odinToolchain } from "//rules/odin";
-
-export const odin = odinToolchain("dev-2026-04", { default: true });
-```
-
-## `imp @TOOL` resolves declared toolchains automatically
-
-This section describes how imp runs a toolchain binary *for you*, from the
-command line. It is a separate mechanism from how a rule package gets a
-compiler for its own tasks — a rule consumes a toolchain as a graph handle,
-described in [Extending Imp](../extending-imp/).
-
-`imp @odin build foo.odin -out:foo` and `imp @odinfmt` run a managed toolchain binary directly, bypassing imp's own CLI parsing so the tool's flags never need a `--` separator. `TOOL` is resolved purely from the workspace, in two steps: imp first looks up the export named `TOOL` at `//:TOOL`, and if its target kind has a `"toolchain"` product registered, calls that product to get an absolute binary path and runs it. If nothing is exported at `//:TOOL`, imp falls back to asking every declared `Toolchain` subclass whether its own `static tool` name matches `TOOL`, and if one does, resolves *that* class's default instance instead. The fallback exists because some toolchain modules declare their default as a graph-native handle (used directly as a task input, not addressed by name) rather than as an exported target — `imp @biome`/`@ruff`/`@odinfmt` all resolve this way.
-
-This means adding a new `@tool` needs no changes to imp itself — just a declared toolchain whose kind resolves to a binary, either exported at `//:TOOL` or declared as some class's default. A toolchain rule module opts in by subclassing `Toolchain`, which registers the `"toolchain"` product automatically from the subclass's `bin()`:
-
-```js
-import { Toolchain, toolName } from "imp:core";
-
-export class MyToolchain extends Toolchain {
-    static kind = "my-toolchain";
-    static tool = toolName("mytool");
-    constructor({ version }, opts) {
-        super({ kind: MyToolchain.kind, attrs: { version } }, opts);
-    }
-
-    bin() {
-        return resolveMyToolBin(this.attrs.version);
-    }
-}
-
-export function myToolchain(version, opts = {}) {
-    return new MyToolchain({ version }, { default: opts.default });
-}
-```
-
-and the workspace file declares a default instance — either exported directly:
-
-```js
-export const mytool = myToolchain("1.2.3", { default: true });
-```
-
-or, for a toolchain module whose declaration API returns something other than the target handle (a graph-native tool, say), simply declared without being exported:
-
-```js
-import "//rules/mytool"; // calls myToolchain("1.2.3", { default: true }) itself
-```
-
-`imp @mytool ...` now works either way. If `TOOL` matches neither an export nor any declared toolchain's tool name, or a matching toolchain has no default instance declared, `imp @TOOL` fails with an error naming what's missing — there's no fixed list of "known tools" to update.
-
-The one exception is `kcov`, which isn't workspace-driven at all — it's resolved from a fixed host install path, since coverage instrumentation isn't itself a build toolchain declared per-workspace.
+During the runtime transition, this repository selects Luau with
+`IMP_RUNTIME=luau`. A workspace that has only the Luau workspace file selects
+Luau automatically.

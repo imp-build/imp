@@ -1,6 +1,6 @@
-{# Nav tree for the generated JS reference sections, mirroring source
+{# Nav tree for the generated Luau reference sections, mirroring source
    directory structure. `top_tree` renders the root: every top-level node is
-   always a section (see `forceTopLevelSections` in js_api_extract.js) tagged
+   always a section (see the Luau reference renderer) tagged
    with `extra.weight`/`extra.group` (Zola doesn't expose front matter
    `weight` on `Section` to templates, so it's nested under `extra` instead),
    so it's split into "Core"/"Languages" headings, sorted by weight
