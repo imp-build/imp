@@ -287,11 +287,17 @@ fn is_slot_key(key: &str) -> bool {
 }
 
 #[derive(Clone)]
-struct FileSetSpec {
+struct GlobFileSetSpec {
     source_root: Option<PathBuf>,
     root: String,
     include: Vec<String>,
     exclude: Vec<String>,
+}
+
+#[derive(Clone)]
+enum FileSetSpec {
+    Glob(GlobFileSetSpec),
+    Exact(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -664,7 +670,7 @@ impl LuauWorkspace {
             };
             let mut inputs = Vec::new();
             match node {
-                GraphNode::Files(spec) => {
+                GraphNode::Files(FileSetSpec::Glob(spec)) => {
                     let source_root = spec
                         .source_root
                         .as_deref()
@@ -678,6 +684,10 @@ impl LuauWorkspace {
                             serde_json::json!({ "root": root, "include": spec.include, "exclude": spec.exclude }),
                         );
                     }
+                }
+                GraphNode::Files(FileSetSpec::Exact(paths)) => {
+                    walk.kind = "files".to_owned();
+                    walk.data = Some(serde_json::json!({ "paths": paths }));
                 }
                 GraphNode::TestRoot { package } => {
                     walk.kind = "files".to_owned();
@@ -3804,14 +3814,14 @@ fn create_core(
     core.set(
         "files",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options, None)
+            create_files_handle(lua, &graph_host, options, None, true)
         })?,
     )?;
     let graph_host = Rc::clone(&host);
     core.set(
         "glob",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options, None)
+            create_files_handle(lua, &graph_host, options, None, false)
         })?,
     )?;
     let builtin_host = Rc::clone(&host);
@@ -3819,7 +3829,13 @@ fn create_core(
     core.set(
         "builtin_files",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &builtin_host, options, Some(builtin_root.clone()))
+            create_files_handle(
+                lua,
+                &builtin_host,
+                options,
+                Some(builtin_root.clone()),
+                false,
+            )
         })?,
     )?;
     let unowned_host = Rc::clone(&host);
@@ -5013,9 +5029,55 @@ fn create_files_handle(
     host: &Rc<RefCell<HostState>>,
     options: LuaTable,
     source_root: Option<PathBuf>,
+    allow_paths: bool,
 ) -> LuaResult<LuaAnyUserData> {
     require_graph_declaration(host)?;
-    let spec = FileSetSpec {
+    if options.contains_key("paths")? {
+        if !allow_paths {
+            return Err(LuaError::external(
+                "exact paths require core.files({ paths })",
+            ));
+        }
+        for pair in options.clone().pairs::<LuaValue, LuaValue>() {
+            let (key, _) = pair?;
+            if !matches!(key, LuaValue::String(ref name) if name.to_str()? == "paths") {
+                return Err(LuaError::external(
+                    "files({ paths }) does not accept other options",
+                ));
+            }
+        }
+        let list: LuaTable = options
+            .get("paths")
+            .map_err(|_| LuaError::external("files({ paths }) requires a list of strings"))?;
+        let mut paths = Vec::new();
+        let mut count = 0;
+        for pair in list.clone().pairs::<LuaValue, LuaValue>() {
+            count += 1;
+            let (key, value) = pair?;
+            if !matches!(key, LuaValue::Integer(index) if index > 0 && index as usize <= list.raw_len())
+                || !matches!(value, LuaValue::String(_))
+            {
+                return Err(LuaError::external(
+                    "files({ paths }) requires a dense list of strings",
+                ));
+            }
+        }
+        if count != list.raw_len() {
+            return Err(LuaError::external(
+                "files({ paths }) requires a dense list of strings",
+            ));
+        }
+        for value in list.sequence_values::<String>() {
+            let path = value?;
+            validate_exact_file_path(&path).map_err(LuaError::external)?;
+            paths.push(path);
+        }
+        paths.sort();
+        paths.dedup();
+        let fingerprint = format!("exact:{paths:?}");
+        return intern_files_handle(lua, host, fingerprint, FileSetSpec::Exact(paths));
+    }
+    let spec = GlobFileSetSpec {
         source_root,
         root: options
             .get::<Option<String>>("root")?
@@ -5037,6 +5099,20 @@ fn create_files_handle(
         spec.include.join("\n"),
         spec.exclude.join("\n")
     );
+    intern_files_handle(
+        lua,
+        host,
+        format!("glob:{fingerprint}"),
+        FileSetSpec::Glob(spec),
+    )
+}
+
+fn intern_files_handle(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    fingerprint: String,
+    spec: FileSetSpec,
+) -> LuaResult<LuaAnyUserData> {
     if let Some(id) = host.borrow().filesets.get(&fingerprint).copied() {
         return lua.create_userdata(GraphHandle {
             id,
@@ -5113,7 +5189,7 @@ fn collect_luau_owned_files(
             .with_context(|| format!("expand loaded Luau test package '{package}'"))?;
             owned.extend(files);
         }
-        Some(GraphNode::Files(spec)) => {
+        Some(GraphNode::Files(FileSetSpec::Glob(spec))) => {
             if spec.source_root.is_some() {
                 return Ok(());
             }
@@ -5125,6 +5201,9 @@ fn collect_luau_owned_files(
             )
             .with_context(|| format!("expand loaded Luau sources rooted at '{}'", spec.root))?;
             owned.extend(files);
+        }
+        Some(GraphNode::Files(FileSetSpec::Exact(paths))) => {
+            owned.extend(existing_exact_files(workspace_root, paths)?);
         }
         Some(GraphNode::Program(program)) => {
             collect_luau_owned_files_in_value(
@@ -5337,14 +5416,76 @@ fn captured_fileset(
     if let Some(captured) = captures.borrow().get(&id) {
         return Ok(Some(Rc::clone(captured)));
     }
-    let captured = Rc::new(crate::spike::workspace_glob_files_captured(
-        spec.source_root.as_deref().unwrap_or(&host.workspace_root),
-        &spec.root,
-        &spec.include,
-        &spec.exclude,
-    )?);
+    let captured = Rc::new(match spec {
+        FileSetSpec::Glob(spec) => crate::spike::workspace_glob_files_captured(
+            spec.source_root.as_deref().unwrap_or(&host.workspace_root),
+            &spec.root,
+            &spec.include,
+            &spec.exclude,
+        )?,
+        FileSetSpec::Exact(paths) => {
+            let files = existing_exact_files(&host.workspace_root, paths)?;
+            let digest = imp_store::digest::capture_paths(&host.workspace_root, &files)
+                .context("files({ paths }): capture exact files")?;
+            // Use the captured tree so missing files cannot appear only in the path list.
+            let mut files = imp_store::digest::list_files(digest.tree()?)?;
+            files.sort();
+            crate::spike::GlobResult { files, digest }
+        }
+    });
     captures.borrow_mut().insert(id, Rc::clone(&captured));
     Ok(Some(captured))
+}
+
+fn validate_exact_file_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.contains(['\\', ':', '\0'])
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        bail!(
+            "files({{ paths }}) requires non-empty workspace-relative file paths without traversal"
+        );
+    }
+    Ok(())
+}
+
+/// Select regular files without glob matching or ignore rules. Reject links in
+/// every component before capture, including links to workspace directories.
+fn existing_exact_files(workspace_root: &Path, paths: &[String]) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for path in paths {
+        let mut absolute = workspace_root.to_path_buf();
+        let mut present = true;
+        let parts: Vec<_> = path.split('/').collect();
+        for (index, part) in parts.iter().enumerate() {
+            absolute.push(part);
+            let metadata = match fs::symlink_metadata(&absolute) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    present = false;
+                    break;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("files({{ paths }}): stat '{path}'"))
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                bail!("files({{ paths }}) rejects symlink path '{path}'");
+            }
+            if index + 1 == parts.len() && !metadata.is_file() {
+                bail!("files({{ paths }}) requires regular files: '{path}'");
+            }
+            if index + 1 < parts.len() && !metadata.is_dir() {
+                bail!("files({{ paths }}) parent is not a directory: '{path}'");
+            }
+        }
+        if present {
+            files.push(path.clone());
+        }
+    }
+    Ok(files)
 }
 
 /// Fail unless the handle `id` is one of the task inputs.
@@ -6159,9 +6300,31 @@ async fn run_action(
         }
         _ => bail!("exec.action().cores must be an integer of 1 or more within the u32 range"),
     };
+    let fake_run = host.borrow().fakes.run.clone();
+    if let Some(inputs) = &action_inputs {
+        for value in inputs.sequence_values::<LuaValue>() {
+            if let LuaValue::UserData(value) =
+                value.map_err(|error| anyhow::anyhow!(error.to_string()))?
+            {
+                let id = value
+                    .borrow::<GraphHandle>()
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    .id;
+                if matches!(
+                    host.borrow().nodes.get(&id),
+                    Some(GraphNode::Files(FileSetSpec::Exact(_)))
+                ) {
+                    require_declared_input(&task_inputs, id, "exec.action")
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    if fake_run.is_some() {
+                        captured_fileset(&host.borrow(), &captures, id)?;
+                    }
+                }
+            }
+        }
+    }
     let mapped_inputs =
         mapped_action_inputs(&host, &captures, &task_inputs, action_inputs.as_ref())?;
-    let fake_run = host.borrow().fakes.run.clone();
     if let Some(recorder) = fake_run {
         return run_fake_action(
             &lua,
@@ -7053,6 +7216,185 @@ fn normalize_relative(base: &Path, requested: &str) -> LuaResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exact_files_stage_ignored_and_literal_names_in_real_and_fake_actions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(workspace.path().join("ignored.txt"), "ignored").unwrap();
+        fs::write(workspace.path().join("a[1].txt"), "literal").unwrap();
+        fs::write(workspace.path().join("a1.txt"), "unselected").unwrap();
+        fs::create_dir(workspace.path().join("dir")).unwrap();
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
+return { tests = { [test.TEST] = core.test_root() } }
+"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("exact.test.luau"), r#"
+local core = require("@imp/core")
+local function selected(paths, fake)
+    local files = core.files({ paths = paths })
+    local task = core.task({ cache = false,
+        inputs = { files = files, sh = core.native_tool("sh") },
+        outputs = { text = core.output.value() },
+        run = function(exec, input)
+            -- Capture through the action first, including in a fake-run scope.
+            exec.action({ argv = { "sh", "-c", "test -f ignored.txt && test -f 'a[1].txt' && test ! -e a1.txt && test ! -e missing.txt" }, inputs = { input.files } })
+            local paths = exec.paths(input.files)
+            assert(#paths == 2 and paths[1] == "a[1].txt" and paths[2] == "ignored.txt")
+            return { text = core.read_file_in_digest(exec.digest(input.files), "a[1].txt") }
+        end })
+    local function check() assert(core.test.resolve(task.outputs.text) == "literal") end
+    if fake then core.test.with_fake_run(check) else check() end
+end
+return {
+    core.test.case("exact capture in actions", function()
+        selected({ "ignored.txt", "a[1].txt", "missing.txt" }, false)
+        selected({ "ignored.txt", "a[1].txt", "missing.txt" }, true)
+    end),
+    core.test.case("fake action validates exact file types", function()
+        local files = core.files({ paths = { "dir" } })
+        local task = core.task({ inputs = { files = files }, run = function(exec, input)
+            exec.action({ argv = { "unused" }, inputs = { input.files } })
+        end })
+        core.test.with_fake_run(function(host)
+            local ok, err = pcall(core.test.resolve, task)
+            assert(not ok and string.find(tostring(err), "requires regular files", 1, true), tostring(err))
+            assert(#host.runs == 0)
+        end)
+    end),
+}
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await;
+        assert!(report.is_ok(), "{report:?}");
+    }
+
+    #[test]
+    fn exact_files_identity_uses_sorted_unique_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = LuauWorkspace::new(root.path(), root.path()).unwrap();
+        let lua = Lua::new();
+        let first: LuaTable = lua
+            .load(r#"return { paths = { "b", "a", "b" } }"#)
+            .eval()
+            .unwrap();
+        let second: LuaTable = lua
+            .load(r#"return { paths = { "a", "b" } }"#)
+            .eval()
+            .unwrap();
+        let first = create_files_handle(&lua, &runtime.host, first, None, true).unwrap();
+        let second = create_files_handle(&lua, &runtime.host, second, None, true).unwrap();
+        assert_eq!(
+            first.borrow::<GraphHandle>().unwrap().id,
+            second.borrow::<GraphHandle>().unwrap().id
+        );
+    }
+
+    #[test]
+    fn exact_files_capture_regular_files_and_share_one_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".gitignore"), "ignored\n").unwrap();
+        fs::write(root.path().join("ignored"), "ignored content").unwrap();
+        fs::write(root.path().join("a[1].txt"), "literal").unwrap();
+        fs::write(root.path().join("a1.txt"), "other").unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::write(root.path().join("a/item"), "nested").unwrap();
+        fs::write(root.path().join("a.txt"), "sibling").unwrap();
+        let paths = vec![
+            "a.txt".to_owned(),
+            "a/item".to_owned(),
+            "a[1].txt".to_owned(),
+            "ignored".to_owned(),
+            "missing".to_owned(),
+        ];
+        let files = existing_exact_files(root.path(), &paths).unwrap();
+        assert_eq!(files, paths[..4]);
+        let runtime = LuauWorkspace::new(root.path(), root.path()).unwrap();
+        let mut host = runtime.host.borrow_mut();
+        host.nodes
+            .insert(1, GraphNode::Files(FileSetSpec::Exact(paths)));
+        let captures = Rc::new(RefCell::new(HashMap::new()));
+        let first = captured_fileset(&host, &captures, 1).unwrap().unwrap();
+        assert_eq!(first.files, files);
+        fs::write(root.path().join("a[1].txt"), "changed").unwrap();
+        fs::write(root.path().join("missing"), "added").unwrap();
+        let second = captured_fileset(&host, &captures, 1).unwrap().unwrap();
+        assert!(Rc::ptr_eq(&first, &second));
+        let contents = imp_store::digest::read_file_in_digest(&first.digest, "a[1].txt").unwrap();
+        assert_eq!(contents, "literal");
+        assert!(existing_exact_files(root.path(), &[".".to_owned()]).is_err());
+        fs::write(root.path().join("parent"), "file").unwrap();
+        assert!(existing_exact_files(root.path(), &["parent/child".to_owned()]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_files_reject_links_and_directories() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        fs::write(root.path().join("dir/file"), "content").unwrap();
+        symlink("dir/file", root.path().join("link")).unwrap();
+        symlink("dir", root.path().join("parent")).unwrap();
+        symlink("missing", root.path().join("broken")).unwrap();
+        for path in ["dir", "link", "parent/file", "broken"] {
+            let result = existing_exact_files(root.path(), &[path.to_owned()]);
+            assert!(result.is_err(), "{path}: {result:?}");
+            assert!(result.unwrap_err().to_string().contains("files({ paths })"));
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_files_ownership_and_change_detection_use_literal_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(root.path().join("a[1].txt"), "literal").unwrap();
+        fs::write(root.path().join("a1.txt"), "other").unwrap();
+        fs::write(root.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return { app = core.task({ inputs = { files = core.files({ paths = { "a[1].txt", "missing.txt" } }) }, run = function() end }) }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let walk = runtime
+            .changed_graph_walk(&roots.iter().collect::<Vec<_>>())
+            .await
+            .unwrap();
+        for path in ["a[1].txt", "missing.txt"] {
+            let (stale, covered) = walk.stale_node_ids(&[path.to_owned()]);
+            assert!(stale.contains(&roots[0].handle_id));
+            assert!(covered.contains(path));
+        }
+        let (stale, covered) = walk.stale_node_ids(&["a1.txt".to_owned()]);
+        assert!(!stale.contains(&roots[0].handle_id));
+        assert!(covered.is_empty());
+        let unowned = all_unowned_workspace_files(
+            root.path(),
+            &runtime.host.borrow(),
+            ".",
+            &["*.txt".to_owned()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(unowned, ["a1.txt"]);
+    }
 
     #[tokio::test]
     async fn changed_module_provenance_covers_rules_and_workspace_imports() {

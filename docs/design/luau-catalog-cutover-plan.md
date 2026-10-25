@@ -778,3 +778,106 @@ The final `target/debug/imp test //...` retry passed 59/59 units.
 `target/debug/imp lint //docs:quality` also passed after the documentation
 updates. The earlier concurrency assertion failure remains recorded above as
 an intermittent test observation; this task does not change that test.
+
+
+### File-set and action-input test outcomes
+
+The user retained exact regular-file selection and action staging from several
+declared handles. Luau excludes a reusable union handle and raw input
+specifications. Keep both JavaScript modules until QuickJS removal.
+`core.files({ paths })` bypasses glob matching and ignore rules. Unlike the
+legacy literal path list, its resolved paths omit missing files and duplicate
+paths so they agree with its captured tree. It rejects directories and
+symlinks. The authoring contract defines the API and its limits under
+[Select exact workspace files](luau-authoring-contract.md#select-exact-workspace-files).
+
+The following rows cover every test in `file_set_test.js`, in source order.
+Replacement cases are in `rules/imp/file_set.test.luau` unless stated otherwise.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| an isolated test may mutate module state | Equivalent: a case may change module state. |
+| the next test receives a fresh module instance | Equivalent: the next case gets a fresh module instance. |
+| glob() returns a FileSet descriptor, not paths | Equivalent: glob returns an opaque graph handle. JavaScript descriptor fields and process-isolation syntax are excluded from this case. |
+| glob() records no effect entry on its own | Excluded: Luau does not record legacy memo effects. |
+| paths(glob(...)) returns a non-empty string array | Equivalent: exec.paths returns workspace-relative strings. |
+| paths(glob(...)) supports double-star patterns | Equivalent: glob patterns support double stars. |
+| paths(glob(...)) result is sorted | Equivalent: exec.paths is sorted. |
+| file_set.union() returns a union FileSet | Excluded: no reusable union handle or descriptor API. Actions accept separate declared handles. |
+| paths(file_set.union(a, b)) is deduplicated and sorted | Excluded: no union path-query API. Sorted unique paths remain covered for individual glob and exact selections. |
+| paths(file_set.union(a, b)) contains paths from both sets | Excluded: no union path-query API. Combined action staging has separate coverage below. |
+| file_set.literal() returns a literal FileSet | Equivalent: core.files({ paths }) returns an opaque files handle. JavaScript descriptor fields are excluded. |
+| paths(file_set.literal([...])) returns sorted paths | Equivalent: exact paths are sorted unique existing workspace files. Missing files are omitted rather than returned as requested names. |
+| paths() throws on a plain string | Equivalent: exec.paths rejects a plain string. Exact JavaScript error text is excluded. |
+| file_set.union() throws if given a non-FileSet value | Excluded: no union constructor to validate. |
+| memo wrapping paths(glob(...)) deduplicates correctly | Excluded: core.memo remains an identity function under the existing memo decision. |
+
+The following rows cover every test in `run_fileset_test.js`, in source order.
+Replacement cases are in `rules/imp/run_fileset.test.luau` unless stated otherwise.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| run accepts a glob FileSet in inputs | Equivalent: stages glob files into the sandbox. |
+| run copies glob files into sandbox | Equivalent: stages glob files into the sandbox; stages only the matched files. |
+| run accepts a literal FileSet in inputs | Equivalent: stages exact paths into the sandbox. |
+| run accepts a union FileSet in inputs | Equivalent staging: stages separate overlapping glob and exact inputs. The union constructor is excluded. |
+| run accepts empty inputs array | Equivalent: accepts an empty input list. |
+| run accepts mixed FileSet and plain spec in inputs | Equivalent staging: stages separate overlapping glob and exact inputs. Raw specifications are excluded; actions reject legacy plain input specifications. |
+| materialising a FileSet input records a paths effect entry | Excluded: Luau does not record legacy memo effects. Shared capture and digest behavior has focused replacement coverage without trace assertions. |
+| output returns a file spec by default | Equivalent: output.file declares a file artifact, covered by existing codegen tests. The generic output() function and JavaScript descriptor shape are excluded. |
+| output respects explicit kind | Equivalent: output.directory declares a directory artifact, covered by existing toolchain tests. The generic output() function and JavaScript descriptor shape are excluded. |
+
+Rust integration coverage checks literal pattern characters, ignored files,
+missing paths, shared capture, regular-file restrictions, ownership, and exact
+change detection. Scoped fake-run coverage checks real paths and digest
+content without running an action. Real action tests check sandbox staging.
+
+Generated-file snapshots remain unchanged. Their current use of glob selection
+and ignore rules is a follow-up; their existing rejection of glob characters
+in output paths remains in place. This case does not settle the other pending
+host API cases and does not authorize JavaScript test removal.
+
+The digest tree-listing helper also needs a separate review: its documentation
+promises sorted paths, but recursive traversal can return `a/item` before
+`a.txt`. Exact selection sorts its captured paths locally and has regression
+coverage for this case. This task does not change the shared helper.
+
+#### File-set verification
+
+**Verified:** on 2026-10-25, from the checkout root on Linux. No alternate
+cache root or rules override was set.
+
+| Command or check | Result |
+| --- | --- |
+| `cargo build -p imp --quiet` | Exit 0. |
+| `cargo test -p imp-engine --lib exact_files --quiet` | Exit 0; 5 passed, including nested-path ordering and shared capture after workspace edits. |
+| `cargo test --workspace --quiet` | Exit 0; all suites passed, including 341 engine library tests. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/imp:rules_test` | Exit 0; 148/148 units passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //...` | Exit 0; 692/692 units passed. Four failed CMake scan actions are expected negative cases. |
+| `imp fmt //...` | Exit 0; final pass: 61 unchanged, 0 changed, 0 failed. |
+| `imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed on the final Rust implementation. |
+| `imp test //...` | Exit 1; 58/60 units passed with the installed September 29 binary. The engine cache-environment check and the workflow no-handler warning tests failed. |
+| `target/debug/imp test //...` | Exit 0; 60/60 units passed on the final implementation, including both units that failed with the installed binary. |
+| `IMP_RUNTIME=luau target/debug/imp fmt //...` | Exit 0; 13 unchanged, 0 changed, 0 failed. |
+| `IMP_RUNTIME=luau target/debug/imp lint //...` | Exit 0; 13 clean, 0 fixed, 0 failed. |
+| `python3 -m unittest discover -s docs -p quality_check_test.py` | Exit 0; 5 tests passed. |
+| Python comparison of JavaScript test names and outcome rows | Exit 0; 24/24 exact names matched in source order. |
+| `PATH="$PWD/target/debug:$PATH" imp lint //docs:quality` | Exit 0; 1 clean, 0 fixed, 0 failed. |
+| `git diff --check` | Exit 0. |
+
+An intermediate full Luau run exited 1 because a concurrent Cargo check
+replaced the running `target/debug/imp` binary. The self-tool check then tried
+to canonicalize an executable path with a ` (deleted)` suffix. The full rerun
+after Cargo finished passed 692/692 units. No self-tool behavior was changed.
+
+The installed binary is `/home/ts/.local/bin/imp`, dated 2026-09-29. Its engine
+failure was `Imp test sandboxes must share IMP_CACHE_DIR`. Its workflow suite
+failed the two cases that expect one warning for selected targets with no
+format or lint handler; both observed zero warnings. The checkout binary
+passed these checks. This task does not change cache-environment or workflow
+warning behavior.
+
+The generated-file snapshot and shared tree-listing follow-ups above remain
+outside this delivery. The JavaScript tests and the other pending host API
+cases remain in place.

@@ -437,6 +437,37 @@ resolved value or artifact handle to the consumer. When an action consumes an
 artifact or path handle, Imp stages its CAS digest as an action input. Graph
 actions keep outputs in CAS and do not write them into the workspace.
 
+### Select exact workspace files
+
+For rule authors, `core.files({ paths = { "src/main.c", "data/input.txt" } })`
+declares an opaque files handle for exact workspace-relative file paths.
+Declare the handle in task `inputs`, then use it with `exec.paths`,
+`exec.digest`, or `exec.action({ inputs })`.
+
+`paths` must be a dense list of strings. An empty list is valid. The option
+cannot be combined with `root`, `include`, `exclude`, or other options.
+`core.glob` and `core.builtin_files` continue to accept glob specifications;
+they do not accept `paths`.
+
+Each path must be non-empty and use `/` separators. Absolute paths, colons
+(including drive prefixes), backslashes, NUL bytes, empty components, `.`,
+and `..` components are invalid. Imp sorts paths and removes duplicates before it
+assigns the handle identity. Pattern characters are literal characters.
+Exact selection bypasses ignore rules.
+
+Imp captures existing regular files when the task uses the handle. Missing
+files are absent from both `exec.paths` and the captured tree. Directories,
+symlinks, and paths through symlinked parent directories fail with a
+`files({ paths })` diagnostic. Other filesystem errors also fail the capture.
+The task shares one capture between paths, digests, and real or faked actions.
+In `core.test.with_fake_run`, file selections read real workspace content;
+no additional fake API is required.
+
+To stage several selections, declare each handle as a task input and pass
+those handles in the action's `inputs` list. Imp merges the captured trees;
+overlapping identical content is valid. Luau does not provide a reusable
+`file_set.union` handle or accept legacy raw `{ kind, path }` specifications.
+
 ### Fileset paths and digests
 
 A task reads a files handle from its `inputs` with these `exec` functions:

@@ -464,6 +464,14 @@ pub(crate) fn graph_files_leaf_matches(
     spec: &serde_json::Value,
     changed_paths: &[String],
 ) -> Vec<String> {
+    if spec.get("paths").is_some() {
+        let paths = string_array(spec.get("paths"));
+        return changed_paths
+            .iter()
+            .filter(|path| paths.contains(path))
+            .cloned()
+            .collect();
+    }
     let root = spec.get("root").and_then(|v| v.as_str()).unwrap_or(".");
     let include = string_array(spec.get("include"));
     let exclude = string_array(spec.get("exclude"));

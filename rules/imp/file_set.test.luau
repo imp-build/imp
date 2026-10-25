@@ -72,6 +72,48 @@ return {
 			assert(string.find(tostring(err), "exec.paths(handle) requires a files handle", 1, true), tostring(err))
 		end),
 
+		core.test.case("exact paths are sorted unique existing workspace files", function()
+			local paths = paths_of(core.files({ paths = {
+				"rules/imp/file_set.test.luau", "rules/imp/BUILD.luau",
+				"rules/imp/file_set.test.luau", "rules/imp/no-such-exact-input",
+			} }))
+			assert(#paths == 2, table.concat(paths, "\n"))
+			assert(paths[1] == "rules/imp/BUILD.luau")
+			assert(paths[2] == "rules/imp/file_set.test.luau")
+			assert(#paths_of(core.files({ paths = {} })) == 0)
+			assert(#paths_of(core.files({ paths = { "rules/imp/no-such-exact-input" } })) == 0)
+		end),
+
+		core.test.case("exact paths validate options and dense string lists", function()
+			for _, options in ipairs({
+				{ paths = "file" }, { paths = { 1 } }, { paths = { [2] = "file" } },
+				{ paths = { [1] = "a", [3] = "b" } }, { paths = { name = "file" } },
+				{ paths = {}, include = {} }, { paths = {}, exclude = {} },
+				{ paths = {}, root = "." }, { paths = {}, other = true },
+			}) do
+				local ok, err = pcall(core.files, options)
+				assert(not ok and string.find(tostring(err), "files({ paths })", 1, true), tostring(err))
+			end
+			for _, path in ipairs({ "", "/absolute", "../outside", "a/../b", "./file", "a//b", "a/", "C:/file", "a\\b", "a\0b" }) do
+				local ok, err = pcall(core.files, { paths = { path } })
+				assert(not ok and string.find(tostring(err), "workspace-relative", 1, true), tostring(err))
+			end
+			for _, constructor in ipairs({ core.glob, core.builtin_files }) do
+				local ok, err = pcall(constructor, { paths = {} })
+				assert(not ok and string.find(tostring(err), "core.files", 1, true), tostring(err))
+			end
+		end),
+
+		core.test.case("exec.paths rejects a plain string", function()
+			local ok, err = pcall(core.test.resolve, core.task({
+				outputs = { paths = output.value() },
+				run = function(exec)
+					return { paths = exec.paths("not-a-fileset") }
+				end,
+			}).outputs.paths)
+			assert(not ok, tostring(err))
+		end),
+
 		core.test.case("exclude removes matched paths", function()
 			local paths = paths_of(core.glob({
 				root = "rules/imp",
