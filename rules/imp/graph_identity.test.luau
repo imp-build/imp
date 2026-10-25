@@ -11,9 +11,40 @@ local function contains(text, part)
 	return string.find(text, part, 1, true) ~= nil
 end
 
+local file_selection_cases = {}
+for _, name in ipairs({ "files", "glob", "builtin_files" }) do
+	local constructor = core[name]
+	local function add_case(description, run)
+		table.insert(file_selection_cases, core.test.case(name .. " " .. description, run))
+	end
+	add_case("rejects a missing include list", function()
+		for _, options in ipairs({ {}, { root = "rules/imp" } }) do
+			local text = error_text(constructor, options)
+			assert(contains(text, name .. "({ root?, include, exclude? }) requires include glob patterns"), text)
+		end
+	end)
+	add_case("rejects a positional pattern list", function()
+		local text = error_text(constructor, { "*.luau" })
+		assert(contains(text, name .. "() takes an options table, not a list of patterns"), text)
+	end)
+	add_case("rejects positional patterns with named include", function()
+		local text = error_text(constructor, { "*.js", include = { "*.luau" } })
+		assert(contains(text, name .. "() takes an options table, not a list of patterns"), text)
+	end)
+	add_case("rejects an empty include list", function()
+		local text = error_text(constructor, { include = {} })
+		assert(contains(text, name .. "({ include }) requires glob patterns"), text)
+	end)
+	add_case("accepts named glob options", function()
+		local handle = constructor({ root = "rules/imp", include = { "*.luau" }, exclude = { "*.test.luau" } })
+		assert(type(handle) == "userdata", type(handle))
+	end)
+end
+
 -- Separate task declarations remain distinct. Reuse a handle to share results.
 -- Nested resolution keeps the current test state; it opens no new invocation.
 return {
+	core.test.suite("file selection arguments", file_selection_cases),
 	core.test.suite("graph handles", {
 		core.test.case("separate declarations execute independently for each display form", function()
 			for _, displays in ipairs({ { "build", "test" }, { "same", "same" }, {} }) do

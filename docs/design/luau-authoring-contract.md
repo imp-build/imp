@@ -470,6 +470,31 @@ resolved value or artifact handle to the consumer. When an action consumes an
 artifact or path handle, Imp stages its CAS digest as an action input. Graph
 actions keep outputs in CAS and do not write them into the workspace.
 
+### Validate glob file-selection arguments
+
+For rule authors, `core.files`, `core.glob`, and `core.builtin_files` accept
+an options table with `root`, `include`, and optional `exclude` fields for
+glob selection. `root` defaults to `"."`; `include` is required. Imp validates
+the arguments when the constructor is called, before it creates the handle.
+The diagnostic uses the constructor's name without the `core.` prefix:
+
+| Invalid argument | Diagnostic |
+| --- | --- |
+| Missing `include`, including an empty options table | `<name>({ root?, include, exclude? }) requires include glob patterns` |
+| Positional entries or other non-string option keys, even with valid `include` | `<name>() takes an options table, not a list of patterns` |
+| Empty `include` list | `<name>({ include }) requires glob patterns` |
+
+Use `{ include = { "*.luau" } }` instead of `{ "*.luau" }`. Do not combine
+positional patterns with named options. These checks do not change conversion
+errors for other field types or validation of unknown string keys.
+`core.files({ paths = ... })` uses the separate exact-selection checks below
+before glob argument validation. `core.glob` and `core.builtin_files` still
+reject `paths` with `exact paths require core.files({ paths })`.
+
+The [file argument diagnostic outcomes](luau-catalog-cutover-plan.md#file-argument-diagnostic-outcomes)
+record the cutover coverage. The separate `core.test.resolve` diagnostic task
+is unchanged.
+
 ### Select exact workspace files
 
 For rule authors, `core.files({ paths = { "src/main.c", "data/input.txt" } })`

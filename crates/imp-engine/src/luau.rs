@@ -3814,14 +3814,14 @@ fn create_core(
     core.set(
         "files",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options, None, true)
+            create_files_handle(lua, &graph_host, options, None, true, "files")
         })?,
     )?;
     let graph_host = Rc::clone(&host);
     core.set(
         "glob",
         lua.create_function(move |lua, options: LuaTable| {
-            create_files_handle(lua, &graph_host, options, None, false)
+            create_files_handle(lua, &graph_host, options, None, false, "glob")
         })?,
     )?;
     let builtin_host = Rc::clone(&host);
@@ -3835,6 +3835,7 @@ fn create_core(
                 options,
                 Some(builtin_root.clone()),
                 false,
+                "builtin_files",
             )
         })?,
     )?;
@@ -5030,6 +5031,7 @@ fn create_files_handle(
     options: LuaTable,
     source_root: Option<PathBuf>,
     allow_paths: bool,
+    constructor: &str,
 ) -> LuaResult<LuaAnyUserData> {
     require_graph_declaration(host)?;
     if options.contains_key("paths")? {
@@ -5077,6 +5079,19 @@ fn create_files_handle(
         let fingerprint = format!("exact:{paths:?}");
         return intern_files_handle(lua, host, fingerprint, FileSetSpec::Exact(paths));
     }
+    for pair in options.clone().pairs::<LuaValue, LuaValue>() {
+        let (key, _) = pair?;
+        if !matches!(key, LuaValue::String(_)) {
+            return Err(LuaError::external(format!(
+                "{constructor}() takes an options table, not a list of patterns"
+            )));
+        }
+    }
+    if options.get::<LuaValue>("include")?.is_nil() {
+        return Err(LuaError::external(format!(
+            "{constructor}({{ root?, include, exclude? }}) requires include glob patterns"
+        )));
+    }
     let spec = GlobFileSetSpec {
         source_root,
         root: options
@@ -5088,9 +5103,9 @@ fn create_files_handle(
             .unwrap_or_default(),
     };
     if spec.include.is_empty() {
-        return Err(LuaError::external(
-            "files({ include }) requires glob patterns",
-        ));
+        return Err(LuaError::external(format!(
+            "{constructor}({{ include }}) requires glob patterns"
+        )));
     }
     let fingerprint = format!(
         "{:?}\n{}\n{}\n{}",
@@ -7298,8 +7313,8 @@ return {
             .load(r#"return { paths = { "a", "b" } }"#)
             .eval()
             .unwrap();
-        let first = create_files_handle(&lua, &runtime.host, first, None, true).unwrap();
-        let second = create_files_handle(&lua, &runtime.host, second, None, true).unwrap();
+        let first = create_files_handle(&lua, &runtime.host, first, None, true, "files").unwrap();
+        let second = create_files_handle(&lua, &runtime.host, second, None, true, "files").unwrap();
         assert_eq!(
             first.borrow::<GraphHandle>().unwrap().id,
             second.borrow::<GraphHandle>().unwrap().id

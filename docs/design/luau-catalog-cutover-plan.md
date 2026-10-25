@@ -505,6 +505,26 @@ These outcomes add no host API or runtime behavior. Action caching remains
 separate from task result reuse. The other unresolved host API cases remain
 open.
 
+### File argument diagnostic outcomes
+
+Luau retains declaration-time validation for glob file selections. The
+`file selection arguments` suite in `rules/imp/graph_identity.test.luau`
+checks `files`, `glob`, and `builtin_files`. Each error names the constructor.
+Keep `rules/imp/graph_identity_test.js` until QuickJS removal.
+
+| Source test | Outcome |
+| --- | --- |
+| files() rejects options with no include patterns | Equivalent Luau coverage: an empty options table and a root-only table fail with an Imp diagnostic that requires include glob patterns. |
+| files() rejects a bare list of patterns | Equivalent Luau coverage: positional pattern tables fail with an options-table diagnostic. By user decision, mixed positional entries and named include also fail instead of silently ignoring the entries. |
+| files() rejects an empty include list (existing Luau test) | Retained: files({ include }) requires glob patterns. The shared suite also checks the corresponding glob and builtin_files names. |
+
+The suite checks valid named glob options too. Existing exact-file tests keep
+the valid empty `paths` list, rejected combinations of exact and glob options,
+and exact-selection error precedence. Exact-selection checks run before the
+new glob checks. Other field conversions and unknown string-key behavior are
+unchanged. No host API or test fake is added. The `test.resolve` diagnostic
+case remains separate work.
+
 ### Tracked API test outcomes
 
 Luau keeps declared tools, configured action environments, artifact reads, and
