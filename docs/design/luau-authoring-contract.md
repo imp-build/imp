@@ -289,6 +289,23 @@ settings; they do not validate rule options or target attributes. The
 record the individual test exclusions and the deferred `imp rules schema`
 decision for QuickJS removal.
 
+Luau does not provide the JavaScript `env`, `which`, `run`, or
+`workspace_mutation` APIs. Set action environment values with the `env` option
+of `exec.action` or workspace `imp.passthrough_env`. Declare executables with
+`core.native_tool`; a missing executable fails action execution instead of
+returning `nil`. Run commands through `exec.action` and declare their output
+artifacts. Read generated content with `core.read_file_in_digest` and the
+artifact's `exec.digest`. `core.read_file` reads namespaced source files, not
+arbitrary host temporary files. Publish generated artifacts through
+`core.write_workspace` in a goal callback. This does not provide the legacy
+command-and-watch mutation behavior.
+
+Sharing a task result does not establish that concurrent identical action
+calls share one execution. That protection remains deferred to the Luau
+concurrency work. The
+[tracked API test outcomes](luau-catalog-cutover-plan.md#tracked-api-test-outcomes)
+record all individual replacements, exclusions, and the proposed follow-up.
+
 ### Goals and workflows
 
 **Verified:** Goal policy is Luau rule code. The Rust host selects roots,

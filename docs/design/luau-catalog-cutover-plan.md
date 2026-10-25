@@ -505,6 +505,54 @@ These outcomes add no host API or runtime behavior. Action caching remains
 separate from task result reuse. The other unresolved host API cases remain
 open.
 
+### Tracked API test outcomes
+
+Luau keeps declared tools, configured action environments, artifact reads, and
+goal-boundary workspace publication. It does not add the legacy host query,
+command, mutation, or memo APIs. Keep `rules/imp/tracked_apis_test.js` until
+QuickJS removal. Each source test has an outcome below.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| env returns a string for PATH | Excluded: Luau has no direct host env query. Actions receive configured environment entries; this does not provide a rule-level PATH string. |
+| env returns null for an unset variable | Excluded: Luau has no direct host env query or null result for an unset host variable. |
+| env records an effect entry in memo trace | Excluded: Luau does not record memo effect traces. |
+| which returns a string path for sh | Excluded: native_tool declares an opaque tool handle instead of returning a host executable path. The native_tool suite covers tool use on the action PATH. |
+| which returns null for a nonexistent binary | Excluded: a missing native tool fails action execution instead of returning null. The native_tool suite covers that failure. |
+| which records an effect entry in memo trace | Excluded: Luau does not record memo effect traces. |
+| configuration returns configured workspace values | Equivalent test: tracked_apis.test.luau checks that configure deep-merges the values returned by configuration. |
+| workspace configuration changes memo identity | Excluded: core.memo returns its function unchanged and has no memo identity or cache to invalidate when configuration changes. |
+| paths(glob(...)) returns an array of strings | Equivalent test: file_set.test.luau checks that exec.paths returns workspace-relative strings from a glob selection. |
+| paths(glob(...)) records a paths effect entry in memo trace | Excluded: Luau does not record memo effect traces. The path query has separate graph coverage. |
+| run executes a command and returns exitCode 0 | Equivalent test: the tracked action results suite runs a real sandboxed action and checks exit code zero and stdout. |
+| run records an effect entry in memo trace | Excluded: Luau does not record memo effect traces. |
+| run redacts literal environment values in its effect trace | Excluded: Luau has no memo effect trace to redact. This outcome makes no broader claim about log redaction. |
+| memo calling env still deduplicates on repeated calls | Excluded: core.memo is an identity function, and Luau has no direct env query. Shared task execution has separate graph coverage. |
+| read_file reads a file written by run | Equivalent test: the tracked action results suite reads a declared action output through exec.digest and core.read_file_in_digest. It does not read a host temporary file after sandbox removal. |
+| withFakeRun: run() resolves without executing and still traces | Equivalent action coverage: the with_fake_run suite records an action without executing its failing command, returns exit code zero, and checks its declared output handle. The memo trace assertions are excluded. Fake artifact contents are not verified. |
+| run() single-flights concurrent calls with identical opts | Excluded from this cutover: Luau has no legacy run API. Equivalent concurrent-action protection is deferred; task result reuse does not establish it. Track that protection with 2026-10-25-share-concurrent-luau-action-execution alongside 2026-10-13-run-luau-actions-concurrently. |
+| getMemoTrace includes key_display with function name | Excluded: Luau does not record memo traces or memo key display labels. |
+| memo cycle errors include a readable call chain | Excluded: core.memo returns its function unchanged and has no memo cycle detector. Graph dependency cycle diagnostics are a separate contract. |
+| workspace_mutation with watch reports changed files | Excluded: Luau has no command-and-watch workspace_mutation API. Sandboxed generation, digest comparison, and goal-boundary publication have separate coverage; they do not provide equivalent watch semantics. |
+
+The native-tool coverage is in `rules/imp/native_tool.test.luau`. Environment
+forwarding is covered by
+`luau_workspace_passthrough_env_reaches_sandboxed_actions`. Namespaced source
+reads are covered by `read_file_reads_namespaced_files_and_decodes_json`.
+Artifact flow and publication boundaries are covered by
+`luau_task_outputs_flow_through_cas_to_downstream_actions` and
+`workspace_effects_require_a_goal_callback`. The generate workflow tests cover
+digest comparison and declared workspace writes. These checks do not restore
+the excluded host APIs or command-and-watch semantics.
+
+**Planned:** Sprint triage must consider
+`2026-10-25-share-concurrent-luau-action-execution` with
+`2026-10-13-run-luau-actions-concurrently`. The follow-up requires identical
+cacheable calls to share execution and results, failure propagation to all
+callers, and bypass for non-cacheable calls. It remains proposed; this outcome
+does not change the concurrency task's acceptance criteria or add action
+concurrency now.
+
 ### Target schema test outcomes
 
 Luau uses explicit graph handles and rule functions. It does not add the
