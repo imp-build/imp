@@ -7612,6 +7612,23 @@ pub async fn execute_goal_live_selection(
         }
     }
 
+    // Successful wildcard selection can match graph addresses that export
+    // other workflows. A selected expansion with no children still has a
+    // workflow, so require that every selector missed this graph workflow.
+    if matches!(goal, "fmt" | "lint")
+        && !goal_def.selectorless
+        && matches!(&selection, GoalSelection::Selectors(selectors)
+            if !selectors.is_empty()
+                && selectors.iter().all(|selector| graph_unmatched.contains(selector)))
+        && roots.is_empty()
+        && label_roots.is_empty()
+        && graph_roots.is_empty()
+    {
+        eprintln!(
+            "warning: goal '{goal}' matched targets, but none has a handler for this goal; a handler import may be missing"
+        );
+    }
+
     let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
     // Goal callbacks belong to the legacy target/product side of coexistence.
     // A label-only selection must not invoke one with an empty target
