@@ -412,9 +412,25 @@ An action's `cache = true` cannot override it. Action `cache = false`
 disables caching even when the task permits it. The same effective options
 apply in host fakes and real execution.
 
+Each `core.task` call creates a distinct handle, even when its callback,
+inputs, outputs, and display match another declaration. Reuse a handle to
+share a producer's execution between consumers. Matching declarations do not
+merge into one task.
+
 Task results remain reusable within an invocation and mode scope, including
 when `cache = false`. Resolving multiple outputs does not repeat the task
 callback. Task options do not change dependency tasks or interactive programs.
+
+Within a running test case, `core.test.resolve` uses the current task result
+cache and mode scope. It does not open a new invocation for each call.
+Resolving the same output twice reuses its result. A task callback can resolve
+a previously declared task or output through this test API without clearing
+shared results or goal flags. This API requires a running test case; production
+rules declare dependencies as task inputs. Entering or leaving a scoped host
+fake clears task results, resolved inputs, and expansion results.
+
+The [graph identity test outcomes](luau-catalog-cutover-plan.md#graph-identity-and-nested-resolution-test-outcomes)
+record replacement coverage and the JavaScript behavior exclusions.
 
 ### Task and action outputs
 

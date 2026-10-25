@@ -485,6 +485,26 @@ unresolved host API cases remain open.
 | Two tools can register the same product and both dispatch | Dropped: Luau selects explicit graph roots instead of registered product functions. |
 | `productFor` rejects a role registered by several tools | Dropped: Luau selects an explicit dependency instead of resolving an implicit product provider. |
 
+### Graph identity and nested resolution test outcomes
+
+Luau keeps explicit task handles and its current resolution boundaries.
+`rules/imp/graph_identity.test.luau` provides the coverage below. Keep
+`graph_identity_test.js` until QuickJS removal. Its three diagnostic tests
+belong to the separate files and test.resolve diagnostic tasks.
+
+| JavaScript test | Outcome and reason |
+| --- | --- |
+| tasks differing only in display are distinct nodes | Equivalent test: separate declarations with different displays execute independently and return distinct callback results. |
+| tasks with an identical display still dedupe | Excluded: each Luau task declaration creates a distinct handle. A replacement test verifies independent execution with identical displays. Share work by reusing a handle. |
+| tasks with no authored display dedupe on their inputs | Excluded: matching inputs do not merge separate Luau declarations. A replacement test verifies independent execution without displays. |
+| display does not override a real difference in outputs | Equivalent test: tasks with the same display and different output declarations both execute and return the expected output. |
+| a task body may resolve handles without tearing down its invocation | Equivalent test: an outer task resolves a previously consumed dependency and a flag-reading task. The dependency executes once, and the goal flag remains available after nested resolution. The existing goal-flags fake surrounds the outer resolution. |
+| resolveGraphHandle opens an invocation when called outside one | Excluded: core.test.resolve does not open a new invocation for each call. A replacement test resolves the same output twice in one case and verifies one callback execution. |
+
+These outcomes add no host API or runtime behavior. Action caching remains
+separate from task result reuse. The other unresolved host API cases remain
+open.
+
 ### Target schema test outcomes
 
 Luau uses explicit graph handles and rule functions. It does not add the
