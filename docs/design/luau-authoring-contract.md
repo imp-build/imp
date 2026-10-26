@@ -293,8 +293,10 @@ inheritance, or the `targetSchemas()` registry. Rule functions construct
 explicit graph handles. Workspace configuration schemas validate workspace
 settings; they do not validate rule options or target attributes. The
 [target schema test outcomes](luau-catalog-cutover-plan.md#target-schema-test-outcomes)
-record the individual test exclusions and the deferred `imp rules schema`
-decision for QuickJS removal.
+record the individual test exclusions and the approved removal of
+`imp rules schema` during QuickJS runtime removal. The command still exists
+until that cutover; no replacement command is planned. Rule-option and default
+discovery is separate proposed design work.
 
 Luau does not provide the JavaScript `env`, `which`, `run`, or
 `workspace_mutation` APIs. Set action environment values with the `env` option
@@ -311,7 +313,8 @@ Sharing a task result does not establish that concurrent identical action
 calls share one execution. That protection remains deferred to the Luau
 concurrency work. The
 [tracked API test outcomes](luau-catalog-cutover-plan.md#tracked-api-test-outcomes)
-record all individual replacements, exclusions, and the proposed follow-up.
+record all individual replacements, exclusions, and the separate follow-up,
+which is ready but blocked by the concurrent-action task.
 
 ### Goals and workflows
 

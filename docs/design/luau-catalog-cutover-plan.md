@@ -458,8 +458,17 @@ From the repository root on Linux, with the checkout binary:
 
 ## Host API test triage outcomes
 
-`2026-10-10-triage-unported-luau-host-api-tests` reviews each deferred case
-separately. The remaining cases are still open.
+`2026-10-10-triage-unported-luau-host-api-tests` records an outcome for each
+of the 75 JavaScript tests in the seven deferred modules. On 2026-10-26, the
+user confirmed each exclusion and retained compatibility difference below.
+The user kept the identical-display exclusion for this cutover and requested
+a separate investigation of sharing for repeated tool declarations.
+
+Keep the JavaScript modules until QuickJS removal. That work must preserve
+the retained coverage and recorded exclusions; this audit does not remove
+the modules or add runtime behavior.
+
+### Action core-count test outcomes
 
 - **Ported: `action_cores_test.js`.** `rules/imp/action_cores.test.luau` checks
   action core requests, the default, and invalid values through the existing
@@ -469,20 +478,29 @@ separately. The remaining cases are still open.
   spellings. Interactive programs remain unchanged. Keep the JavaScript module
   until QuickJS removal.
 
+| JavaScript test | Outcome and coverage |
+| --- | --- |
+| forwards the declared core count to the host | Ported: the Luau case `records requested cores and defaults to one` checks that the action fake records a request of four cores. |
+| defaults to one core when the action declares nothing | Equivalent: the same Luau case checks an effective default request of one. The JavaScript fake recorded an omitted field instead. |
+| rejects a core count that is not a whole number of one or more | Ported: `rejects invalid cores before recording an action` checks zero, negative, fractional, non-finite, out-of-range, and non-number values, with no action recorded. |
+| a sandboxed command sees a core count, never more than it asked for | Equivalent: the Rust integration test named above checks a request of two against a scheduler budget of three, with two lanes and `IMP_CORES=2`. |
+| reports the clamped grant, not an over-wide request | Ported: the Rust integration test checks a request of 1024 against a budget of three, with three lanes and `IMP_CORES=3`. |
+| expands in a declared env value, in both spellings | Ported: the Rust integration test checks `JOBS=$IMP_CORES` and `FLAGS=-j${IMP_CORES}` against the granted count for default, narrow, and clamped requests. |
+| defaults to one core | Ported: the Rust integration test checks an omitted request, one scheduler lane, and `IMP_CORES=1`. |
+
 ### Product test outcomes
 
 Luau keeps explicit graph dependencies and goal slots. It does not add the
 JavaScript product registry. `rules/imp/product.test.luau` provides the graph
-coverage below. Keep `product_test.js` until QuickJS removal. All other
-unresolved host API cases remain open.
+coverage below. Keep `product_test.js` until QuickJS removal.
 
 | JavaScript test | Outcome and reason |
 | --- | --- |
-| Returns a callable memoized function | Equivalent test: two consumers share a producer task, receive its computed value, and execute the producer once while resolving their common parent. |
-| Different args produce different results | Equivalent test: tasks made by the same computation helper receive different declared inputs and return their expected results. |
-| Product and memo of the same function have independent caches | Dropped: Luau has no product wrapper, and `core.memo` returns its function unchanged. The JavaScript test name says the caches are independent, but its assertion requires a shared cache. |
-| Requires a declared tool token | Dropped: Luau has no product registration API. |
-| Two tools can register the same product and both dispatch | Dropped: Luau selects explicit graph roots instead of registered product functions. |
+| returns a callable memoized function | Equivalent test: two consumers share a producer task, receive its computed value, and execute the producer once while resolving their common parent. |
+| different args produce different results | Equivalent test: tasks made by the same computation helper receive different declared inputs and return their expected results. |
+| product and memo of the same function have independent caches | Dropped: Luau has no product wrapper, and `core.memo` returns its function unchanged. The JavaScript test name says the caches are independent, but its assertion requires a shared cache. |
+| requires a declared tool token | Dropped: Luau has no product registration API. |
+| two tools can register the same product and both dispatch | Dropped: Luau selects explicit graph roots instead of registered product functions. |
 | `productFor` rejects a role registered by several tools | Dropped: Luau selects an explicit dependency instead of resolving an implicit product provider. |
 
 ### Graph identity and nested resolution test outcomes
@@ -490,7 +508,7 @@ unresolved host API cases remain open.
 Luau keeps explicit task handles and its current resolution boundaries.
 `rules/imp/graph_identity.test.luau` provides the coverage below. Keep
 `graph_identity_test.js` until QuickJS removal. Its three diagnostic tests
-belong to the separate files and test.resolve diagnostic tasks.
+have outcomes in the two diagnostic sections below.
 
 | JavaScript test | Outcome and reason |
 | --- | --- |
@@ -502,8 +520,11 @@ belong to the separate files and test.resolve diagnostic tasks.
 | resolveGraphHandle opens an invocation when called outside one | Excluded: core.test.resolve does not open a new invocation for each call. A replacement test resolves the same output twice in one case and verifies one callback execution. |
 
 These outcomes add no host API or runtime behavior. Action caching remains
-separate from task result reuse. The other unresolved host API cases remain
-open.
+separate from task result reuse. The proposed follow-up
+`2026-10-26-investigate-repeated-tool-declarations` must check what work is
+already shared for equivalent tool declarations and recommend a sharing
+boundary. It does not assume display-based task identity and does not block
+this audit.
 
 ### Test resolution diagnostic outcome
 
@@ -521,8 +542,9 @@ and program descriptions without process execution. The Rust test
 `luau_test_resolve_checks_test_scope_before_arguments` verifies that calls
 outside a test case report the test-case guard before argument validation,
 including for supported handles. Existing program-description tests retain
-their execution-effect checks. No host API or test fake is added. This outcome
-does not complete the parent inventory audit or authorize JavaScript removal.
+their execution-effect checks. No host API or test fake is added. The
+[parent acceptance check](#host-api-audit-acceptance-check) covers the full
+inventory. JavaScript removal remains separate work.
 
 ### File argument diagnostic outcomes
 
@@ -585,12 +607,11 @@ Artifact flow and publication boundaries are covered by
 digest comparison and declared workspace writes. These checks do not restore
 the excluded host APIs or command-and-watch semantics.
 
-**Planned:** Sprint triage must consider
-`2026-10-25-share-concurrent-luau-action-execution` with
-`2026-10-13-run-luau-actions-concurrently`. The follow-up requires identical
-cacheable calls to share execution and results, failure propagation to all
-callers, and bypass for non-cacheable calls. It remains proposed; this outcome
-does not change the concurrency task's acceptance criteria or add action
+**Planned:** `2026-10-25-share-concurrent-luau-action-execution` is ready but
+blocked by `2026-10-13-run-luau-actions-concurrently`. The follow-up requires
+identical cacheable calls to share execution and results, failure propagation
+to all callers, and bypass for non-cacheable calls. It does not block this
+audit, change the concurrency task's acceptance criteria, or add action
 concurrency now.
 
 ### Target schema test outcomes
@@ -598,8 +619,7 @@ concurrency now.
 Luau uses explicit graph handles and rule functions. It does not add the
 JavaScript `Target` attribute schema model or its target-kind registry.
 Each test in `rules/imp/target_schema_test.js` is excluded below. Keep the
-JavaScript module until QuickJS removal. The other unresolved host API cases
-remain open.
+JavaScript module until QuickJS removal.
 
 | JavaScript test | Outcome and reason |
 | --- | --- |
@@ -617,10 +637,73 @@ Workspace configuration schemas validate workspace settings. They do not
 replace target attribute schemas, so their tests are not replacement coverage
 for these exclusions.
 
-**Planned:** `2026-09-30-remove-quickjs-after-luau-cutover` must decide the
-future of `imp rules schema` before removing its JavaScript target schema
-registry. This triage records that follow-up; it does not select replacement
-CLI behavior or change the command.
+**Planned:** The decision `luau-rules-schema-cli-removal`, recorded by
+`2026-10-25-decide-luau-rules-schema-cli`, requires removal of
+`imp rules schema` in `2026-10-25-remove-quickjs-runtime`. The command must
+disappear from help and fail with a standard argument-parsing error before
+workspace loading. This is a breaking removal with no replacement command.
+Bare `imp rules` and `imp config schema` remain separate interfaces. This
+audit records the settled decision; it does not change the CLI.
+
+The proposed follow-up `2026-10-26-design-rule-option-default-discovery`
+must assess how users and generated documentation discover rule options and
+defaults. It does not assume restoration of legacy target schemas and does
+not block this audit.
+
+### Host API audit acceptance check
+
+The complete inventory contains 7 action core-count tests, 6 product tests,
+9 target-schema tests, 15 file-set tests, 9 action-input tests, 9 graph identity
+and diagnostic tests, and 20 tracked API tests. Each source test has one
+outcome row. The extra empty-include row records an existing Luau test.
+
+- Each retained behavior has replacement coverage in the named Luau suites
+  or Rust integration tests. Each excluded behavior has a recorded reason
+  confirmed by the user. Concurrent action sharing remains deferred.
+- The earlier action core-count and exact-file APIs use the scoped action
+  fake and have authoring contract entries. This final audit adds no API and
+  needs no new fake.
+- The JavaScript modules can be removed during QuickJS removal while
+  preserving the retained coverage and exclusions. This is a coverage
+  assessment, not evidence that removal or the full cutover is complete.
+
+The two new proposed investigations above remain separate work. Historical
+verification tables below describe their original deliveries; their dates
+and results do not establish validation of this final audit.
+
+#### Final audit verification
+
+**Verified:** on 2026-10-26, from the checkout root on Linux. No alternate
+cache root or rules override was set.
+
+| Command or check | Result |
+| --- | --- |
+| Temporary comparison of source test names and outcome rows | 75/75 exact names matched once, with Markdown formatting ignored. |
+| Local Markdown links in the cutover plan and authoring contract | All file and heading targets resolved. |
+| Proposed follow-up task readback | Both new task files exist with proposed status. Peon returned pushed commits `52908cc` and `bd84a28`. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/imp:rules_test` | Exit 0; 170/170 units passed. |
+| `cargo test -p imp-engine --lib luau_action_cores_match_scheduler_admission_and_environment --quiet` | Exit 0; 1 test passed. |
+| `target/debug/imp test //rules/python:rules_test` | Exit 0; 1/1 package units passed. |
+| `IMP_RUNTIME=luau target/debug/imp test //rules/python:rules_test` | Exit 0; 70/70 units passed. |
+| `imp lint //docs:quality` | Exit 0; 1 clean, 0 fixed, 0 failed. |
+| `python3 -m unittest discover -s docs -p quality_check_test.py` | Exit 0; 6 tests passed. |
+| `imp fmt //...` | Exit 0; 61 unchanged, 0 changed, 0 failed. |
+| `imp lint //...` | Exit 0; 46 clean, 0 fixed, 0 failed. |
+| `imp test //...` with the installed September 29 binary | Exit 1; 58/60 units passed. The sandbox cache-environment test and workflow no-handler warning tests failed, as recorded in earlier deliveries. Python tests passed. |
+| `target/debug/imp test //...` after the Python test fix | Exit 1; 59/60 units passed. Python and engine tests passed; the unchanged workflow suite did not observe its expected fmt and lint no-handler warnings. |
+| `PATH="$PWD/target/debug:$PATH" target/debug/imp test //rules/workflows:rules_test` | Exit 0; 1/1 package units passed. |
+| `PATH="$PWD/target/debug:$PATH" imp test //...` | Exit 0; 60/60 units passed, including Python, workflows, engine tests, and 6 documentation quality tests. |
+
+The first checkout-wide JavaScript test run passed 59/60 units. The Python
+documentation test still expected a JavaScript setup example after the guide
+changed to Luau. At the user's request, the test now checks the documented
+Luau setup imports. The existing Luau documentation case executes those
+imports and checks both Ruff products. The two focused Python results above
+include this fix.
+
+Putting the checkout binary first on `PATH` also passed the workflow suite
+that failed in the plain checkout-wide invocation. No workflow source changed.
+The broad passing result uses that explicit executable selection.
 
 ## Odin package port
 
@@ -942,8 +1025,8 @@ content without running an action. Real action tests check sandbox staging.
 
 Generated-file snapshots remain unchanged. Their current use of glob selection
 and ignore rules is a follow-up; their existing rejection of glob characters
-in output paths remains in place. This case does not settle the other pending
-host API cases and does not authorize JavaScript test removal.
+in output paths remains in place. This audit does not change generated-file
+snapshots or authorize JavaScript test removal.
 
 The digest tree-listing helper also needs a separate review: its documentation
 promises sorted paths, but recursive traversal can return `a/item` before
@@ -987,8 +1070,8 @@ passed these checks. This task does not change cache-environment or workflow
 warning behavior.
 
 The generated-file snapshot and shared tree-listing follow-ups above remain
-outside this delivery. The JavaScript tests and the other pending host API
-cases remain in place.
+outside this delivery. The JavaScript tests remain until QuickJS removal;
+the host API case outcomes are recorded above.
 
 ## Workspace integration checks
 
