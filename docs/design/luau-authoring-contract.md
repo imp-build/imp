@@ -971,6 +971,15 @@ does not inspect or serialize the userdata. A module may also export ordinary
 values used to configure other declarations, but those values are not graph
 roots.
 
+**Verified:** The base workspace and any loaded CI overlay can mix graph
+exports with namespace-keyed configuration. Registered configuration namespace
+names are reserved and validated as configuration. Other fields use the BUILD
+root rules: a bare task handle declares a BUILD root, and a goal-slot table
+selects the workflow. Ordinary values and non-root handles are ignored.
+Workspace roots use `//:<name>`. Duplicate address/workflow pairs fail across
+workspace and BUILD modules; a CI graph export does not replace a base root.
+Configuration keeps its existing deep-merge behavior.
+
 Each BUILD module evaluates with a package context set to its own workspace
 directory. An imported BUILD module uses its own context while it evaluates;
 after it returns, the importing module's context is restored. An ordinary
@@ -981,8 +990,8 @@ creates a handle, so deferred behavior keeps its declaration context after
 module evaluation and across async calls. Code outside BUILD evaluation or a
 recorded callback cannot query the active BUILD package context.
 
-Target addresses are derived from the BUILD module that exports a graph root,
-not from the module that created the handle. Re-exporting a handle under a
+Target addresses are derived from the workspace or BUILD module that exports
+a graph root, not from the module that created the handle. Re-exporting a handle under a
 different BUILD module therefore changes its target address, while source
 paths already captured by the handle keep their original package context.
 

@@ -1,8 +1,8 @@
 # Luau runtime removal coverage
 
 This record is for contributors who review QuickJS removal. It maps removed
-Rust runtime tests to retained Luau behavior, authoring-contract exclusions,
-or an explicit unresolved contract gap. It does not close the static catalog cleanup or final release audit.
+Rust runtime tests to retained Luau behavior or authoring-contract exclusions.
+It does not close the static catalog cleanup or final release audit.
 
 ## Command and runtime contract
 
@@ -45,7 +45,8 @@ excluded JavaScript API forms.
 
 These limits and replacements follow the [Luau authoring contract](luau-authoring-contract.md)
 and the [individual host-test outcomes](luau-catalog-cutover-plan.md#host-api-test-triage-outcomes).
-They are compatibility limits, not new Luau implementations.
+Exclusions state compatibility limits. Replacement entries identify the Luau
+behavior and its test coverage.
 
 - **Introspection exclusion:** detailed workspace graph introspection remains
   outside the Luau contract. Catalog roots and existing empty diagram walks
@@ -62,18 +63,17 @@ They are compatibility limits, not new Luau implementations.
   Luau tasks and declared actions retain their own tested cache and
   failure behavior. Concurrent actions and concurrent identical-action
   sharing remain assigned to the existing post-cutover tasks.
-- **Workspace graph-export gap:** the Luau loader reads workspace return
-  values only as configuration and collects selectable roots from BUILD
-  modules. The contract's "Module values and graph declarations" section
-  nevertheless promises graph-root exports from both workspace and BUILD
-  modules. The removed workspace graph-export test has no equivalent for
-  that promise. This is a pre-existing implementation/contract gap, pending
-  a decision to implement workspace exports or explicitly exclude them.
+- **Workspace graph exports:** loaded base and CI workspace modules declare
+  roots alongside namespace-keyed configuration. Registered configuration
+  names stay reserved. `workspace_module_can_export_graph_roots` in
+  `crates/imp/tests/luau_cutover.rs` checks CLI discovery and execution.
+  The `workspace_graph_roots_*` tests in `luau.rs` cover CI exports,
+  configuration, BUILD ownership, collisions, and slot validation.
 - **Workspace toolchain replacement:** replace a JavaScript workspace
   toolchain-target export with a registered Luau toolchain, covered by
   `resolve_luau_tool_bin_preserves_arguments_and_exit_status` and the Luau
-  CLI tool resolver context test. This replaces tool lookup; it does not
-  implement general workspace graph-root exports.
+  CLI tool resolver context test. This replaces tool lookup; it is separate from
+  general workspace graph-root exports.
 - **Legacy namespace-precedence exclusion:** Luau never substitutes a
   workspace module for an `@imp/rules` module. Use `@workspace/rules/...`
   for vendored workspace modules, or `IMP_RULES_DIR` to select an explicit
@@ -112,7 +112,7 @@ formatter, and Luau expansion tests remain in `spike.rs`.
 | `graph_expansion_all_children_start_concurrently` | Legacy execution exclusion |
 | `graph_task_input_failures_keep_declared_order` | Goals and selectors |
 | `graph_goal_handler_receives_named_root_results` | Goals and selectors |
-| `workspace_module_can_export_graph_roots` | Workspace graph-export gap |
+| `workspace_module_can_export_graph_roots` | Workspace graph exports |
 | `graph_package_path_and_asset_sources_are_build_relative` | Modules and ownership |
 | `graph_stamp_file_is_a_shared_cas_artifact` | Goals and selectors |
 | `graph_package_path_resolves_correctly_under_a_rules_prefixed_package` | Modules and ownership |

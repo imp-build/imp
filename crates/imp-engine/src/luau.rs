@@ -996,15 +996,88 @@ impl LuauWorkspace {
         Ok(roots)
     }
 
+    fn collect_root_exports(
+        &self,
+        exports: LuaTable,
+        package: &str,
+        workspace: bool,
+        slot_roots: &mut Vec<(String, String, u64)>,
+    ) -> Result<()> {
+        for pair in exports.pairs::<String, LuaValue>() {
+            let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if workspace && self.configuration.borrow().schemas.contains_key(&name) {
+                continue;
+            }
+            let address = if package.is_empty() {
+                format!("//:{name}")
+            } else {
+                format!("//{package}:{name}")
+            };
+            let mut handles = Vec::new();
+            match value {
+                LuaValue::UserData(userdata) => {
+                    if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                        handles.push((handle.id, "BUILD".to_owned()));
+                    }
+                }
+                LuaValue::Table(table) => {
+                    for pair in table.pairs::<LuaValue, LuaValue>() {
+                        let (key, value) =
+                            pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        let (LuaValue::String(key), LuaValue::UserData(userdata)) = (key, value)
+                        else {
+                            continue;
+                        };
+                        let key = key.to_string_lossy().to_string();
+                        if !is_slot_key(&key) {
+                            continue;
+                        }
+                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                            handles.push((handle.id, key));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            handles.sort_by(|left, right| left.1.cmp(&right.1));
+            for (handle_id, slot) in handles {
+                let state = self.host.borrow();
+                // Other values, such as tool or file handles, are not roots.
+                let valid = match unconfigured_node(&state, handle_id).1 {
+                    Some(
+                        GraphNode::Task
+                        | GraphNode::TaskOutput { .. }
+                        | GraphNode::ExpansionGet { .. }
+                        | GraphNode::ExpansionAll { .. },
+                    ) => true,
+                    Some(GraphNode::Program(_)) => {
+                        if slot != "RUN" {
+                            bail!("program root {address} must use the RUN slot");
+                        }
+                        true
+                    }
+                    Some(GraphNode::TestRoot { .. }) => slot == "TEST",
+                    _ => false,
+                };
+                if valid {
+                    slot_roots.push((address.clone(), slot, handle_id));
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn load_modules_with_ci_overlay(
         &mut self,
         include_ci_overlay: bool,
     ) -> Result<Vec<GraphRoot>> {
         self.host.borrow_mut().loaded_roots.clear();
+        let mut slot_roots = Vec::new();
         let workspace_config = self.loader.workspace_root.join("imp.workspace.luau");
         if workspace_config.is_file() {
             let value = self.evaluate("@workspace/imp.workspace").await?;
-            self.merge_config_value(value, "@workspace/imp.workspace")?;
+            let exports = self.merge_config_value(value, "@workspace/imp.workspace")?;
+            self.collect_root_exports(exports, "", true, &mut slot_roots)?;
         }
         self.materialize_config_defaults()?;
         if include_ci_overlay
@@ -1015,7 +1088,8 @@ impl LuauWorkspace {
                 .is_file()
         {
             let value = self.evaluate("@workspace/imp.workspace.ci").await?;
-            self.merge_config_value(value, "@workspace/imp.workspace.ci")?;
+            let exports = self.merge_config_value(value, "@workspace/imp.workspace.ci")?;
+            self.collect_root_exports(exports, "", true, &mut slot_roots)?;
         }
         self.finalize_config_values()?;
 
@@ -1037,7 +1111,6 @@ impl LuauWorkspace {
         build_files.sort();
 
         let mut roots = Vec::new();
-        let mut slot_roots = Vec::new();
         for file in build_files {
             let relative = file
                 .strip_prefix(&self.loader.workspace_root)
@@ -1059,65 +1132,7 @@ impl LuauWorkspace {
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .map(|parent| parent.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
-            for pair in exports.pairs::<String, LuaValue>() {
-                let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                let address = if package.is_empty() {
-                    format!("//:{name}")
-                } else {
-                    format!("//{package}:{name}")
-                };
-                let mut handles = Vec::new();
-                match value {
-                    LuaValue::UserData(userdata) => {
-                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                            handles.push((handle.id, "BUILD".to_owned()));
-                        }
-                    }
-                    LuaValue::Table(table) => {
-                        for pair in table.pairs::<LuaValue, LuaValue>() {
-                            let (key, value) =
-                                pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                            let (LuaValue::String(key), LuaValue::UserData(userdata)) =
-                                (key, value)
-                            else {
-                                continue;
-                            };
-                            let key = key.to_string_lossy().to_string();
-                            if !is_slot_key(&key) {
-                                continue;
-                            }
-                            if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                                handles.push((handle.id, key));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                handles.sort_by(|left, right| left.1.cmp(&right.1));
-                for (handle_id, slot) in handles {
-                    let state = self.host.borrow();
-                    // Other values, such as tool or file handles, are not roots.
-                    let valid = match unconfigured_node(&state, handle_id).1 {
-                        Some(
-                            GraphNode::Task
-                            | GraphNode::TaskOutput { .. }
-                            | GraphNode::ExpansionGet { .. }
-                            | GraphNode::ExpansionAll { .. },
-                        ) => true,
-                        Some(GraphNode::Program(_)) => {
-                            if slot != "RUN" {
-                                bail!("program root {address} must use the RUN slot");
-                            }
-                            true
-                        }
-                        Some(GraphNode::TestRoot { .. }) => slot == "TEST",
-                        _ => false,
-                    };
-                    if valid {
-                        slot_roots.push((address.clone(), slot, handle_id));
-                    }
-                }
-            }
+            self.collect_root_exports(exports, &package, false, &mut slot_roots)?;
         }
         // Resolve slots after every module has loaded, so that the result does
         // not depend on which module required a workflow first.
@@ -1748,7 +1763,7 @@ impl LuauWorkspace {
         self.configuration.borrow().schemas.clone()
     }
 
-    fn merge_config_value(&mut self, value: LuaValue, source: &str) -> Result<()> {
+    fn merge_config_value(&mut self, value: LuaValue, source: &str) -> Result<LuaTable> {
         let LuaValue::Table(table) = value else {
             bail!("{source}: workspace config must return a table");
         };
@@ -1781,7 +1796,7 @@ impl LuauWorkspace {
                 .entry(namespace)
                 .or_insert_with(|| source.to_owned());
         }
-        Ok(())
+        Ok(table)
     }
 
     fn finalize_config_values(&self) -> Result<()> {
@@ -11360,6 +11375,182 @@ return {
             GraphNode::Tool { owner_package, .. } => assert_eq!(owner_package, "pkg"),
             _ => panic!("expected tool node"),
         };
+    }
+
+    #[tokio::test]
+    async fn workspace_graph_roots_preserve_configuration_and_build_ownership() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::create_dir_all(workspace.path().join("pkg")).unwrap();
+        fs::write(
+            workspace.path().join("pkg/BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local owner = core.package_path()
+return { nested = core.task({ run = function() assert(owner == "pkg") end }) }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("imp.workspace.luau"),
+            r#"
+local core = require("@imp/core")
+local nested = require("@workspace/pkg/BUILD")
+return {
+    imp = { jobs = 2 },
+    bootstrap = core.task({ run = function() end }),
+    slotted = { BUILD = core.task({ run = function() end }) },
+    reexport = nested.nested,
+    ordinary = { text = "ignore" },
+    tool = core.native_tool("unused"),
+}
+"#,
+        )
+        .unwrap();
+        // Register the workflow after the workspace exports have been read.
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+assert(core.configuration("imp").jobs == 2)
+return { control = core.task({ run = function() end }) }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let mut addresses: Vec<_> = roots.iter().map(|root| root.address.as_str()).collect();
+        addresses.sort();
+        assert_eq!(
+            addresses,
+            [
+                "//:bootstrap",
+                "//:control",
+                "//:reexport",
+                "//:slotted",
+                "//pkg:nested"
+            ]
+        );
+        assert_eq!(runtime.workspace_config()["imp"]["jobs"], 2);
+        runtime
+            .execute_graph(
+                "build",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_graph_roots_include_active_ci_exports_and_reject_duplicates() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        let base = r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return { imp = { jobs = 2 }, bootstrap = core.task({ run = function() end }) }
+"#;
+        fs::write(workspace.path().join("imp.workspace.luau"), base).unwrap();
+        fs::write(
+            workspace.path().join("imp.workspace.ci.luau"),
+            r#"
+local core = require("@imp/core")
+return { imp = { jobs = 3 }, ci = { BUILD = core.task({ run = function() end }) } }
+"#,
+        )
+        .unwrap();
+        for ci in [false, true] {
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let roots = runtime.load_modules_with_ci_overlay(ci).await.unwrap();
+            assert_eq!(roots.len(), if ci { 2 } else { 1 });
+            assert_eq!(roots.iter().any(|root| root.address == "//:ci"), ci);
+            assert_eq!(
+                runtime.workspace_config()["imp"]["jobs"],
+                if ci { 3 } else { 2 }
+            );
+            runtime
+                .execute_graph(
+                    "build",
+                    &roots,
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        for file in ["imp.workspace.ci.luau", "BUILD.luau"] {
+            fs::write(
+                workspace.path().join("imp.workspace.ci.luau"),
+                "return {}\n",
+            )
+            .unwrap();
+            fs::write(
+                workspace.path().join(file),
+                r#"
+local core = require("@imp/core")
+return { bootstrap = core.task({ run = function() end }) }
+"#,
+            )
+            .unwrap();
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let error = runtime
+                .load_modules_with_ci_overlay(true)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate exported graph root '//:bootstrap"),
+                "{error:#}"
+            );
+        }
+        fs::write(
+            workspace.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local inspect = core.goal("inspect", function() end)
+return { bootstrap = { [inspect] = core.task({ run = function() end }) } }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules_with_ci_overlay(true).await.unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().any(|root| root.workflow == "inspect"));
+        assert!(roots.iter().any(|root| root.workflow == "build"));
+    }
+
+    #[tokio::test]
+    async fn workspace_graph_roots_keep_configuration_names_reserved_and_validate_slots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        for (source, expected) in [
+            (
+                r#"local core = require("@imp/core")
+return { imp = core.task({ run = function() end }) }"#,
+                "config.imp is not JSON-compatible",
+            ),
+            (
+                r#"local core = require("@imp/core")
+return { bootstrap = { LINT = core.task({ run = function() end }) } }"#,
+                "//:bootstrap exports slot 'LINT', but no goal registers it",
+            ),
+            (
+                r#"local core = require("@imp/core")
+return { bootstrap = core.program({ describe = function() return { argv = { "unused" } } end }) }"#,
+                "program root //:bootstrap must use the RUN slot",
+            ),
+        ] {
+            fs::write(workspace.path().join("imp.workspace.luau"), source).unwrap();
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let error = format!("{:#}", runtime.load_modules().await.unwrap_err());
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[tokio::test]

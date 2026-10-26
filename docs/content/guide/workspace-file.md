@@ -30,8 +30,30 @@ return {
 Configuration fields use `snake_case`. Return a table keyed by configuration
 namespace. The loader validates fields and applies registered defaults. On
 GitHub Actions, `imp.workspace.ci.luau` deep-merges over the base configuration.
-The returned configuration does not declare selectable targets; put those in
-BUILD modules.
+Registered configuration namespace names are reserved for configuration.
+Other returned fields can declare graph roots, with the same handle and goal
+slot rules as BUILD modules. Workspace roots use addresses such as
+`//:bootstrap`.
+
+**Runnable example:** save this as `imp.workspace.luau` in an empty workspace.
+
+```luau
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return {
+    imp = { jobs = 2 },
+    bootstrap = core.task({ run = function() end }),
+}
+```
+
+From that workspace, run `imp build //:bootstrap`. The task completes without
+writing an output. `imp targets //...` lists `//:bootstrap`.
+
+When the CI overlay loads, its returned graph roots use the same rules.
+Configuration deep-merges, but graph roots do not replace earlier roots.
+Duplicate address and workflow pairs fail, including collisions with the root
+BUILD module. Different workflows may share an address. Ordinary values and
+non-root handles do not declare targets.
 
 `jobs` is a core budget. Actions declare their cost through `exec.action({ cores = n })`.
 `fs_jobs` controls filesystem workers. CLI `--jobs`, `--fs-jobs`, `--js-workers`,

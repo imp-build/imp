@@ -66,6 +66,33 @@ fn luau_is_the_only_runtime_and_old_environment_values_have_no_effect() {
 }
 
 #[test]
+fn workspace_module_can_export_graph_roots() {
+    if !Path::new(env!("CARGO_BIN_EXE_imp")).is_file() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("imp.workspace.luau"),
+        r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return { imp = { jobs = 2 }, bootstrap = core.task({ run = function() end }) }
+"#,
+    )
+    .unwrap();
+    let output = run(root.path(), None, &["build", "//:bootstrap"]);
+    assert!(output.status.success(), "{output:?}");
+    for selector in ["//:bootstrap", "//..."] {
+        let output = run(root.path(), None, &["targets", selector]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("//:bootstrap"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
 fn rules_schema_is_rejected_before_workspace_loading() {
     if !Path::new(env!("CARGO_BIN_EXE_imp")).is_file() {
         return;
