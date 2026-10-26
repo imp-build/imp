@@ -3,10 +3,9 @@
 # does: rules resolved from disk, next to the binary, with no workspace copy
 # to fall back on.
 #
-# This is the only check that covers that path. imp's own test suite can't:
-# `resolve_workspace_module` tries <workspace_root>/rules/... first, and this
-# repo has rules/ at its root, so in-repo runs never consult the shipped tree.
-# Hence the scratch workspace below is created outside the repo, on purpose.
+# In-repo runs can resolve rules from the checkout beside the executable.
+# This check uses a staged binary and a workspace outside the checkout to
+# verify that the release tree supplies the rules.
 #
 # Usage: ci/smoke_package.sh <staging-dir>
 #   <staging-dir>/bin/imp[.exe]
@@ -32,7 +31,7 @@ fail() {
 
 [ -x "$bin" ] || fail "no executable at $stage/bin/imp[.exe]"
 
-# Toolchain lockfiles are read at runtime through readAddressedFile, not
+# Toolchain lockfiles are read at runtime through core.read_file, not
 # imported, so they'd likewise slip through a resolution-only check.
 for lock in rules/rust/rust.lock rules/python/uv-toolchain.lock; do
     [ -f "$stage/share/imp/$lock" ] || fail "missing $stage/share/imp/$lock"

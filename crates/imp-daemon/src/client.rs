@@ -54,7 +54,7 @@ pub(crate) fn compatibility_warnings(capabilities: &proto::Capabilities) -> Vec<
 impl RemoteExecutionService {
     pub fn connect() -> Result<Self> {
         // `connect` is part of a synchronous factory but is called while the
-        // frontend runtime is loading QuickJS. Construct and drive the
+        // frontend runtime is loading the workspace. Construct and drive the
         // blocking-capable client runtime on a plain OS thread so this never
         // nests Tokio runtimes.
         std::thread::spawn(|| -> Result<Self> {

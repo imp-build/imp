@@ -1,6 +1,6 @@
 # Luau catalog cutover plan
 
-**Status: Catalog cleanup implemented; final cutover validation is separate.**
+**Status: Linux cutover validation and release-package checks pass.**
 This record is for contributors and maintainers. Imp uses Luau for authoring.
 The migration rules and conversion tables below record the historical port
 plan. They are not current runtime selection instructions.
@@ -76,6 +76,92 @@ The broad suite includes expected failing CMake actions. The Python and OCI
 consumer checks also test failures and exit zero when those checks pass.
 No native macOS or Windows execution was run. Final cutover and release
 acceptance remain owned by the separate validation task.
+
+## Final cutover audit
+
+Verified on Linux on 2026-10-26. This audit checks the current migration
+checkout. It does not publish a release or establish a merge to `main`.
+
+### Source and coverage audit
+
+The removal manifest contains 210 authoring modules: 202 records name Luau,
+Python, or Rust replacements and eight record exclusions. The audit checks all
+replacement and evidence paths and retains three application inputs. The
+[runtime coverage record](luau-runtime-removal.md) identifies tests for
+canonical identity, package ownership, graph identity, async execution,
+diagnostics, outputs, toolchains, configuration, and test discovery. Every
+Rust test name cited in its retained-group summary exists in the source.
+Workspace graph exports have CLI and engine tests. Passing checks do not
+establish equivalence for the three retained catalog test gaps listed above.
+Those gaps remain assigned to `imp:2026-10-26-close-retained-catalog-test-gaps`.
+
+Tracked Cargo manifests and the lockfile contain no QuickJS reference. The
+resolved Cargo tree contains no QuickJS package. Rust source has no QuickJS
+reference after correction of an obsolete daemon comment. Both generated
+workflow files match their generator. The workspace checker confirms that
+supported repository targets use the Luau workspace and BUILD declarations.
+
+### Validation results
+
+Commands ran from the repository root. Passing Imp checks used the checkout
+binary first on `PATH`. No alternate `IMP_CACHE_DIR` was set.
+
+| Command or check | Exit | Result |
+| --- | --- | --- |
+| `python3 -B probes/js-luau-conversion/inventory.py` | 0 | 210 removals, three retained application inputs, three explicit coverage gaps |
+| `python3 -B -m unittest discover -s probes/js-luau-conversion -p inventory_test.py` | 0 | Eight tests passed |
+| `cargo tree --locked --offline --prefix none` and manifest assertions | 0 | No QuickJS package or manifest reference |
+| In-memory workflow rendering and source comparison | 0 | Docs and release workflows match their generator |
+| `cargo build --locked -p imp` | 0 | Checkout CLI built |
+| `cargo test --workspace --locked` | 0 | 406 tests passed across 25 suites; zero failures |
+| `imp fmt //...` | 0 | 26 unchanged, zero changed or failed |
+| `imp lint //...` | 0 | 27 clean, zero fixed or failed |
+| `imp test //...` | 0 | 732/732 units passed, including the Tree-sitter grammar round-trip |
+| `python3 -B ci/check_luau_workspace.py --imp target/debug/imp` | 0 | 58 Luau BUILD files, 90 targets, zero stale generated BUILD files |
+| Python, JavaScript/TypeScript, and OCI `testdata/consumer_check.py --imp target/debug/imp` checks | 0 each | Real consumers, source edits, arguments, packaging, and expected failures passed |
+| `imp build //rules/js/example:app //rules/js/example:app_ts //rules/js/example:hello //rules/js/example:hello_src` | 0 | All four retained example roots built |
+| `imp run //rules/js/example:app` and `imp run //rules/js/example:app_ts` | 0 each | Both applications ran |
+| `sh -n ci/smoke_package.sh` | 0 | Shell syntax passed |
+
+The plain installed `imp fmt //...`, `imp lint //...`, and `imp test //...`
+commands each exited 1 because that launcher still requires
+`imp.workspace.js`. They are not current-source validation results.
+
+The first musl attempt could not write Rustup files under the filesystem
+sandbox. The identical command ran with the required filesystem access.
+Cross updated the stable toolchain from Rust 1.97.0 to 1.99.1. That update
+interrupted the concurrent initial native build and Cargo test; both passed
+when rerun after the update. A broad Imp test then exited 1 because Cargo
+replaced its running executable. Its error named `target/debug/imp (deleted)`.
+The rerun after Cargo finished passed all 732 units. These initial failures
+are environment and execution-order failures, not accepted test passes.
+The four failed CMake actions are expected negative-test cases. Python/OCI
+consumer failures are also expected. None is a failed final test unit.
+
+### Linux release archive
+
+The CI Linux build command passed with Podman:
+
+```sh
+CROSS_CONTAINER_ENGINE=podman cross build --release --locked --target x86_64-unknown-linux-musl --manifest-path crates/imp/Cargo.toml
+```
+
+The resulting binary is a static PIE Linux executable. Staging used the CI
+layout: `bin/imp` and the complete `share/imp/rules` tree. The staged binary's
+`--help` check and `ci/smoke_package.sh <staged-tree>` both exited zero.
+
+The staged tree was archived with `tar -czf`, then extracted into a separate
+directory. `diff -qr` confirmed that the extracted rules match the source
+tree. `cmp` confirmed that the extracted executable matches the release
+binary. `ci/smoke_package.sh <extracted-tree>` exited zero. Both smoke tests
+used an external scratch workspace, cleared `IMP_RULES_DIR`, and checked
+catalog imports, BUILD generation, asset builds, and test discovery.
+
+The archive is `imp-x86_64-unknown-linux-musl.tar.gz`. Its SHA-256 is
+`da504a05391bbe5ed39f1283a36a85d4dab406c5e01c520db9dd15db300ea180`.
+This records one local artifact, not a reproducible-build guarantee.
+Native Windows and macOS execution remains unverified. No release upload,
+source commit, push, PR, merge, or Peon submission is part of this audit.
 
 ## Historical conversion evidence
 
@@ -362,8 +448,9 @@ Rust harness tests to Luau coverage or existing exclusions. Imp now uses Luau
 without `IMP_RUNTIME`. `imp rules schema` is removed; calls fail during
 argument parsing. Bare `imp rules` and `imp config schema` remain.
 
-Static JavaScript catalog cleanup and the final cutover audit remain separate
-tasks. Historical results below retain the commands used at the time.
+Static JavaScript catalog cleanup is complete. The final cutover audit owns
+release packaging and fresh broad validation. Historical results below retain
+the commands used at the time.
 
 ## QuickJS removal gate
 
