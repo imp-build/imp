@@ -343,7 +343,13 @@ local function toolchain_commands()
 			return append(tokens, quoted(args.copts or {}))
 		end,
 		archive_command = function(args)
-			return { shell_quote("zig"), shell_quote("ar"), "rcs", shell_quote(args.out_path), `@{shell_quote(args.rsp_path)}` }
+			return {
+				shell_quote("zig"),
+				shell_quote("ar"),
+				"rcs",
+				shell_quote(args.out_path),
+				`@{shell_quote(args.rsp_path)}`,
+			}
 		end,
 		link_command = function(args)
 			local tokens = quoted(compiler(args.is_cxx))
@@ -468,7 +474,13 @@ toolchain.register("zig", function()
 		inputs = { tool = graph_toolchain().tool },
 		outputs = { value = core.output.value() },
 		run = function(exec, inputs)
-			return { value = toolchain.bin(exec, inputs.tool, { exe = if core.platform_info().os == "windows" then "zig.exe" else "zig" }) }
+			return {
+				value = toolchain.bin(
+					exec,
+					inputs.tool,
+					{ exe = if core.platform_info().os == "windows" then "zig.exe" else "zig" }
+				),
+			}
 		end,
 	}).outputs.value
 end)

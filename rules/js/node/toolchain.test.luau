@@ -3,7 +3,9 @@ local locks = require("@imp/rules/workflows/lockfiles")
 local module = require("@imp/rules/js/node")
 local VERSION = "26.8.2"
 local CUSTOM = "@imp/rules/js/node/testdata/locked.json"
-local function contains(text, part) return string.find(text, part, 1, true) ~= nil end
+local function contains(text, part)
+	return string.find(text, part, 1, true) ~= nil
+end
 local function fails(fn, part)
 	local ok, text = pcall(fn)
 	assert(not ok and contains(tostring(text), part), tostring(text))
@@ -16,8 +18,11 @@ local function host_test(fn, platform)
 end
 local function install()
 	return core.test.resolve(core.task({
-		inputs = { tool = module.graph_toolchain().tool }, outputs = { value = core.output.value() },
-		run = function(exec, input) return { value = module.node_bin(exec, input.tool) } end,
+		inputs = { tool = module.graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, input)
+			return { value = module.node_bin(exec, input.tool) }
+		end,
 	}).outputs.value)
 end
 return {
@@ -25,7 +30,9 @@ return {
 		assert(module.default_version() == VERSION)
 	end),
 	core.test.case("node requires a default or a version", function()
-		host_test(function() fails(module.graph_toolchain, "no node toolchain version specified") end)
+		host_test(function()
+			fails(module.graph_toolchain, "no node toolchain version specified")
+		end)
 	end),
 	core.test.case("node graph construction does not execute acquisition", function()
 		host_test(function(host)
@@ -59,7 +66,9 @@ return {
 	end),
 	core.test.case("node reports missing, unlocked, and malformed locks", function()
 		host_test(function()
-			fails(function() module.node_toolchain(VERSION, { lockfile = "relative.lock" }) end, "must start with")
+			fails(function()
+				module.node_toolchain(VERSION, { lockfile = "relative.lock" })
+			end, "must start with")
 			module.node_toolchain(VERSION, { default = true, lockfile = "@workspace/missing.lock" })
 			fails(install, "no lockfile found")
 		end)
@@ -78,7 +87,9 @@ return {
 	core.test.case("node preserves platform mappings and Windows extraction", function()
 		assert(#module.supported_platforms() == 5)
 		assert(module.cache_key(VERSION, { os = "linux", arch = "aarch64" }) == VERSION .. "/linux-aarch64")
-		fails(function() module.artifact_name(VERSION, { os = "linux", arch = "riscv64" }) end, "unsupported node toolchain platform")
+		fails(function()
+			module.artifact_name(VERSION, { os = "linux", arch = "riscv64" })
+		end, "unsupported node toolchain platform")
 		host_test(function(host)
 			module.node_toolchain(VERSION, { default = true, lockfile = CUSTOM })
 			assert(install() == "/cache/node-toolchains/" .. VERSION .. "/windows-x86_64/node.exe")
@@ -90,7 +101,10 @@ return {
 		core.test.with_fake_run(function(host)
 			module.reset_for_test()
 			for _, plat in ipairs(module.supported_platforms()) do
-				host.set_run_stdout(`lock node-toolchain {VERSION} {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+				host.set_run_stdout(
+					`lock node-toolchain {VERSION} {plat.os}/{plat.arch}`,
+					string.rep("ab", 32) .. "  artifact\n  42\n"
+				)
 			end
 			local declared = module.node_toolchain(VERSION, { default = true, lockfile = "@workspace/locks/node.lock" })
 			local result = core.test.resolve(declared[locks.GEN_LOCKFILES])

@@ -240,10 +240,7 @@ return {
 			with_cc_host(function()
 				for _, name in ipairs({ "../app", "", "app.exe", "app.A", "lib.so", "..", "a b", 7 }) do
 					local message = error_text(binary, { output_name = name })
-					assert(
-						contains(message, "C/C++ output_name must be a non-empty portable filename stem"),
-						message
-					)
+					assert(contains(message, "C/C++ output_name must be a non-empty portable filename stem"), message)
 				end
 			end)
 		end),
@@ -276,23 +273,26 @@ return {
 			end)
 		end),
 
-		core.test.case("the include directories of a dependency reach the compile flags after the own directory", function()
-			with_cc_host(function(host)
-				local lib = library({ path = "rules/c/testdata/dep_lib" })
-				core.test.resolve(binary({ path = "rules/c/testdata/dep_consumer", deps = { lib } })[BUILD])
-				local consumer = nil
-				for _, run in ipairs(runs_with(host, "cc compile ")) do
-					if contains(run.display, "dep_consumer") then
-						consumer = run
+		core.test.case(
+			"the include directories of a dependency reach the compile flags after the own directory",
+			function()
+				with_cc_host(function(host)
+					local lib = library({ path = "rules/c/testdata/dep_lib" })
+					core.test.resolve(binary({ path = "rules/c/testdata/dep_consumer", deps = { lib } })[BUILD])
+					local consumer = nil
+					for _, run in ipairs(runs_with(host, "cc compile ")) do
+						if contains(run.display, "dep_consumer") then
+							consumer = run
+						end
 					end
-				end
-				assert(consumer ~= nil)
-				local script = consumer.argv[3]
-				local own = string.find(script, "'-Irules/c/testdata/dep_consumer'", 1, true)
-				local dep = string.find(script, "'-Irules/c/testdata/dep_lib'", 1, true)
-				assert(own ~= nil and dep ~= nil and own < dep, script)
-			end)
-		end),
+					assert(consumer ~= nil)
+					local script = consumer.argv[3]
+					local own = string.find(script, "'-Irules/c/testdata/dep_consumer'", 1, true)
+					local dep = string.find(script, "'-Irules/c/testdata/dep_lib'", 1, true)
+					assert(own ~= nil and dep ~= nil and own < dep, script)
+				end)
+			end
+		),
 
 		core.test.case("the link action of a shared library mounts its dependency archives", function()
 			with_cc_host(function(host)
@@ -452,32 +452,38 @@ return {
 			end)
 		end),
 
-		core.test.case("the transitive_linkopts of a dependency go to the link step, not to the archive step", function()
-			with_cc_host(function(host)
-				local lib = library()
-				local dep = table.clone(lib)
-				dep.transitive_linkopts = { "-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1" }
-				core.test.resolve(binary({ deps = { dep } })[BUILD])
-				local link = argv_text(run_with(host, "cc link "), "")
-				assert(contains(link, "-lwebkit2gtk-4.1"))
-				assert(contains(link, "-L/usr/lib/x86_64-linux-gnu"))
-				for _, run in ipairs(runs_with(host, "cc archive ")) do
-					assert(not contains(argv_text(run, ""), "webkit2gtk"))
-				end
-			end)
-		end),
+		core.test.case(
+			"the transitive_linkopts of a dependency go to the link step, not to the archive step",
+			function()
+				with_cc_host(function(host)
+					local lib = library()
+					local dep = table.clone(lib)
+					dep.transitive_linkopts = { "-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1" }
+					core.test.resolve(binary({ deps = { dep } })[BUILD])
+					local link = argv_text(run_with(host, "cc link "), "")
+					assert(contains(link, "-lwebkit2gtk-4.1"))
+					assert(contains(link, "-L/usr/lib/x86_64-linux-gnu"))
+					for _, run in ipairs(runs_with(host, "cc archive ")) do
+						assert(not contains(argv_text(run, ""), "webkit2gtk"))
+					end
+				end)
+			end
+		),
 
-		core.test.case("a shared library of a dependency goes to the link step and never to the archive step", function()
-			with_cc_host(function(host)
-				local shared_dep = library({ shared = true })
-				core.test.resolve(binary({ deps = { shared_dep } })[BUILD])
-				local name = "mixed_sources.so"
-				assert(contains(argv_text(run_with(host, "cc link "), ""), name))
-				for _, run in ipairs(runs_with(host, "cc archive ")) do
-					assert(not contains(argv_text(run, ""), name))
-				end
-			end)
-		end),
+		core.test.case(
+			"a shared library of a dependency goes to the link step and never to the archive step",
+			function()
+				with_cc_host(function(host)
+					local shared_dep = library({ shared = true })
+					core.test.resolve(binary({ deps = { shared_dep } })[BUILD])
+					local name = "mixed_sources.so"
+					assert(contains(argv_text(run_with(host, "cc link "), ""), name))
+					for _, run in ipairs(runs_with(host, "cc archive ")) do
+						assert(not contains(argv_text(run, ""), name))
+					end
+				end)
+			end
+		),
 
 		core.test.case("a binary with a shared dependency is bundled and links with an $ORIGIN rpath", function()
 			with_cc_host(function(host)
@@ -549,7 +555,8 @@ return {
 
 		core.test.case("cc_library forwards the transitive_linkopts of a dependency, not its own linkopts", function()
 			with_cc_host(function()
-				local dep = { transitive_archives = {}, transitive_include_dirs = {}, transitive_linkopts = { "-lfoo" } }
+				local dep =
+					{ transitive_archives = {}, transitive_include_dirs = {}, transitive_linkopts = { "-lfoo" } }
 				local lib = library({ deps = { dep }, linkopts = { "-lown" } })
 				same(lib.transitive_linkopts, { "-lfoo" })
 			end)

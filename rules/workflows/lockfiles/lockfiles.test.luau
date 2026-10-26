@@ -101,7 +101,10 @@ return {
 				assert(roots[i].address == item.lockfile)
 			end
 			table.sort(names)
-			assert(table.concat(names, ",") == "biome-toolchain,cmake,crane,gcc,gcc-windows,kache,mold,nasm,node-toolchain,odin,odinfmt,pex-toolchain,pnpm-toolchain,ruff-toolchain,rust,uv-toolchain,zig,zola")
+			assert(
+				table.concat(names, ",")
+					== "biome-toolchain,cmake,crane,gcc,gcc-windows,kache,luau-analyze,mold,nasm,node-toolchain,odin,odinfmt,pex-toolchain,pnpm-toolchain,ruff-toolchain,rust,stylua,uv-toolchain,zig,zola"
+			)
 		end),
 		core.test.case("all declared roots regenerate exactly their registered versions", function()
 			local specs = lockfiles.builtin_lockfiles()
@@ -110,7 +113,10 @@ return {
 				for _, item in ipairs(specs) do
 					for _, version in ipairs(item.versions) do
 						for _, plat in ipairs(item.platforms) do
-							run.set_run_stdout(`lock {item.name} {version} {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+							run.set_run_stdout(
+								`lock {item.name} {version} {plat.os}/{plat.arch}`,
+								string.rep("ab", 32) .. "  artifact\n  42\n"
+							)
 						end
 					end
 				end
@@ -128,14 +134,20 @@ return {
 			for _, plat in ipairs(require("@imp/rules/odin/toolchain").supported_platforms()) do
 				table.insert(keys, `{plat.os}/{plat.arch}`)
 			end
-			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+			assert(
+				table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64",
+				table.concat(keys, ",")
+			)
 		end),
 		core.test.case("platforms: c/cmake/toolchain", function()
 			local keys = {}
 			for _, plat in ipairs(require("@imp/rules/c/cmake/toolchain").supported_platforms()) do
 				table.insert(keys, `{plat.os}/{plat.arch}`)
 			end
-			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64", table.concat(keys, ","))
+			assert(
+				table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64",
+				table.concat(keys, ",")
+			)
 		end),
 		core.test.case("platforms: c/gcc", function()
 			local keys = {}
@@ -156,21 +168,30 @@ return {
 			for _, plat in ipairs(require("@imp/rules/c/zig").supported_platforms()) do
 				table.insert(keys, `{plat.os}/{plat.arch}`)
 			end
-			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64", table.concat(keys, ","))
+			assert(
+				table.concat(keys, ",") == "linux/x86_64,linux/aarch64,windows/x86_64,windows/aarch64",
+				table.concat(keys, ",")
+			)
 		end),
 		core.test.case("platforms: zola", function()
 			local keys = {}
 			for _, plat in ipairs(require("@imp/rules/zola").supported_platforms()) do
 				table.insert(keys, `{plat.os}/{plat.arch}`)
 			end
-			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+			assert(
+				table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64",
+				table.concat(keys, ",")
+			)
 		end),
 		core.test.case("platforms: rust/toolchain", function()
 			local keys = {}
 			for _, plat in ipairs(require("@imp/rules/rust/toolchain").supported_platforms()) do
 				table.insert(keys, `{plat.os}/{plat.arch}`)
 			end
-			assert(table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64", table.concat(keys, ","))
+			assert(
+				table.concat(keys, ",") == "linux/x86_64,linux/aarch64,macos/x86_64,macos/aarch64,windows/x86_64",
+				table.concat(keys, ",")
+			)
 		end),
 	}),
 	core.test.suite("graph_generate_tool_lockfile", {
@@ -422,7 +443,10 @@ return {
 		core.test.case("registration requires a lockfile address and versions", function()
 			local text = error_text(lockfiles.register_builtin_lockfile, spec({ versions = { "1.0.0" } }))
 			assert(contains(text, "builtin lockfile for 'demo' must declare a lockfile address"), text)
-			text = error_text(lockfiles.register_builtin_lockfile, spec({ lockfile = `{TESTDATA}/demo.json`, versions = {} }))
+			text = error_text(
+				lockfiles.register_builtin_lockfile,
+				spec({ lockfile = `{TESTDATA}/demo.json`, versions = {} })
+			)
 			assert(contains(text, "builtin lockfile for 'demo' must declare at least one version"), text)
 		end),
 

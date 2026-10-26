@@ -20,6 +20,7 @@ require("@imp/rules/python/uv_toolchain")
 require("@imp/rules/rust/kache/toolchain")
 require("@imp/rules/rust/toolchain")
 require("@imp/rules/zola")
+require("@imp/rules/imp/luau/toolchain")
 
 --- Declare one authoritative regeneration task for each registered lockfile.
 local function builtin_lockfile_roots()

@@ -8,7 +8,12 @@ local function lock_case(workspace)
 			uv.reset_for_test()
 			uv.uv_toolchain("0.12.13", {})
 			local sources = core.files({ root = "rules/python/testdata/workspace", include = { "pyproject.toml" } })
-			local handle = lock.python_workspace_lock({ workspace = workspace, sources = sources, uv = uv.graph_toolchain("0.12.13").tool, python_version = "3.13.0" })
+			local handle = lock.python_workspace_lock({
+				workspace = workspace,
+				sources = sources,
+				uv = uv.graph_toolchain("0.12.13").tool,
+				python_version = "3.13.0",
+			})
 			local result = core.test.resolve(handle)
 			local path = if workspace == "." then "uv.lock" else workspace .. "/uv.lock"
 			assert(result.kind == "python-project-lock")
@@ -25,7 +30,11 @@ local function lock_case(workspace)
 			assert(table.find(action.tools, "uv"))
 			assert(table.find(action.tools, "uv-cache-dir"))
 			local writes = 0
-			for _, call in ipairs(host.calls) do if call[1] == "write_workspace" then writes += 1 end end
+			for _, call in ipairs(host.calls) do
+				if call[1] == "write_workspace" then
+					writes += 1
+				end
+			end
 			assert(writes == 0)
 			assert(action.outputs.lockfile == path)
 			assert(action.input_count == 1)

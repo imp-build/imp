@@ -306,15 +306,19 @@ return {
 			table.insert(sources, "rules/c/cmake/example/unrelated.json")
 			assert(replay.is_cmake_compiler_edge(compiler, graph.rules))
 			assert(not replay.is_cmake_compiler_edge(linker, graph.rules))
-			assert(same_list(
-				replay.compiler_workspace_sources(compiler, graph.rules, SANDBOX_ROOT, sources),
-				{ "rules/c/cmake/example/hello.c" }
-			))
+			assert(
+				same_list(
+					replay.compiler_workspace_sources(compiler, graph.rules, SANDBOX_ROOT, sources),
+					{ "rules/c/cmake/example/hello.c" }
+				)
+			)
 			assert(#replay.compiler_workspace_sources(linker, graph.rules, SANDBOX_ROOT, sources) == 0)
 		end),
 
 		core.test.case("recognizes Ninja's MSVC dependency mode", function()
-			assert(replay.is_cmake_compiler_edge({ rule = "CXX_COMPILER__app" }, { CXX_COMPILER__app = { deps = "msvc" } }))
+			assert(
+				replay.is_cmake_compiler_edge({ rule = "CXX_COMPILER__app" }, { CXX_COMPILER__app = { deps = "msvc" } })
+			)
 		end),
 
 		core.test.case("linker dependency mode does not make it a compiler edge", function()
@@ -330,7 +334,12 @@ return {
 				"    C:\\SDK\\include\\stdio.h",
 				"",
 			}, "\n"))
-			assert(same_list(deps["CMakeFiles/app.dir/main.c.obj"], { "../../main.c", "../../main.h", "C:/SDK/include/stdio.h" }))
+			assert(
+				same_list(
+					deps["CMakeFiles/app.dir/main.c.obj"],
+					{ "../../main.c", "../../main.h", "C:/SDK/include/stdio.h" }
+				)
+			)
 		end),
 
 		core.test.case("scan_manifest returns exact workspace headers", function()
@@ -437,7 +446,16 @@ return {
 		core.test.case("shows a broad input fallback in the edge display", function()
 			core.test.with_fake_toolchain_host(function(host)
 				core.test.resolve(
-					replay.replay_cmake_target(fake_spec(), fake_configured(), fixture_graph(), { "hello_cmake" }, {}, {}, SOURCE_PATHS, {})
+					replay.replay_cmake_target(
+						fake_spec(),
+						fake_configured(),
+						fixture_graph(),
+						{ "hello_cmake" },
+						{},
+						{},
+						SOURCE_PATHS,
+						{}
+					)
 				)
 				run_with(host, `cmake edge {HELLO_OBJ} [broad input fallback: no scan manifest]`)
 			end)
@@ -448,10 +466,23 @@ return {
 				local spec = fake_spec()
 				local configured = fake_configured()
 				local graph = fixture_graph()
-				local hello = replay.replay_cmake_target(spec, configured, graph, { "libhello_cmake.so" }, { "libhello_cmake.so" })
-				local main = replay.replay_cmake_target(spec, configured, graph, { "hello_cmake_main" }, { "hello_cmake_main" }, {
-					hello_cmake = { outputs = { "libhello_cmake.so" }, task = hello, file_indices = { 1 } },
-				})
+				local hello = replay.replay_cmake_target(
+					spec,
+					configured,
+					graph,
+					{ "libhello_cmake.so" },
+					{ "libhello_cmake.so" }
+				)
+				local main = replay.replay_cmake_target(
+					spec,
+					configured,
+					graph,
+					{ "hello_cmake_main" },
+					{ "hello_cmake_main" },
+					{
+						hello_cmake = { outputs = { "libhello_cmake.so" }, task = hello, file_indices = { 1 } },
+					}
+				)
 				core.test.resolve(main)
 				-- main.c.o is not replayed again by the hello_cmake task.
 				local main_link = run_with(host, "cmake edge hello_cmake_main")
@@ -493,7 +524,7 @@ return {
 				local link = run_with(host, "cmake edge libhello_cmake.so")
 				assert(link.argv[4] == "cmake-rsp" and link.argv[5] == "CMakeFiles/hello.rsp")
 				assert(link.argv[6] == HELLO_OBJ, tostring(link.argv[6]))
-				assert(contains(link.argv[3], 'for chunk; do printf'), link.argv[3])
+				assert(contains(link.argv[3], "for chunk; do printf"), link.argv[3])
 			end)
 		end),
 	}),
@@ -502,12 +533,14 @@ return {
 		core.test.case("uses the selected CMake toolchain for ctest", function()
 			core.test.with_fake_toolchain_host(function(host)
 				local selected = cmake_tools.graph_toolchain("3.31.0")
-				core.test.resolve(replay.run_ctest_task(
-					fake_spec({ cmake_toolchain = selected }),
-					fake_configured(),
-					fixture_graph(),
-					{ "hello_cmake_main" }
-				).outputs.units)
+				core.test.resolve(
+					replay.run_ctest_task(
+						fake_spec({ cmake_toolchain = selected }),
+						fake_configured(),
+						fixture_graph(),
+						{ "hello_cmake_main" }
+					).outputs.units
+				)
 				local ctest = run_with(host, `ctest {PROJECT}`)
 				assert(same_list(ctest.tools, { "cmake" }))
 				assert(run_with(host, "install cmake 3.31.0 (linux/x86_64)") ~= nil)
@@ -520,25 +553,29 @@ return {
 		core.test.case("uses the explicit CMake tool handle", function()
 			core.test.with_fake_toolchain_host(function(host)
 				local selected = { tool = core.native_tool("selected-cmake"), version = "3.31.0" }
-				core.test.resolve(replay.run_ctest_task(
-					fake_spec({ cmake_toolchain = selected }),
-					fake_configured(),
-					fixture_graph(),
-					{ "hello_cmake_main" }
-				).outputs.units)
+				core.test.resolve(
+					replay.run_ctest_task(
+						fake_spec({ cmake_toolchain = selected }),
+						fake_configured(),
+						fixture_graph(),
+						{ "hello_cmake_main" }
+					).outputs.units
+				)
 				assert(same_list(run_with(host, `ctest {PROJECT}`).tools, { "selected-cmake" }))
 			end)
 		end),
 
 		core.test.case("runs ctest for the correlated test names only", function()
 			core.test.with_fake_toolchain_host(function(host)
-				local units = core.test.resolve(replay.run_ctest_task(
-					fake_spec(),
-					fake_configured(),
-					fixture_graph(),
-					{ "hello_cmake_main" },
-					{ "hello_cmake_main_test" }
-				).outputs.units)
+				local units = core.test.resolve(
+					replay.run_ctest_task(
+						fake_spec(),
+						fake_configured(),
+						fixture_graph(),
+						{ "hello_cmake_main" },
+						{ "hello_cmake_main_test" }
+					).outputs.units
+				)
 				local ctest = run_with(host, `ctest {PROJECT}`)
 				assert(ctest.allow_failure == true)
 				assert(same_list(ctest.argv, {
@@ -569,6 +606,10 @@ return {
 		core.test.case("escapes regex characters in test names", function()
 			local args = replay.ctest_name_filter_args({ "a.b", "c+(d)" })
 			assert(same_list(args, { "-R", "^(a\\.b|c\\+\\(d\\))$" }), args[2])
+			assert(
+				replay.ctest_name_filter_args({ "x|y", "x[y]", "x\\y", "x{y}", "a-b_%" })[2]
+					== "^(x\\|y|x\\[y\\]|x\\\\y|x\\{y\\}|a-b_%)$"
+			)
 			assert(#replay.ctest_name_filter_args({}) == 0)
 		end),
 	}),
@@ -583,15 +624,18 @@ return {
 			assert(named[2].name == "hello_cmake_main" and named[2].type == "EXECUTABLE")
 		end),
 
-		core.test.case("cross_target_dependencies finds hello_cmake_main depends on hello_cmake, not the reverse", function()
-			local graph = fixture_graph()
-			local named = ninja.list_named_cmake_targets(graph)
-			local cross = expansion.cross_target_dependencies(named, graph)
-			assert(#cross.hello_cmake_main == 1)
-			assert(cross.hello_cmake_main[1].name == "hello_cmake")
-			assert(same_list(cross.hello_cmake_main[1].output_paths, { "libhello_cmake.so" }))
-			assert(#cross.hello_cmake == 0)
-		end),
+		core.test.case(
+			"cross_target_dependencies finds hello_cmake_main depends on hello_cmake, not the reverse",
+			function()
+				local graph = fixture_graph()
+				local named = ninja.list_named_cmake_targets(graph)
+				local cross = expansion.cross_target_dependencies(named, graph)
+				assert(#cross.hello_cmake_main == 1)
+				assert(cross.hello_cmake_main[1].name == "hello_cmake")
+				assert(same_list(cross.hello_cmake_main[1].output_paths, { "libhello_cmake.so" }))
+				assert(#cross.hello_cmake == 0)
+			end
+		),
 
 		core.test.case("topo_sort_targets orders hello_cmake before hello_cmake_main", function()
 			local graph = fixture_graph()
@@ -608,18 +652,24 @@ return {
 			assert(contains(message, "cyclic target dependency detected among a, b"), message)
 		end),
 
-		core.test.case("build_target_deps mounts every one of a dependency's referenced outputs, not just one", function()
-			local graph = ninja.parse_ninja(WINDOWS_BUILD, function()
-				return WINDOWS_RULES
-			end)
-			local named = ninja.list_named_cmake_targets(graph)
-			local cross = expansion.cross_target_dependencies(named, graph)
-			assert(same_list(cross.hello_cmake_main[1].output_paths, { "libhello_cmake.dll", "libhello_cmake.dll.a" }))
-			local deps = expansion.build_target_deps("hello_cmake_main", named, cross, { hello_cmake = "FAKE_TASK" })
-			assert(same_list(deps.hello_cmake.file_indices, { 1, 2 }))
-			assert(same_list(deps.hello_cmake.outputs, { "libhello_cmake.dll", "libhello_cmake.dll.a" }))
-			assert(deps.hello_cmake.task == "FAKE_TASK")
-		end),
+		core.test.case(
+			"build_target_deps mounts every one of a dependency's referenced outputs, not just one",
+			function()
+				local graph = ninja.parse_ninja(WINDOWS_BUILD, function()
+					return WINDOWS_RULES
+				end)
+				local named = ninja.list_named_cmake_targets(graph)
+				local cross = expansion.cross_target_dependencies(named, graph)
+				assert(
+					same_list(cross.hello_cmake_main[1].output_paths, { "libhello_cmake.dll", "libhello_cmake.dll.a" })
+				)
+				local deps =
+					expansion.build_target_deps("hello_cmake_main", named, cross, { hello_cmake = "FAKE_TASK" })
+				assert(same_list(deps.hello_cmake.file_indices, { 1, 2 }))
+				assert(same_list(deps.hello_cmake.outputs, { "libhello_cmake.dll", "libhello_cmake.dll.a" }))
+				assert(deps.hello_cmake.task == "FAKE_TASK")
+			end
+		),
 
 		core.test.case("cmake_project records its spec and returns an expansion", function()
 			local before = #expansion.cmake_project_specs()

@@ -23,29 +23,42 @@ local function supported_platforms()
 	return result
 end
 local function artifact_name(version, plat)
-	local triple = assert(triples[`{plat.os}-{plat.arch}`], `unsupported zola toolchain platform: {plat.os}/{plat.arch}`)
+	local triple =
+		assert(triples[`{plat.os}-{plat.arch}`], `unsupported zola toolchain platform: {plat.os}/{plat.arch}`)
 	return `zola-v{version}-{triple}.{if plat.os == "windows" then "zip" else "tar.gz"}`
 end
 local function download_url(version, plat)
 	return `https://github.com/getzola/zola/releases/download/v{version}/{artifact_name(version, plat)}`
 end
-local function cache_key(version, plat) return `{version}/{plat.os}-{plat.arch}` end
+local function cache_key(version, plat)
+	return `{version}/{plat.os}-{plat.arch}`
+end
 local SPEC = lockfiles.register_toolchain_lockfile({
-	name = "zola", platforms = supported_platforms(), artifact_name = artifact_name,
-	download_url = download_url, lockfile = DEFAULT_LOCKFILE,
+	name = "zola",
+	platforms = supported_platforms(),
+	artifact_name = artifact_name,
+	download_url = download_url,
+	lockfile = DEFAULT_LOCKFILE,
 }, { "0.22.1", "0.23.6" })
 local function make_graph(version)
 	local plat = core.platform_info()
 	local key = cache_key(version, plat)
 	local downloaded = lockfile.download_tool_artifact({
-		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE), tool = "zola",
-		version = version, plat = plat, url = download_url(version, plat),
+		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE),
+		tool = "zola",
+		version = version,
+		plat = plat,
+		url = download_url(version, plat),
 		output = `zola-downloads/{key}/{artifact_name(version, plat)}`,
-		display = `download zola {version}`, unverified = KIND.resolve_unverified(version),
+		display = `download zola {version}`,
+		unverified = KIND.resolve_unverified(version),
 	})
 	local directory = archive.extract_archive({
-		archive = downloaded, dest = "zola-toolchain", format = if plat.os == "windows" then "zip" else "tar.gz",
-		named_cache = { name = "zola-toolchains", key = key }, display = `install zola {version}`,
+		archive = downloaded,
+		dest = "zola-toolchain",
+		format = if plat.os == "windows" then "zip" else "tar.gz",
+		named_cache = { name = "zola-toolchains", key = key },
+		display = `install zola {version}`,
 	})
 	return table.freeze({ tool = core.tool(directory, { name = "zola", bin_dirs = { "." } }), version = version })
 end
@@ -61,13 +74,19 @@ local function zola_toolchain(version, options)
 	local spec = table.clone(SPEC)
 	spec.version = version
 	spec.lockfile = address
-	return { version = version, lockfile = address, [lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec) }
+	return {
+		version = version,
+		lockfile = address,
+		[lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec),
+	}
 end
 
 --- Return { tool, version } for a declared or default version.
 local function graph_toolchain(version)
 	local resolved = KIND.require_version(version)
-	if graphs[resolved] == nil then graphs[resolved] = make_graph(resolved) end
+	if graphs[resolved] == nil then
+		graphs[resolved] = make_graph(resolved)
+	end
 	return graphs[resolved]
 end
 
@@ -95,9 +114,14 @@ end)
 return {
 	ZOLA = KIND,
 	--- @category configuration
-	zola_toolchain = zola_toolchain, graph_toolchain = graph_toolchain,
-	zola_bin = zola_bin, cache_key = cache_key, artifact_name = artifact_name,
-	download_url = download_url, supported_platforms = supported_platforms,
-	default_version = KIND.default_version, resolve_version = KIND.resolve_version,
+	zola_toolchain = zola_toolchain,
+	graph_toolchain = graph_toolchain,
+	zola_bin = zola_bin,
+	cache_key = cache_key,
+	artifact_name = artifact_name,
+	download_url = download_url,
+	supported_platforms = supported_platforms,
+	default_version = KIND.default_version,
+	resolve_version = KIND.resolve_version,
 	reset_for_test = reset_for_test,
 }

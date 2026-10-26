@@ -145,10 +145,7 @@ local function cc_toolchain_for_platform(by_os)
 		if branch == nil then
 			local configured = sorted_keys(branches)
 			local names = if #configured > 0 then table.concat(configured, ", ") else "none"
-			error(
-				`no cc toolchain configured for platform '{target_platform.os}' (configured: {names})`,
-				2
-			)
+			error(`no cc toolchain configured for platform '{target_platform.os}' (configured: {names})`, 2)
 		end
 		return if type(branch) == "function" then branch() else branch
 	end

@@ -101,7 +101,15 @@ return {
 		core.test.case("a missing OS fails and names the configured ones", function()
 			local union = c_toolchain.cc_toolchain_for_platform({ windows = {}, linux = {} })
 			local text = error_text(union.select, { os = "macos", arch = "aarch64" })
-			assert(string.find(text, "no cc toolchain configured for platform 'macos' (configured: linux, windows)", 1, true), text)
+			assert(
+				string.find(
+					text,
+					"no cc toolchain configured for platform 'macos' (configured: linux, windows)",
+					1,
+					true
+				),
+				text
+			)
 			local empty = c_toolchain.cc_toolchain_for_platform({})
 			text = error_text(empty.select, LINUX)
 			assert(string.find(text, "(configured: none)", 1, true), text)

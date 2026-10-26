@@ -6,7 +6,9 @@ local treesitter = require("@imp/rules/treesitter")
 
 local function find(host, display)
 	for _, action in ipairs(host.runs) do
-		if action.display == display then return action end
+		if action.display == display then
+			return action
+		end
 	end
 	error("missing action " .. display)
 end
@@ -23,12 +25,21 @@ return {
 	end),
 	core.test.case("compiles only C sources and stages grammar headers", function()
 		core.test.with_fake_toolchain_host(function(host)
-			for name, fixture in pairs({ json = treesitter.json_grammar_fixture, odin = treesitter.odin_grammar_fixture }) do
-				local paths = core.test.resolve(core.task({ inputs = { sources = fixture.sources }, outputs = { paths = core.output.value() }, run = function(exec, input)
-					return { paths = exec.paths(input.sources) }
-				end }).outputs.paths)
+			for name, fixture in pairs({
+				json = treesitter.json_grammar_fixture,
+				odin = treesitter.odin_grammar_fixture,
+			}) do
+				local paths = core.test.resolve(core.task({
+					inputs = { sources = fixture.sources },
+					outputs = { paths = core.output.value() },
+					run = function(exec, input)
+						return { paths = exec.paths(input.sources) }
+					end,
+				}).outputs.paths)
 				assert(table.find(paths, `treesitter/testdata/tree-sitter-{name}/tree_sitter/parser.h`))
-				for _, path in ipairs(paths) do assert(not string.match(path, "%.so$")) end
+				for _, path in ipairs(paths) do
+					assert(not string.match(path, "%.so$"))
+				end
 				core.test.resolve(fixture.archive)
 				local action = find(host, `compile Tree-sitter {name} grammar`)
 				assert(string.find(action.argv[1], "/cache/gcc-toolchains/", 1, true))
@@ -36,8 +47,12 @@ return {
 				assert(action.argv[4] == `-Itreesitter/testdata/tree-sitter-{name}`)
 				assert(table.find(action.argv, `treesitter/testdata/tree-sitter-{name}/parser.c`))
 				assert(action.outputs.archive == `build/treesitter/{name}.so` and action.input_count == 1)
-				for _, arg in ipairs(action.argv) do assert(not string.match(arg, "%.h$")) end
-				if name == "odin" then assert(table.find(action.argv, "treesitter/testdata/tree-sitter-odin/scanner.c")) end
+				for _, arg in ipairs(action.argv) do
+					assert(not string.match(arg, "%.h$"))
+				end
+				if name == "odin" then
+					assert(table.find(action.argv, "treesitter/testdata/tree-sitter-odin/scanner.c"))
+				end
 			end
 		end)
 	end),

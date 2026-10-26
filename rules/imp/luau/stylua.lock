@@ -1,0 +1,37 @@
+{
+  "tool": "stylua",
+  "versions": {
+    "2.6.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-linux-x86_64.zip",
+        "artifact": "stylua-linux-x86_64.zip",
+        "size": 3329702,
+        "sha256": "a485f72bbfa22e4642e77a84b5edc2611a5cab7477b34e2e709dd8f78e919895"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-linux-aarch64.zip",
+        "artifact": "stylua-linux-aarch64.zip",
+        "size": 3315900,
+        "sha256": "8e67539e5fdf7a81cd03cf592b0df18d3bb96ee17a5ea5d9bf67b86387b903b0"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-macos-x86_64.zip",
+        "artifact": "stylua-macos-x86_64.zip",
+        "size": 3139236,
+        "sha256": "90779aa873837b2dff8eb3361bd27950303914c24265a59cae0a0d0629d71585"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-macos-aarch64.zip",
+        "artifact": "stylua-macos-aarch64.zip",
+        "size": 3038001,
+        "sha256": "dab9b66d340ca5ffc8225211f1dcf89b84783e09b8cbec8c518497eba81f3c42"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-windows-x86_64.zip",
+        "artifact": "stylua-windows-x86_64.zip",
+        "size": 2946498,
+        "sha256": "fd13b4014e3b779c244bbc03f2c282e357f15bc526de6a6fa5ecbc447538313c"
+      }
+    }
+  }
+}

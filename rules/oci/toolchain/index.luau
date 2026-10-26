@@ -29,23 +29,35 @@ end
 local function download_url(version, plat)
 	return `https://github.com/google/go-containerregistry/releases/download/v{version}/{artifact_name(version, plat)}`
 end
-local function cache_key(version, plat) return `{version}/{plat.os}-{plat.arch}` end
+local function cache_key(version, plat)
+	return `{version}/{plat.os}-{plat.arch}`
+end
 local SPEC = lockfiles.register_toolchain_lockfile({
-	name = "crane", platforms = supported_platforms(), artifact_name = artifact_name,
-	download_url = download_url, lockfile = DEFAULT_LOCKFILE,
+	name = "crane",
+	platforms = supported_platforms(),
+	artifact_name = artifact_name,
+	download_url = download_url,
+	lockfile = DEFAULT_LOCKFILE,
 }, { "0.20.6", "0.21.9", "0.22.1" })
 local function make_graph(version)
 	local plat = core.platform_info()
 	local key = cache_key(version, plat)
 	local downloaded = lockfile.download_tool_artifact({
-		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE), tool = "crane",
-		version = version, plat = plat, url = download_url(version, plat),
+		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE),
+		tool = "crane",
+		version = version,
+		plat = plat,
+		url = download_url(version, plat),
 		output = `crane-downloads/{key}/{artifact_name(version, plat)}`,
-		display = `download crane {version}`, unverified = KIND.resolve_unverified(version),
+		display = `download crane {version}`,
+		unverified = KIND.resolve_unverified(version),
 	})
 	local directory = archive.extract_archive({
-		archive = downloaded, dest = "crane-toolchain", format = "tar.gz",
-		named_cache = { name = "crane-toolchains", key = key }, display = `install crane {version}`,
+		archive = downloaded,
+		dest = "crane-toolchain",
+		format = "tar.gz",
+		named_cache = { name = "crane-toolchains", key = key },
+		display = `install crane {version}`,
 	})
 	return table.freeze({ tool = core.tool(directory, { name = "crane", bin_dirs = { "." } }), version = version })
 end
@@ -61,13 +73,19 @@ local function crane_toolchain(version, options)
 	local spec = table.clone(SPEC)
 	spec.version = version
 	spec.lockfile = address
-	return { version = version, lockfile = address, [lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec) }
+	return {
+		version = version,
+		lockfile = address,
+		[lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec),
+	}
 end
 
 --- Return { tool, version } for a declared or default version.
 local function graph_toolchain(version)
 	local resolved = KIND.require_version(version)
-	if graphs[resolved] == nil then graphs[resolved] = make_graph(resolved) end
+	if graphs[resolved] == nil then
+		graphs[resolved] = make_graph(resolved)
+	end
 	return graphs[resolved]
 end
 
@@ -95,9 +113,14 @@ end)
 return {
 	CRANE = KIND,
 	--- @category configuration
-	crane_toolchain = crane_toolchain, graph_toolchain = graph_toolchain,
-	crane_bin = crane_bin, cache_key = cache_key, artifact_name = artifact_name,
-	download_url = download_url, supported_platforms = supported_platforms,
-	default_version = KIND.default_version, resolve_version = KIND.resolve_version,
+	crane_toolchain = crane_toolchain,
+	graph_toolchain = graph_toolchain,
+	crane_bin = crane_bin,
+	cache_key = cache_key,
+	artifact_name = artifact_name,
+	download_url = download_url,
+	supported_platforms = supported_platforms,
+	default_version = KIND.default_version,
+	resolve_version = KIND.resolve_version,
 	reset_for_test = reset_for_test,
 }

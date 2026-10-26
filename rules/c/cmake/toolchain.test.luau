@@ -91,7 +91,11 @@ return {
 				assert(extract.display == "install cmake 3.30.5 (linux/x86_64)", extract.display)
 				local published = false
 				for _, call in ipairs(host.calls) do
-					if call[1] == "named_cache" and call[2] == "cmake-toolchains" and call[3] == "3.30.5/linux-x86_64" then
+					if
+						call[1] == "named_cache"
+						and call[2] == "cmake-toolchains"
+						and call[3] == "3.30.5/linux-x86_64"
+					then
 						published = true
 					end
 				end
@@ -123,7 +127,9 @@ return {
 
 		core.test.case("names release artifacts per platform", function()
 			assert(cmake.artifact_name("4.4.3", LINUX) == "cmake-4.4.3-linux-x86_64.tar.gz")
-			assert(cmake.artifact_name("4.4.3", { os = "windows", arch = "aarch64" }) == "cmake-4.4.3-windows-arm64.zip")
+			assert(
+				cmake.artifact_name("4.4.3", { os = "windows", arch = "aarch64" }) == "cmake-4.4.3-windows-arm64.zip"
+			)
 			assert(
 				cmake.download_url("4.4.3", LINUX)
 					== "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz"
@@ -179,9 +185,13 @@ return {
 			core.test.with_fake_run(function(run)
 				cmake.reset_for_test()
 				for _, plat in ipairs(cmake.supported_platforms()) do
-					run.set_run_stdout(`lock cmake 3.30.5 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					run.set_run_stdout(
+						`lock cmake 3.30.5 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
-				local declared = cmake.cmake_toolchain("3.30.5", { default = true, lockfile = "@workspace/locks/cmake.lock" })
+				local declared =
+					cmake.cmake_toolchain("3.30.5", { default = true, lockfile = "@workspace/locks/cmake.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/cmake.lock", result.path)
 				local written = false

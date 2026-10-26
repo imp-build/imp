@@ -105,7 +105,12 @@ local function normalize_generated_srcs(entries, options)
 			for _, expected_path in ipairs(entry.paths) do
 				table.insert(normalized, { artifact = entry.files[expected_path], expected_path = expected_path })
 			end
-		elseif type(entry) == "table" and type(entry.artifact) == "userdata" and type(entry.path) == "string" and entry.path ~= "" then
+		elseif
+			type(entry) == "table"
+			and type(entry.artifact) == "userdata"
+			and type(entry.path) == "string"
+			and entry.path ~= ""
+		then
 			table.insert(normalized, { artifact = entry.artifact, expected_path = resolve_path(entry.path) })
 		else
 			error(

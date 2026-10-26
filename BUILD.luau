@@ -1,10 +1,23 @@
 local asset = require("@imp/rules/asset")
 local core = require("@imp/core")
 local codegen = require("@imp/rules/imp/codegen")
+local luau = require("@imp/rules/imp/luau")
 return {
+	luau_sources = luau.luau_sources({
+		srcs = { "*.luau", "rules/**/*.luau", "crates/**/*.luau", "docs/**/*.luau", "ci/**/*.luau" },
+		exclude = { "**/target/**" },
+	}),
 	generated_stamp = codegen.stamp_file({ output = "generated/imp-stamp.txt", text = "imp build ran" }),
 	rulesTree = asset.resource_package({ srcs = { "rules/**/*" } }),
-	luauWorkspace = asset.resource_package({ srcs = { "imp.workspace.luau", "imp.workspace.ci.luau", "BUILD.luau", "crates/**/BUILD.luau", "docs/core_api.luau" } }),
+	luauWorkspace = asset.resource_package({
+		srcs = {
+			"imp.workspace.luau",
+			"imp.workspace.ci.luau",
+			"BUILD.luau",
+			"crates/**/BUILD.luau",
+			"docs/core_api.luau",
+		},
+	}),
 	testTar = core.native_tool("tar"),
 	testGzip = core.native_tool("gzip"),
 	testCmake = core.native_tool("cmake"),

@@ -29,10 +29,13 @@ local mold = require("@imp/rules/c/mold").default_graph_toolchain()
 local kache = require("@imp/rules/rust/kache").default_toolchain()
 require("@imp/rules/odin").odin_toolchain("dev-2026-03", { default = true, linker = mold })
 rust.rust_toolchain("1.93.0", { default = true, linker = mold, kache = kache })
+local luau = require("@imp/rules/imp/luau")
+luau.stylua_toolchain("2.6.0", { default = true })
+luau.luau_analyzer_toolchain("0.709", { default = true })
 return {
-    cache = { gc_max_age_days = 7 },
-    imp = { jobs = 8, js_workers = 1 },
-    c = { build_generate = true },
-    rust = { build_generate = true, doctest = false },
-    odin = { build_generate = true },
+	cache = { gc_max_age_days = 7 },
+	imp = { jobs = 8, js_workers = 1 },
+	c = { build_generate = true },
+	rust = { build_generate = true, doctest = false },
+	odin = { build_generate = true },
 }

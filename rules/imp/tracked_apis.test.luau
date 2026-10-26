@@ -13,11 +13,13 @@ return {
 						argv = { "sh", "-c", "printf hello; printf tracked > tracked.txt" },
 						outputs = { file = output.file("tracked.txt") },
 					})
-					return { result = {
-						code = result.exit_code,
-						stdout = result.stdout,
-						contents = core.read_file_in_digest(exec.digest(result.outputs.file), "tracked.txt"),
-					} }
+					return {
+						result = {
+							code = result.exit_code,
+							stdout = result.stdout,
+							contents = core.read_file_in_digest(exec.digest(result.outputs.file), "tracked.txt"),
+						},
+					}
 				end,
 			})
 			local result = core.test.resolve(probe.outputs.result)

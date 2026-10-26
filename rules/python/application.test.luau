@@ -9,7 +9,11 @@ local function options()
 	return { base = "rules/python/example", sources = { "src/**/*.py" }, entry_point = "hello.__main__" }
 end
 local function action(host, display)
-	for _, value in ipairs(host.runs) do if value.display == display then return value end end
+	for _, value in ipairs(host.runs) do
+		if value.display == display then
+			return value
+		end
+	end
 	error(`missing action {display}`)
 end
 return {
@@ -24,7 +28,9 @@ return {
 			assert(value.inputs[3].from == "rules/python/example")
 			assert(value.inputs[3].to == ".imp-pex-sources")
 			assert(table.find(value.inputs[3].paths, "rules/python/example/src/hello/__main__.py"))
-			for _, tool in ipairs({ "cp", "mkdir", "dirname" }) do assert(not table.find(value.tools, tool)) end
+			for _, tool in ipairs({ "cp", "mkdir", "dirname" }) do
+				assert(not table.find(value.tools, tool))
+			end
 			assert(table.find(value.argv, ".imp-pex-sources"))
 			assert(not table.find(value.argv, "rules/python/example/src/hello/__main__.py"))
 			assert(value.env.UV_CACHE_DIR == "/cache/uv-cache-dir/shared")
@@ -54,14 +60,21 @@ return {
 			assert(description.env.IMP_PYTHON_BUILD_VERSION == "3.12.4")
 			assert(#description.inputs == 1 and #description.tools == 3)
 			assert(table.find(action(host, "python-app build rules/python/example").argv, "3.12.4"))
-			for _, value in ipairs(host.runs) do assert(value.display ~= "python run rules/python/example") end
+			for _, value in ipairs(host.runs) do
+				assert(value.display ~= "python run rules/python/example")
+			end
 		end)
 	end),
 	core.test.case("test reports failed and passed files", function()
 		core.test.with_fake_toolchain_host(function(host)
-			host.set_run_stdout("python test rules/python/example", "FAILED tests/fail.py::test_bad - assertion\nPASSED tests/pass.py::test_ok\nERROR tests/fail.py::test_other\n")
+			host.set_run_stdout(
+				"python test rules/python/example",
+				"FAILED tests/fail.py::test_bad - assertion\nPASSED tests/pass.py::test_ok\nERROR tests/fail.py::test_other\n"
+			)
 			host.set_run_exit_code("python test rules/python/example", 1)
-			local value = core.test.resolve(python.python_test({ base = "rules/python/example", sources = { "tests/**/*.py" } })[test.TEST])
+			local value = core.test.resolve(
+				python.python_test({ base = "rules/python/example", sources = { "tests/**/*.py" } })[test.TEST]
+			)
 			assert(#value == 2 and value[1].name == "tests/fail.py" and not value[1].ok)
 			assert(string.find(value[1].output, "assertion", 1, true))
 			assert(value[2].ok and value[2].output == nil)
@@ -99,7 +112,10 @@ return {
 		end
 		python.register_python_app_hook(app_hook)
 		python.register_python_app_hook(app_hook)
-		python.register_python_app_hook(function(info) assert(info.extension) return { second_extension = true } end)
+		python.register_python_app_hook(function(info)
+			assert(info.extension)
+			return { second_extension = true }
+		end)
 		python.register_python_test_hook(function(info)
 			test_calls += 1
 			assert(info.python_sources and info.source_patterns[1] == "*.py")
@@ -118,7 +134,9 @@ return {
 			core.test.resolve(python.python_app(config)[build.BUILD])
 			assert(table.find(action(host, "python-app build rules/python/example").argv, "3.13.0"))
 			assert(table.find(action(host, "python-app build rules/python/example").tools, "git"))
-			core.test.resolve(python.python_test({ base = "rules/python/example", python_version = "3.13.0" })[test.TEST])
+			core.test.resolve(
+				python.python_test({ base = "rules/python/example", python_version = "3.13.0" })[test.TEST]
+			)
 			assert(table.find(action(host, "python test rules/python/example").argv, "3.13.0"))
 			local ws = python.python_workspace({ path = "rules/python/example" })
 			core.test.resolve(ws[lockfiles.GEN_LOCKFILES])

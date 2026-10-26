@@ -25,7 +25,15 @@ return {
 				for _, value in { 0, -1, 1.5, math.huge, -math.huge, 0 / 0, 4294967296, "2", true, {} } do
 					local ok, problem = pcall(core.test.resolve, action(value))
 					assert(not ok, "accepted invalid cores")
-					assert(string.find(tostring(problem), "exec.action().cores must be an integer of 1 or more within the u32 range", 1, true), tostring(problem))
+					assert(
+						string.find(
+							tostring(problem),
+							"exec.action().cores must be an integer of 1 or more within the u32 range",
+							1,
+							true
+						),
+						tostring(problem)
+					)
 				end
 				assert(#host.runs == 0)
 			end)

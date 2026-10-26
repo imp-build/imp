@@ -115,7 +115,9 @@ end
 local function download_url(version, plat)
 	require_supported_platform(plat)
 	if plat.os == "windows" then
-		return `https://github.com/brechtsanders/winlibs_mingw/releases/download/{version}/{winlibs_artifact_name(version)}`
+		return `https://github.com/brechtsanders/winlibs_mingw/releases/download/{version}/{winlibs_artifact_name(
+			version
+		)}`
 	end
 	local arch = BOOTLIN_ARCH[plat.arch]
 	return `https://toolchains.bootlin.com/downloads/releases/toolchains/{arch}/tarballs/{artifact_name(version, plat)}`
@@ -267,7 +269,8 @@ local function install_directory(version)
 		run = function(exec, resolved)
 			local argv
 			if windows then
-				argv = { "sh", "-c", WINDOWS_INSTALL_SCRIPT, "gcc-install", exec.path(resolved.archive), "gcc-toolchain" }
+				argv =
+					{ "sh", "-c", WINDOWS_INSTALL_SCRIPT, "gcc-install", exec.path(resolved.archive), "gcc-toolchain" }
 			else
 				argv = {
 					"sh",
@@ -615,7 +618,14 @@ toolchain.register("gcc", function()
 		inputs = { tool = graph_toolchain().tool },
 		outputs = { value = core.output.value() },
 		run = function(exec, inputs)
-			return { value = toolchain.bin(exec, inputs.tool, { sub_dir = "bin", exe = if core.platform_info().os == "windows" then "gcc.exe" else `{GCC_EXE_PREFIX[core.platform_info().arch]}-gcc` }) }
+			return {
+				value = toolchain.bin(exec, inputs.tool, {
+					sub_dir = "bin",
+					exe = if core.platform_info().os == "windows"
+						then "gcc.exe"
+						else `{GCC_EXE_PREFIX[core.platform_info().arch]}-gcc`,
+				}),
+			}
 		end,
 	}).outputs.value
 end)

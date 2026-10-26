@@ -31,7 +31,9 @@ local function program_for(address, result)
 	-- paths or to staged paths under `$IMP_SANDBOX_ROOT`.
 	if type(result.argv) == "table" then
 		if type(result.digest) ~= "string" and type(result.inputs) ~= "table" then
-			core.goal_error(`{address}: a run graph root that describes a program must supply inputs or a digest to stage`)
+			core.goal_error(
+				`{address}: a run graph root that describes a program must supply inputs or a digest to stage`
+			)
 		end
 		return {
 			argv = result.argv,

@@ -39,7 +39,10 @@ return {
 				assert(type(result.out1) == "userdata" and type(result.out2) == "userdata")
 				assert(type(result.before) == "string" and #result.before > 0)
 				assert(#host.runs == 1)
-				assert(host.runs[1].display == "generate rules/imp/testdata/lockfile/ruff.json rules/imp/testdata/missing.txt")
+				assert(
+					host.runs[1].display
+						== "generate rules/imp/testdata/lockfile/ruff.json rules/imp/testdata/missing.txt"
+				)
 				assert(host.runs[1].outputs.out2 == "rules/imp/testdata/missing.txt")
 			end)
 		end),
@@ -108,7 +111,9 @@ return {
 				return { "true" }
 			end
 			for _, options in ipairs({ { argv = argv }, { output_paths = {}, argv = argv } }) do
-				assert(contains(error_text(generate.generated_files, options), "requires a non-empty output_paths array"))
+				assert(
+					contains(error_text(generate.generated_files, options), "requires a non-empty output_paths array")
+				)
 			end
 			local text = error_text(generate.generated_files, { output_paths = { "a" }, argv = { "true" } })
 			assert(contains(text, "requires an argv(exec, inputs) function"), text)
@@ -180,9 +185,12 @@ return {
 		end),
 
 		core.test.case("is not stale for a change to a different path", function()
-			core.test.with_fake_diff({ { type = "removed", path = "gen/b.txt" }, { type = "added", path = "ge" } }, function()
-				assert(not generate.generated_file_is_stale("gen/a.txt", "before", "after"))
-			end)
+			core.test.with_fake_diff(
+				{ { type = "removed", path = "gen/b.txt" }, { type = "added", path = "ge" } },
+				function()
+					assert(not generate.generated_file_is_stale("gen/a.txt", "before", "after"))
+				end
+			)
 		end),
 	}),
 
@@ -223,7 +231,8 @@ return {
 			core.test.with_fake_goal_flags({ check = true }, function()
 				core.test.with_fake_diff({ { type = "modified", path = "gen/a.txt" } }, function()
 					core.test.with_fake_write_workspace(function(writes)
-						local text = error_text(generate_workflow.graph_generate_goal, { root({ "gen/a.txt", "gen/b.txt" }) })
+						local text =
+							error_text(generate_workflow.graph_generate_goal, { root({ "gen/a.txt", "gen/b.txt" }) })
 						assert(contains(text, "generated files are out of date:\n  gen/a.txt"), text)
 						assert(not contains(text, "gen/b.txt"), text)
 						assert(#writes.calls == 0)

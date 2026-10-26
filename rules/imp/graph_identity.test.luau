@@ -80,6 +80,7 @@ return {
 						if outputs.result then
 							return { result = calls }
 						end
+						return nil
 					end,
 				})
 			end
@@ -157,7 +158,13 @@ return {
 				{ core.native_tool("sh"), "native_tool" },
 			}) do
 				local text = error_text(core.test.resolve, case[1])
-				assert(contains(text, "core.test.resolve expects a task, task output, or program graph handle, got " .. case[2]), text)
+				assert(
+					contains(
+						text,
+						"core.test.resolve expects a task, task output, or program graph handle, got " .. case[2]
+					),
+					text
+				)
 			end
 		end),
 

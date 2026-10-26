@@ -91,7 +91,11 @@ return {
 				assert(extract.display == "install ruff 0.16.7", extract.display)
 				local published = false
 				for _, call in ipairs(host.calls) do
-					if call[1] == "named_cache" and call[2] == "ruff-toolchains" and call[3] == "0.16.7/linux-x86_64" then
+					if
+						call[1] == "named_cache"
+						and call[2] == "ruff-toolchains"
+						and call[3] == "0.16.7/linux-x86_64"
+					then
 						published = true
 					end
 				end
@@ -110,7 +114,6 @@ return {
 				assert(#host.runs == 0)
 			end)
 		end),
-
 	}),
 
 	core.test.suite("ruff workspace lockfile selection", {
@@ -153,9 +156,13 @@ return {
 			core.test.with_fake_run(function(run)
 				ruff.reset_for_test()
 				for _, plat in ipairs(ruff.supported_platforms()) do
-					run.set_run_stdout(`lock ruff-toolchain 0.16.7 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					run.set_run_stdout(
+						`lock ruff-toolchain 0.16.7 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
-				local declared = ruff.ruff_toolchain("0.16.7", { default = true, lockfile = "@workspace/locks/ruff.lock" })
+				local declared =
+					ruff.ruff_toolchain("0.16.7", { default = true, lockfile = "@workspace/locks/ruff.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/ruff.lock", result.path)
 				local written = false
@@ -189,13 +196,26 @@ return {
 
 	core.test.suite("Ruff local install", {
 		core.test.case("rejects undeclared host paths", function()
-			assert(contains(error_text(ruff.install_ruff_toolchain, "local", "/tmp/ruff"), "declared directory artifact or path handle"))
+			assert(
+				contains(
+					error_text(ruff.install_ruff_toolchain, "local", "/tmp/ruff"),
+					"declared directory artifact or path handle"
+				)
+			)
 		end),
 		core.test.case("publishes a local directory in a content-keyed cache", function()
 			with_ruff_host(function(host)
-				local source = core.task({ outputs = { directory = core.output.artifact() }, run = function(exec)
-					return { directory = exec.action({ argv = { "sh", "-c", "true" }, outputs = { directory = core.output.directory("local") } }).outputs.directory }
-				end })
+				local source = core.task({
+					outputs = { directory = core.output.artifact() },
+					run = function(exec)
+						return {
+							directory = exec.action({
+								argv = { "sh", "-c", "true" },
+								outputs = { directory = core.output.directory("local") },
+							}).outputs.directory,
+						}
+					end,
+				})
 				ruff.install_ruff_toolchain("local", source.outputs.directory, { default = true })
 				local path = install("local")
 				assert(contains(path, "/cache/ruff-local-toolchains/local/linux-x86_64/"), path)
@@ -209,10 +229,17 @@ return {
 	core.test.suite("ruff platform contract", {
 		core.test.case("preserves artifact names and cache keys", function()
 			assert(ruff.artifact_name("0.16.7", WINDOWS) == "ruff-x86_64-pc-windows-msvc.zip")
-			assert(ruff.artifact_name("0.16.7", { os = "macos", arch = "aarch64" }) == "ruff-aarch64-apple-darwin.tar.gz")
+			assert(
+				ruff.artifact_name("0.16.7", { os = "macos", arch = "aarch64" }) == "ruff-aarch64-apple-darwin.tar.gz"
+			)
 			assert(ruff.cache_key("0.16.7", WINDOWS) == "0.16.7/windows-x86_64")
 			assert(#ruff.supported_platforms() == 5)
-			assert(contains(error_text(ruff.artifact_name, "0.16.7", { os = "linux", arch = "riscv64" }), "unsupported ruff toolchain platform: linux/riscv64"))
+			assert(
+				contains(
+					error_text(ruff.artifact_name, "0.16.7", { os = "linux", arch = "riscv64" }),
+					"unsupported ruff toolchain platform: linux/riscv64"
+				)
+			)
 		end),
 		core.test.case("installs on Windows", function()
 			with_ruff_host(WINDOWS, function(host)

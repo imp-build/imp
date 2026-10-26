@@ -16,7 +16,14 @@ local tokens = {
 }
 local function supported_platforms()
 	local result = {}
-	for _, key in ipairs({ "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64", "windows-aarch64" }) do
+	for _, key in ipairs({
+		"linux-x86_64",
+		"linux-aarch64",
+		"macos-x86_64",
+		"macos-aarch64",
+		"windows-x86_64",
+		"windows-aarch64",
+	}) do
 		local os, arch = string.match(key, "^([^-]+)%-(.+)$")
 		table.insert(result, { os = os, arch = arch })
 	end
@@ -30,44 +37,70 @@ end
 local function download_url(version, plat)
 	return `https://github.com/biomejs/biome/releases/download/@biomejs/biome@{version}/{artifact_name(version, plat)}`
 end
-local function cache_key(version, plat) return `{version}/{plat.os}-{plat.arch}` end
+local function cache_key(version, plat)
+	return `{version}/{plat.os}-{plat.arch}`
+end
 local SPEC = lockfiles.register_toolchain_lockfile({
-	name = "biome-toolchain", platforms = supported_platforms(), artifact_name = artifact_name,
-	download_url = download_url, lockfile = DEFAULT_LOCKFILE,
+	name = "biome-toolchain",
+	platforms = supported_platforms(),
+	artifact_name = artifact_name,
+	download_url = download_url,
+	lockfile = DEFAULT_LOCKFILE,
 }, { "2.5.4" })
 local function install_graph(version, source, local_source)
 	local plat = core.platform_info()
 	local installed = core.task({
 		display = `install biome {version}`,
-		inputs = { source = source, sh = core.native_tool("sh"), cp = core.native_tool("cp"),
-			mkdir = core.native_tool("mkdir"), chmod = if plat.os ~= "windows" then core.native_tool("chmod") else nil },
+		inputs = {
+			source = source,
+			sh = core.native_tool("sh"),
+			cp = core.native_tool("cp"),
+			mkdir = core.native_tool("mkdir"),
+			chmod = if plat.os ~= "windows" then core.native_tool("chmod") else nil,
+		},
 		outputs = { directory = core.output.artifact() },
 		run = function(exec, input)
 			local key = cache_key(version, plat)
-			if local_source then key ..= "/" .. string.gsub(exec.digest(input.source), ":", "-") end
+			if local_source then
+				key ..= "/" .. string.gsub(exec.digest(input.source), ":", "-")
+			end
 			local exe = if plat.os == "windows" then "biome.exe" else "biome"
 			local script = 'mkdir -p "$2" && cp "$1" "$2/$3"'
-			if plat.os ~= "windows" then script ..= ' && chmod +x "$2/$3"' end
+			if plat.os ~= "windows" then
+				script ..= ' && chmod +x "$2/$3"'
+			end
 			local result = exec.action({
 				argv = { "sh", "-c", script, "install-biome", exec.path(input.source), "biome-toolchain", exe },
 				inputs = { input.source },
-				outputs = { directory = core.output.directory("biome-toolchain", {
-					named_cache = { name = if local_source then "biome-local-toolchains" else "biome-toolchains", key = key },
-				}) },
+				outputs = {
+					directory = core.output.directory("biome-toolchain", {
+						named_cache = {
+							name = if local_source then "biome-local-toolchains" else "biome-toolchains",
+							key = key,
+						},
+					}),
+				},
 			})
 			return { directory = result.outputs.directory }
 		end,
 	})
-	return table.freeze({ tool = core.tool(installed.outputs.directory, { name = "biome", bin_dirs = { "." } }), version = version })
+	return table.freeze({
+		tool = core.tool(installed.outputs.directory, { name = "biome", bin_dirs = { "." } }),
+		version = version,
+	})
 end
 local function make_graph(version)
 	local plat = core.platform_info()
 	local key = cache_key(version, plat)
 	local downloaded = lockfile.download_tool_artifact({
-		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE), tool = "biome-toolchain",
-		version = version, plat = plat, url = download_url(version, plat),
+		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE),
+		tool = "biome-toolchain",
+		version = version,
+		plat = plat,
+		url = download_url(version, plat),
 		output = `biome-downloads/{key}/{artifact_name(version, plat)}`,
-		display = `download biome {version}`, unverified = KIND.resolve_unverified(version),
+		display = `download biome {version}`,
+		unverified = KIND.resolve_unverified(version),
 	})
 	return install_graph(version, downloaded, false)
 end
@@ -83,13 +116,19 @@ local function biome_toolchain(version, options)
 	local spec = table.clone(SPEC)
 	spec.version = version
 	spec.lockfile = address
-	return { version = version, lockfile = address, [lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec) }
+	return {
+		version = version,
+		lockfile = address,
+		[lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec),
+	}
 end
 
 --- Return { tool, version } for a declared or default version.
 local function graph_toolchain(version)
 	local resolved = KIND.require_version(version)
-	if graphs[resolved] == nil then graphs[resolved] = make_graph(resolved) end
+	if graphs[resolved] == nil then
+		graphs[resolved] = make_graph(resolved)
+	end
 	return graphs[resolved]
 end
 
@@ -124,8 +163,16 @@ local function install_biome_toolchain(version, source, options)
 		outputs = { file = core.output.artifact() },
 		run = function(exec, input)
 			local result = exec.action({
-				argv = { "sh", "-c", 'test "$1" = "$2" || cp "$1" "$2"', "capture-biome", exec.path(input.source), "local-biome" },
-				inputs = { input.source }, outputs = { file = core.output.file("local-biome") },
+				argv = {
+					"sh",
+					"-c",
+					'test "$1" = "$2" || cp "$1" "$2"',
+					"capture-biome",
+					exec.path(input.source),
+					"local-biome",
+				},
+				inputs = { input.source },
+				outputs = { file = core.output.file("local-biome") },
 			})
 			return { file = result.outputs.file }
 		end,
@@ -135,10 +182,16 @@ local function install_biome_toolchain(version, source, options)
 end
 
 return {
-	BIOME = KIND, biome_toolchain = biome_toolchain, graph_toolchain = graph_toolchain,
-	biome_bin = biome_bin, cache_key = cache_key, artifact_name = artifact_name,
-	download_url = download_url, supported_platforms = supported_platforms,
-	default_version = KIND.default_version, resolve_version = KIND.resolve_version,
+	BIOME = KIND,
+	biome_toolchain = biome_toolchain,
+	graph_toolchain = graph_toolchain,
+	biome_bin = biome_bin,
+	cache_key = cache_key,
+	artifact_name = artifact_name,
+	download_url = download_url,
+	supported_platforms = supported_platforms,
+	default_version = KIND.default_version,
+	resolve_version = KIND.resolve_version,
 	reset_for_test = reset_for_test,
 	install_biome_toolchain = install_biome_toolchain,
 }

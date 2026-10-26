@@ -66,7 +66,10 @@ return {
 
 	core.test.suite("lockfile addresses", {
 		core.test.case("converts a lockfile address to a workspace-relative path", function()
-			assert(lockfile.lockfile_address_to_path("@imp/rules/python/ruff-toolchain.lock") == "rules/python/ruff-toolchain.lock")
+			assert(
+				lockfile.lockfile_address_to_path("@imp/rules/python/ruff-toolchain.lock")
+					== "rules/python/ruff-toolchain.lock"
+			)
 			assert(lockfile.lockfile_address_to_path("@workspace/tools/ruff.lock") == "tools/ruff.lock")
 			local text = error_text(lockfile.lockfile_address_to_path, "@workspace/../escape.lock")
 			assert(contains(text, "workspace-relative"), text)
@@ -129,8 +132,18 @@ return {
 		end),
 
 		core.test.case("lists the download tools for each platform", function()
-			assert(same_list(lockfile.locked_download_tools({ os = "linux" }), { "curl", "mkdir", "dirname", "wc", "sha256sum" }))
-			assert(same_list(lockfile.locked_download_tools({ os = "macos" }), { "curl", "mkdir", "dirname", "wc", "shasum" }))
+			assert(
+				same_list(
+					lockfile.locked_download_tools({ os = "linux" }),
+					{ "curl", "mkdir", "dirname", "wc", "sha256sum" }
+				)
+			)
+			assert(
+				same_list(
+					lockfile.locked_download_tools({ os = "macos" }),
+					{ "curl", "mkdir", "dirname", "wc", "shasum" }
+				)
+			)
 			assert(
 				same_list(
 					lockfile.locked_download_tools({ os = "windows" }),
@@ -150,7 +163,12 @@ return {
 			assert(argv[1] == "sh" and argv[2] == "-c")
 			assert(contains(argv[3], "sha256sum -c -"), argv[3])
 			assert(contains(argv[3], "size mismatch"), argv[3])
-			assert(same_list({ table.unpack(argv, 4) }, { "download-a", ".imp/a.tgz", "https://example.com/a.tgz", "abc", "42" }))
+			assert(
+				same_list(
+					{ table.unpack(argv, 4) },
+					{ "download-a", ".imp/a.tgz", "https://example.com/a.tgz", "abc", "42" }
+				)
+			)
 		end),
 
 		core.test.case("locked download argv skips the size check without a size", function()
@@ -186,7 +204,8 @@ return {
 
 	core.test.suite("download_tool_artifact", {
 		core.test.case("requires a non-empty output", function()
-			local text = error_text(lockfile.download_tool_artifact, { lockfile = RUFF, tool = "ruff-toolchain", plat = PLAT })
+			local text =
+				error_text(lockfile.download_tool_artifact, { lockfile = RUFF, tool = "ruff-toolchain", plat = PLAT })
 			assert(contains(text, "requires a non-empty output"), text)
 		end),
 

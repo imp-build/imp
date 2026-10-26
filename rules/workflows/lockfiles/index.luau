@@ -323,7 +323,11 @@ local function lockfile_write(result)
 	if result.kind == "python-project-lock" and type(result.project) == "string" then
 		return { path = result.path, digest = result.lockfile.digest, name = `Python {result.project}` }
 	end
-	if type(result.lock) == "table" and type(result.lock.tool) == "string" and type(result.lock.versions) == "table" then
+	if
+		type(result.lock) == "table"
+		and type(result.lock.tool) == "string"
+		and type(result.lock.versions) == "table"
+	then
 		return { path = result.path, digest = result.lockfile.digest, name = result.lock.tool }
 	end
 	return nil

@@ -63,9 +63,12 @@ return {
 			kind.declare("1", { default = true })
 			toolchain.register("cli-fixture", function()
 				local version = kind.require_version()
-				return core.task({ outputs = { value = output.value() }, run = function()
-					return { value = "/fixture/" .. version }
-				end }).outputs.value
+				return core.task({
+					outputs = { value = output.value() },
+					run = function()
+						return { value = "/fixture/" .. version }
+					end,
+				}).outputs.value
 			end)
 			kind.declare("2", { default = true })
 			assert(core.test.resolve(toolchain.resolve("cli-fixture")) == "/fixture/2")

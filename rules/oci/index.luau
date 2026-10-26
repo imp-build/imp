@@ -51,17 +51,23 @@ local function trim(value)
 end
 
 local function string_value(value, name)
-	if type(value) ~= "string" then error(`{name} must be a string`, 3) end
+	if type(value) ~= "string" then
+		error(`{name} must be a string`, 3)
+	end
 	return value
 end
 
 local function nonempty(value, name)
-	if string_value(value, name) == "" then error(`{name} must not be empty`, 3) end
+	if string_value(value, name) == "" then
+		error(`{name} must not be empty`, 3)
+	end
 	return value
 end
 
 local function list(value, name)
-	if type(value) ~= "table" then error(`{name} must be a list`, 3) end
+	if type(value) ~= "table" then
+		error(`{name} must be a list`, 3)
+	end
 	local count = 0
 	for key in pairs(value) do
 		if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #value then
@@ -69,7 +75,9 @@ local function list(value, name)
 		end
 		count += 1
 	end
-	if count ~= #value then error(`{name} must be a dense list`, 3) end
+	if count ~= #value then
+		error(`{name} must be a dense list`, 3)
+	end
 	return value
 end
 
@@ -77,8 +85,12 @@ end
 local function json_string(value)
 	string_value(value, "OCI configuration value")
 	local escaped = string.gsub(value, '[%z\1-\31\\"]', function(char)
-		if char == '"' then return '\\"' end
-		if char == "\\" then return "\\\\" end
+		if char == '"' then
+			return '\\"'
+		end
+		if char == "\\" then
+			return "\\\\"
+		end
 		return string.format("\\u%04x", string.byte(char))
 	end)
 	return '"' .. escaped .. '"'
@@ -86,12 +98,16 @@ end
 
 local function json_array(value, name)
 	local parts = {}
-	for _, item in ipairs(list(value, name)) do table.insert(parts, json_string(item)) end
+	for _, item in ipairs(list(value, name)) do
+		table.insert(parts, json_string(item))
+	end
 	return "[" .. table.concat(parts, ",") .. "]"
 end
 
 local function sorted_keys(value, name)
-	if type(value) ~= "table" then error(`{name} must be a string map`, 3) end
+	if type(value) ~= "table" then
+		error(`{name} must be a string map`, 3)
+	end
 	local keys = {}
 	for key, item in pairs(value) do
 		string_value(key, name .. " key")
@@ -111,8 +127,12 @@ local function json_map(value, name)
 end
 
 local function command_json(value, name)
-	if value == nil then value = {} end
-	if type(value) == "string" then value = { value } end
+	if value == nil then
+		value = {}
+	end
+	if type(value) == "string" then
+		value = { value }
+	end
 	return json_array(value, name)
 end
 
@@ -123,8 +143,12 @@ local function workspace_path(value)
 	end
 	local parts = {}
 	for part in string.gmatch(value, "[^/]+") do
-		if part == ".." then error(`OCI paths must stay within the workspace: {value}`, 3) end
-		if part ~= "." then table.insert(parts, part) end
+		if part == ".." then
+			error(`OCI paths must stay within the workspace: {value}`, 3)
+		end
+		if part ~= "." then
+			table.insert(parts, part)
+		end
 	end
 	return if #parts == 0 then "." else table.concat(parts, "/")
 end
@@ -133,21 +157,32 @@ local function destination_path(value)
 	nonempty(value, "OCI layer path")
 	local parts = {}
 	for part in string.gmatch(value, "[^/]+") do
-		if part == ".." then error("OCI layer path must not contain '..'", 3) end
-		if part ~= "." then table.insert(parts, part) end
+		if part == ".." then
+			error("OCI layer path must not contain '..'", 3)
+		end
+		if part ~= "." then
+			table.insert(parts, part)
+		end
 	end
 	return table.concat(parts, "/")
 end
 
 local function image_of(value, name)
-	if type(value) ~= "table" or type(value.image) ~= "table" or not value.image.layout or value.image.digest == nil then
+	if
+		type(value) ~= "table"
+		or type(value.image) ~= "table"
+		or not value.image.layout
+		or value.image.digest == nil
+	then
 		error(`{name} requires an oci_pull()/oci_build() image object`, 3)
 	end
 	return value.image
 end
 
 local function tools(inputs, names)
-	for _, name in ipairs(names) do inputs[name] = core.native_tool(name) end
+	for _, name in ipairs(names) do
+		inputs[name] = core.native_tool(name)
+	end
 	return inputs
 end
 
@@ -158,7 +193,14 @@ local function package_layout(layout)
 		outputs = { archive = output.artifact() },
 		run = function(exec, inputs)
 			local result = exec.action({
-				argv = { "sh", "-c", 'set -eu; umask 022; mkdir -p "$1"; tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner -C "$2" -cf "$1/image.tar" .', "oci-package", "package", exec.path(inputs.layout) },
+				argv = {
+					"sh",
+					"-c",
+					'set -eu; umask 022; mkdir -p "$1"; tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner -C "$2" -cf "$1/image.tar" .',
+					"oci-package",
+					"package",
+					exec.path(inputs.layout),
+				},
 				inputs = { inputs.layout },
 				outputs = { archive = output.directory("package") },
 				display = "package OCI archive",
@@ -182,14 +224,21 @@ local function oci_pull(options)
 	options = options or {}
 	local repo = nonempty(options.repo, "oci_pull repo")
 	local tag, digest = options.tag, options.digest
-	if (tag ~= nil) == (digest ~= nil) then error("oci_pull requires exactly one of 'tag' or 'digest'", 2) end
+	if (tag ~= nil) == (digest ~= nil) then
+		error("oci_pull requires exactly one of 'tag' or 'digest'", 2)
+	end
 	local tool = crane.graph_toolchain().tool
 	if tag ~= nil then
 		nonempty(tag, "oci_pull tag")
 		digest = core.task({
-			inputs = { crane = tool, repo = repo, tag = tag }, outputs = { digest = output.value() },
+			inputs = { crane = tool, repo = repo, tag = tag },
+			outputs = { digest = output.value() },
 			run = function(exec, inputs)
-				local result = exec.action({ argv = { crane.crane_bin(exec, inputs.crane), "digest", `{inputs.repo}:{inputs.tag}` }, cache = false, display = `resolve {inputs.repo}:{inputs.tag}` })
+				local result = exec.action({
+					argv = { crane.crane_bin(exec, inputs.crane), "digest", `{inputs.repo}:{inputs.tag}` },
+					cache = false,
+					display = `resolve {inputs.repo}:{inputs.tag}`,
+				})
 				return { digest = trim(result.stdout) }
 			end,
 		}).outputs.digest
@@ -197,11 +246,19 @@ local function oci_pull(options)
 		nonempty(digest, "oci_pull digest")
 	end
 	local layout = core.task({
-		inputs = { crane = tool, repo = repo, digest = digest }, outputs = { layout = output.artifact() },
+		inputs = { crane = tool, repo = repo, digest = digest },
+		outputs = { layout = output.artifact() },
 		run = function(exec, inputs)
 			local result = exec.action({
-				argv = { crane.crane_bin(exec, inputs.crane), "pull", "--format=oci", `{inputs.repo}@{inputs.digest}`, "oci-layout" },
-				outputs = { layout = output.directory("oci-layout") }, display = `pull {inputs.repo}`,
+				argv = {
+					crane.crane_bin(exec, inputs.crane),
+					"pull",
+					"--format=oci",
+					`{inputs.repo}@{inputs.digest}`,
+					"oci-layout",
+				},
+				outputs = { layout = output.directory("oci-layout") },
+				display = `pull {inputs.repo}`,
 			})
 			return { layout = result.outputs.layout }
 		end,
@@ -226,18 +283,41 @@ tar --sort=name --mtime="@0" --owner="$uid" --group="$gid" --numeric-owner -C "$
 
 local function layer_tarball(root, layer, index)
 	local destination = destination_path(layer.path)
-	if #list(layer.srcs, "OCI layer srcs") == 0 then error("OCI layer requires non-empty 'srcs'", 3) end
+	if #list(layer.srcs, "OCI layer srcs") == 0 then
+		error("OCI layer requires non-empty 'srcs'", 3)
+	end
 	local sources = core.files({ root = root, include = layer.srcs, exclude = layer.exclude or {} })
 	return core.task({
 		inputs = tools({ sources = sources }, { "sh", "mkdir", "dirname", "cp", "tar", "chmod" }),
 		outputs = { tarball = output.artifact() },
 		run = function(exec, inputs)
 			local paths = exec.paths(inputs.sources)
-			if #paths == 0 then error(`oci_build layer {index}: no files matched 'srcs'`, 0) end
+			if #paths == 0 then
+				error(`oci_build layer {index}: no files matched 'srcs'`, 0)
+			end
 			table.sort(paths)
-			local argv = { "sh", "-c", LAYER, "oci-layer-tar", root, `layer-stage-{index}`, `layer-{index}.tar`, destination, if layer.mode ~= nil then tostring(layer.mode) else "", tostring(layer.uid or 0), tostring(layer.gid or 0) }
-			for _, path in ipairs(paths) do table.insert(argv, path) end
-			local result = exec.action({ argv = argv, inputs = { inputs.sources }, outputs = { tarball = output.file(`layer-{index}.tar`) }, display = `stage OCI layer {index} ({layer.path})` })
+			local argv = {
+				"sh",
+				"-c",
+				LAYER,
+				"oci-layer-tar",
+				root,
+				`layer-stage-{index}`,
+				`layer-{index}.tar`,
+				destination,
+				if layer.mode ~= nil then tostring(layer.mode) else "",
+				tostring(layer.uid or 0),
+				tostring(layer.gid or 0),
+			}
+			for _, path in ipairs(paths) do
+				table.insert(argv, path)
+			end
+			local result = exec.action({
+				argv = argv,
+				inputs = { inputs.sources },
+				outputs = { tarball = output.file(`layer-{index}.tar`) },
+				display = `stage OCI layer {index} ({layer.path})`,
+			})
 			return { tarball = result.outputs.tarball }
 		end,
 	}).outputs.tarball
@@ -250,37 +330,69 @@ local function oci_build(options)
 	options = options or {}
 	local base = if options.base == "scratch" then nil else image_of(options.base, "oci_build base")
 	local layers = list(options.layers, "oci_build layers")
-	if #layers == 0 then error("oci_build requires one or more 'layers'", 2) end
+	if #layers == 0 then
+		error("oci_build requires one or more 'layers'", 2)
+	end
 	local source_base = workspace_path(options.source_base or core.package_path())
 	local path = workspace_path(options.path or ".")
 	local root = workspace_path(if source_base == "." then path else `{source_base}/{path}`)
 	local env = if options.env == nil then {} else options.env
 	local env_list = {}
-	for _, key in ipairs(sorted_keys(env, "OCI env")) do table.insert(env_list, key .. "=" .. env[key]) end
+	for _, key in ipairs(sorted_keys(env, "OCI env")) do
+		table.insert(env_list, key .. "=" .. env[key])
+	end
 	local entrypoint, cmd = command_json(options.entrypoint, "OCI entrypoint"), command_json(options.cmd, "OCI cmd")
 	local labels = json_map(if options.labels == nil then {} else options.labels, "OCI labels")
-	local user, workdir = string_value(if options.user == nil then "" else options.user, "OCI user"), string_value(if options.workdir == nil then "" else options.workdir, "OCI workdir")
+	local user, workdir =
+		string_value(if options.user == nil then "" else options.user, "OCI user"),
+		string_value(if options.workdir == nil then "" else options.workdir, "OCI workdir")
 	local inputs = tools({}, { "sh", "jq", "sha256sum", "cp", "mkdir", "wc", "cat" })
-	if base then inputs.base = base.layout end
+	if base then
+		inputs.base = base.layout
+	end
 	for index, layer in ipairs(layers) do
-		if type(layer) ~= "table" then error("OCI layer must be a table", 2) end
+		if type(layer) ~= "table" then
+			error("OCI layer must be a table", 2)
+		end
 		inputs[`layer{index}`] = layer_tarball(root, layer, index)
 	end
 	local composed = core.task({
-		inputs = inputs, outputs = { layout = output.artifact(), digest = output.value() },
+		inputs = inputs,
+		outputs = { layout = output.artifact(), digest = output.value() },
 		run = function(exec, resolved)
 			local artifacts = {}
 			local base_path = ""
-			if resolved.base then base_path = exec.path(resolved.base); table.insert(artifacts, resolved.base) end
+			if resolved.base then
+				base_path = exec.path(resolved.base)
+				table.insert(artifacts, resolved.base)
+			end
 			-- Keep the output separate from the staged base without a module counter.
 			local image_path = if resolved.base then base_path .. ".derived" else "oci-image"
-			local argv = { "sh", "-c", COMPOSE, "oci-compose", image_path, base_path, entrypoint, cmd, json_array(env_list, "OCI env"), labels, user, workdir }
+			local argv = {
+				"sh",
+				"-c",
+				COMPOSE,
+				"oci-compose",
+				image_path,
+				base_path,
+				entrypoint,
+				cmd,
+				json_array(env_list, "OCI env"),
+				labels,
+				user,
+				workdir,
+			}
 			for index in ipairs(layers) do
 				local artifact = resolved[`layer{index}`]
 				table.insert(artifacts, artifact)
 				table.insert(argv, exec.path(artifact))
 			end
-			local result = exec.action({ argv = argv, inputs = artifacts, outputs = { layout = output.directory(image_path) }, display = "compose OCI image" })
+			local result = exec.action({
+				argv = argv,
+				inputs = artifacts,
+				outputs = { layout = output.directory(image_path) },
+				display = "compose OCI image",
+			})
 			return { layout = result.outputs.layout, digest = trim(result.stdout) }
 		end,
 	})
@@ -292,12 +404,19 @@ local function oci_push(options)
 	options = options or {}
 	local image = image_of(options.image, "oci_push image")
 	local repo, tag = nonempty(options.repo, "oci_push repo"), nonempty(options.tag, "oci_push tag")
-	return table.freeze({ [publish.PUBLISH] = core.task({
-		inputs = { layout = image.layout, crane = crane.graph_toolchain().tool },
-		run = function(exec, inputs)
-			exec.action({ argv = { crane.crane_bin(exec, inputs.crane), "push", exec.path(inputs.layout), `{repo}:{tag}` }, inputs = { inputs.layout }, cache = false, display = `push {repo}:{tag}` })
-		end,
-	}) })
+	return table.freeze({
+		[publish.PUBLISH] = core.task({
+			inputs = { layout = image.layout, crane = crane.graph_toolchain().tool },
+			run = function(exec, inputs)
+				exec.action({
+					argv = { crane.crane_bin(exec, inputs.crane), "push", exec.path(inputs.layout), `{repo}:{tag}` },
+					inputs = { inputs.layout },
+					cache = false,
+					display = `push {repo}:{tag}`,
+				})
+			end,
+		}),
+	})
 end
 
 --- Copy a registry image from { repo, tag|digest } to { repo, tag }.
@@ -305,16 +424,31 @@ end
 local function oci_mirror(options)
 	options = options or {}
 	local from, to = options.from, options.to
-	if type(from) ~= "table" or not from.repo or not (from.tag or from.digest) then error("oci_mirror requires 'from: { repo, tag|digest }'", 2) end
-	if type(to) ~= "table" or not to.repo or not to.tag then error("oci_mirror requires 'to: { repo, tag }'", 2) end
-	local source = nonempty(from.repo, "oci_mirror from.repo") .. (if from.digest then "@" .. nonempty(from.digest, "oci_mirror digest") else ":" .. nonempty(from.tag, "oci_mirror tag"))
+	if type(from) ~= "table" or not from.repo or not (from.tag or from.digest) then
+		error("oci_mirror requires 'from: { repo, tag|digest }'", 2)
+	end
+	if type(to) ~= "table" or not to.repo or not to.tag then
+		error("oci_mirror requires 'to: { repo, tag }'", 2)
+	end
+	local source = nonempty(from.repo, "oci_mirror from.repo")
+		.. (
+			if from.digest
+				then "@" .. nonempty(from.digest, "oci_mirror digest")
+				else ":" .. nonempty(from.tag, "oci_mirror tag")
+		)
 	local destination = nonempty(to.repo, "oci_mirror to.repo") .. ":" .. nonempty(to.tag, "oci_mirror to.tag")
-	return table.freeze({ [publish.PUBLISH] = core.task({
-		inputs = { crane = crane.graph_toolchain().tool },
-		run = function(exec, inputs)
-			exec.action({ argv = { crane.crane_bin(exec, inputs.crane), "copy", source, destination }, cache = false, display = `mirror {source} -> {destination}` })
-		end,
-	}) })
+	return table.freeze({
+		[publish.PUBLISH] = core.task({
+			inputs = { crane = crane.graph_toolchain().tool },
+			run = function(exec, inputs)
+				exec.action({
+					argv = { crane.crane_bin(exec, inputs.crane), "copy", source, destination },
+					cache = false,
+					display = `mirror {source} -> {destination}`,
+				})
+			end,
+		}),
+	})
 end
 
 return {
@@ -329,5 +463,7 @@ return {
 	oci_mirror = oci_mirror,
 
 	--- @category configuration
-	crane_toolchain = crane.crane_toolchain, default_version = crane.default_version, resolve_version = crane.resolve_version,
+	crane_toolchain = crane.crane_toolchain,
+	default_version = crane.default_version,
+	resolve_version = crane.resolve_version,
 }

@@ -169,7 +169,8 @@ return {
 		core.test.case("gen-lockfiles writes the address declared on the toolchain", function()
 			with_msvc_host(WINDOWS, function(host)
 				host.set_run_stdout("lock nasm 2.16.03 windows/x86_64", string.rep("ab", 32) .. "  artifact\n  42\n")
-				local declared = msvc.nasm_toolchain("2.16.03", { default = true, lockfile = "@workspace/locks/nasm.lock" })
+				local declared =
+					msvc.nasm_toolchain("2.16.03", { default = true, lockfile = "@workspace/locks/nasm.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/nasm.lock", result.path)
 				local written = false
@@ -209,7 +210,9 @@ return {
 						discoveries += 1
 						assert(run.cache == false)
 						assert(contains(run.argv[3], "-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64"))
-						assert(has(run.argv, "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"))
+						assert(
+							has(run.argv, "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe")
+						)
 					end
 				end
 				assert(discoveries == 1, tostring(discoveries))
@@ -289,7 +292,18 @@ return {
 					opt = "release",
 					copts = { "/W4" },
 				}),
-				{ "cl.exe", "/nologo", "/c", "/TP", "/O2", "/DNDEBUG", "'/Iinc'", "'/W4'", "'/Foout/a.obj'", "'src/a.cc'" }
+				{
+					"cl.exe",
+					"/nologo",
+					"/c",
+					"/TP",
+					"/O2",
+					"/DNDEBUG",
+					"'/Iinc'",
+					"'/W4'",
+					"'/Foout/a.obj'",
+					"'src/a.cc'",
+				}
 			)
 			same(
 				commands.compile_command({ source = "a.c", obj_path = "a.obj", is_cxx = false, opt = "debug" }),

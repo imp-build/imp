@@ -46,7 +46,9 @@ return {
 	core.test.suite("codegen", {
 		core.test.case("gives one artifact handle for each output path when it declares the graph", function()
 			local generated = sh_codegen({ "a/one.txt", "b/nested/two.txt" })
-			assert(#generated.paths == 2 and generated.paths[1] == "a/one.txt" and generated.paths[2] == "b/nested/two.txt")
+			assert(
+				#generated.paths == 2 and generated.paths[1] == "a/one.txt" and generated.paths[2] == "b/nested/two.txt"
+			)
 			assert(type(generated.files["a/one.txt"]) == "userdata")
 			assert(type(generated.files["b/nested/two.txt"]) == "userdata")
 			assert(type(generated[build.BUILD]) == "userdata")
@@ -99,7 +101,12 @@ return {
 				return {}
 			end
 			assert(contains(error_text(codegen, { argv = argv }), "requires a non-empty output_paths array"))
-			assert(contains(error_text(codegen, { output_paths = {}, argv = argv }), "requires a non-empty output_paths array"))
+			assert(
+				contains(
+					error_text(codegen, { output_paths = {}, argv = argv }),
+					"requires a non-empty output_paths array"
+				)
+			)
 		end),
 
 		core.test.case("rejects an argv that is not a function", function()
@@ -155,14 +162,23 @@ return {
 		end),
 
 		core.test.case("resolve_path returns the path unchanged by default", function()
-			local list = codegen_module.normalize_generated_srcs({ { artifact = artifact_source(), path = "gen.odin" } })
+			local list =
+				codegen_module.normalize_generated_srcs({ { artifact = artifact_source(), path = "gen.odin" } })
 			assert(list[1].expected_path == "gen.odin")
 		end),
 
 		core.test.case("rejects an entry that is not a codegen() result or { artifact, path }", function()
-			local text = error_text(codegen_module.normalize_generated_srcs, { { path = "x" } }, { rule = "odin_package" })
+			local text = error_text(
+				codegen_module.normalize_generated_srcs,
+				{ { path = "x" } },
+				{ rule = "odin_package" }
+			)
 			assert(contains(text, "odin_package generated_srcs[1] must be a codegen() result"), text)
-			text = error_text(codegen_module.normalize_generated_srcs, { { paths = {}, files = {} } }, { rule = "odin_package" })
+			text = error_text(
+				codegen_module.normalize_generated_srcs,
+				{ { paths = {}, files = {} } },
+				{ rule = "odin_package" }
+			)
 			assert(contains(text, "generated_srcs[1] must be a codegen() result"), text)
 		end),
 
@@ -180,7 +196,13 @@ return {
 				{ artifact = artifact_source(), expected_path = "a.odin" },
 				{ artifact = artifact_source(), expected_path = "a.odin" },
 			}, { rule = "odin_package" })
-			assert(contains(text, "odin_package: two different generated sources cannot claim one workspace path ('a.odin')"), text)
+			assert(
+				contains(
+					text,
+					"odin_package: two different generated sources cannot claim one workspace path ('a.odin')"
+				),
+				text
+			)
 		end),
 
 		core.test.case("accepts a real path that is the declared path", function()
@@ -189,7 +211,13 @@ return {
 
 		core.test.case("rejects a real path that is not the declared path", function()
 			local text = error_text(codegen_module.assert_generated_src_path, "odin_package", 2, "b.odin", "a.odin")
-			assert(contains(text, "generated_srcs[2] artifact's real path 'b.odin' does not match its declared path ('a.odin')"), text)
+			assert(
+				contains(
+					text,
+					"generated_srcs[2] artifact's real path 'b.odin' does not match its declared path ('a.odin')"
+				),
+				text
+			)
 		end),
 	}),
 

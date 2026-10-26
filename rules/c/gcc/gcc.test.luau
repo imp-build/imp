@@ -112,48 +112,57 @@ return {
 			end)
 		end),
 
-		core.test.case("downloads, verifies, and installs with two sandboxed actions that write the aliases", function()
-			with_gcc_host(LINUX, function(host)
-				gcc.gcc_toolchain("2025.08-1", { default = true, lockfile = `{TESTDATA}/locked.json` })
-				assert(install("2025.08-1") == CACHE_DIR)
-				assert(#host.runs == 2, tostring(#host.runs))
+		core.test.case(
+			"downloads, verifies, and installs with two sandboxed actions that write the aliases",
+			function()
+				with_gcc_host(LINUX, function(host)
+					gcc.gcc_toolchain("2025.08-1", { default = true, lockfile = `{TESTDATA}/locked.json` })
+					assert(install("2025.08-1") == CACHE_DIR)
+					assert(#host.runs == 2, tostring(#host.runs))
 
-				local download, installed = host.runs[1], host.runs[2]
-				assert(has(download.argv, "https://locked.example/x86-64--glibc--stable-2025.08-1.tar.xz"))
-				assert(has(download.argv, "deadbeef"))
-				assert(contains(download.argv[3], "sha256sum -c -"), download.argv[3])
+					local download, installed = host.runs[1], host.runs[2]
+					assert(has(download.argv, "https://locked.example/x86-64--glibc--stable-2025.08-1.tar.xz"))
+					assert(has(download.argv, "deadbeef"))
+					assert(contains(download.argv[3], "sha256sum -c -"), download.argv[3])
 
-				assert(installed.argv[1] == "sh")
-				assert(installed.display == "install gcc 2025.08-1 (linux/x86_64)", installed.display)
-				assert(contains(installed.argv[5], "x86-64--glibc--stable-2025.08-1.tar.xz"), installed.argv[5])
-				same(installed.tools, { "chmod", "mkdir", "sh", "tar", "xz" })
-				-- gcc and binutils have different prefixes, and the script
-				-- receives both as arguments.
-				assert(has(installed.argv, "x86_64-linux"))
-				assert(has(installed.argv, "x86_64-buildroot-linux-gnu"))
-				local script = installed.argv[3]
-				for _, name in ipairs({ "clang", "cc", "c++", "ar", "ranlib" }) do
-					assert(contains(script, `"{name}:$`), name)
-				end
-				assert(contains(script, "#!/bin/sh"))
-				-- The escape-hatch aliases run .br_real directly, with the
-				-- --sysroot that the Bootlin wrapper would add.
-				for _, name in ipairs({ "clang-unsafe-paths", "cc-unsafe-paths", "c++-unsafe-paths" }) do
-					assert(contains(script, `"{name}:$`), name)
-				end
-				assert(contains(script, ".br_real"))
-				assert(contains(script, "--sysroot"))
-				-- bin-unsafe-paths/ has scripts under the plain names, which
-				-- run the real binary through "../bin/".
-				assert(contains(script, '"$out/bin-unsafe-paths/$name"'))
-				assert(contains(script, "/../bin/$target"))
-				assert(published(host, "2025.08-1/linux-x86_64"), "the install publishes the gcc-toolchains named cache")
-			end)
-		end),
+					assert(installed.argv[1] == "sh")
+					assert(installed.display == "install gcc 2025.08-1 (linux/x86_64)", installed.display)
+					assert(contains(installed.argv[5], "x86-64--glibc--stable-2025.08-1.tar.xz"), installed.argv[5])
+					same(installed.tools, { "chmod", "mkdir", "sh", "tar", "xz" })
+					-- gcc and binutils have different prefixes, and the script
+					-- receives both as arguments.
+					assert(has(installed.argv, "x86_64-linux"))
+					assert(has(installed.argv, "x86_64-buildroot-linux-gnu"))
+					local script = installed.argv[3]
+					for _, name in ipairs({ "clang", "cc", "c++", "ar", "ranlib" }) do
+						assert(contains(script, `"{name}:$`), name)
+					end
+					assert(contains(script, "#!/bin/sh"))
+					-- The escape-hatch aliases run .br_real directly, with the
+					-- --sysroot that the Bootlin wrapper would add.
+					for _, name in ipairs({ "clang-unsafe-paths", "cc-unsafe-paths", "c++-unsafe-paths" }) do
+						assert(contains(script, `"{name}:$`), name)
+					end
+					assert(contains(script, ".br_real"))
+					assert(contains(script, "--sysroot"))
+					-- bin-unsafe-paths/ has scripts under the plain names, which
+					-- run the real binary through "../bin/".
+					assert(contains(script, '"$out/bin-unsafe-paths/$name"'))
+					assert(contains(script, "/../bin/$target"))
+					assert(
+						published(host, "2025.08-1/linux-x86_64"),
+						"the install publishes the gcc-toolchains named cache"
+					)
+				end)
+			end
+		),
 
 		core.test.case("unverified downloads without a sha check", function()
 			with_gcc_host(LINUX, function(host)
-				gcc.gcc_toolchain("2025.08-1", { default = true, unverified = true, lockfile = `{TESTDATA}/missing.json` })
+				gcc.gcc_toolchain(
+					"2025.08-1",
+					{ default = true, unverified = true, lockfile = `{TESTDATA}/missing.json` }
+				)
 				install("2025.08-1")
 				assert(not contains(host.runs[1].argv[3], "sha256sum"), host.runs[1].argv[3])
 				assert(
@@ -299,7 +308,18 @@ return {
 						copts = { "-Wall" },
 						is_shared = true,
 					}),
-					{ "'clang'", "-c", "'src/a.c'", "-o", "'out/a.o'", "'-O2'", "'-DNDEBUG'", "'-fPIC'", "'-Iinclude'", "'-Wall'" }
+					{
+						"'clang'",
+						"-c",
+						"'src/a.c'",
+						"-o",
+						"'out/a.o'",
+						"'-O2'",
+						"'-DNDEBUG'",
+						"'-fPIC'",
+						"'-Iinclude'",
+						"'-Wall'",
+					}
 				)
 				same(
 					commands.archive_command({ out_path = "out/liba.a", rsp_path = "out/a.rsp" }),
@@ -324,7 +344,8 @@ return {
 
 		core.test.case("commands uses the -unsafe-paths compilers with unsafe_system_paths", function()
 			with_gcc_host(LINUX, function()
-				local commands = gcc.toolchain_record(nil, "2025.08-1").commands(nil, nil, { unsafe_system_paths = true })
+				local commands = gcc.toolchain_record(nil, "2025.08-1")
+					.commands(nil, nil, { unsafe_system_paths = true })
 				local tokens = commands.compile_command({
 					source = "a.cc",
 					obj_path = "a.o",
@@ -427,7 +448,10 @@ return {
 				same(result.rust.rustflags, { "-C", `linker={WIN_CACHE_DIR}/bin/clang.exe` })
 				assert(result.rust.env.CC == `{WIN_CACHE_DIR}/bin/clang.exe`)
 				same(result.rust.path_dirs, { `{WIN_CACHE_DIR}/bin` })
-				assert(result.archives[1] == `{WIN_CACHE_DIR}/lib/gcc/x86_64-w64-mingw32/16.1.0/libgcc.a`, result.archives[1])
+				assert(
+					result.archives[1] == `{WIN_CACHE_DIR}/lib/gcc/x86_64-w64-mingw32/16.1.0/libgcc.a`,
+					result.archives[1]
+				)
 				assert(result.archives[#result.archives] == `{WIN_CACHE_DIR}/x86_64-w64-mingw32/lib/libmsvcrt_shim.a`)
 			end)
 		end),
@@ -452,14 +476,20 @@ return {
 					bundled = true,
 					rsp_path = "m.rsp",
 				})
-				same(link, { "'clang'", "'-pipe'", "-shared", "'-Wl,--out-implib,out/m.lib'", "-o", "'out/m.dll'", "@'m.rsp'" })
+				same(
+					link,
+					{ "'clang'", "'-pipe'", "-shared", "'-Wl,--out-implib,out/m.lib'", "-o", "'out/m.dll'", "@'m.rsp'" }
+				)
 			end)
 		end),
 
 		core.test.case("gen-lockfiles writes the windows lockfile with the gcc-windows spec", function()
 			core.test.with_fake_toolchain_host(WINDOWS, function(host)
 				gcc.reset_for_test()
-				host.set_run_stdout(`lock gcc-windows {WIN_VERSION} windows/x86_64`, string.rep("ab", 32) .. "  artifact\n  42\n")
+				host.set_run_stdout(
+					`lock gcc-windows {WIN_VERSION} windows/x86_64`,
+					string.rep("ab", 32) .. "  artifact\n  42\n"
+				)
 				local declared = gcc.gcc_toolchain(WIN_VERSION, { default = true })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "rules/c/gcc/gcc-windows.lock", result.path)
@@ -531,9 +561,13 @@ return {
 			core.test.with_fake_toolchain_host(LINUX, function(host)
 				gcc.reset_for_test()
 				for _, plat in ipairs(gcc.supported_platforms()) do
-					host.set_run_stdout(`lock gcc 2024.05-1 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					host.set_run_stdout(
+						`lock gcc 2024.05-1 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
-				local declared = gcc.gcc_toolchain("2024.05-1", { default = true, lockfile = "@workspace/locks/gcc.lock" })
+				local declared =
+					gcc.gcc_toolchain("2024.05-1", { default = true, lockfile = "@workspace/locks/gcc.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/gcc.lock", result.path)
 				local written = false

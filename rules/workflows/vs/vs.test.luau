@@ -29,7 +29,8 @@ return {
 	end),
 	core.test.case("Windows documents use the native debugger", function()
 		core.test.with_fake_toolchain_host({ os = "windows", arch = "x86_64" }, function()
-			local files = vs.documents({ { address = "//:app", result = { has_main = true, executable_path = "output.exe" } } })
+			local files =
+				vs.documents({ { address = "//:app", result = { has_main = true, executable_path = "output.exe" } } })
 			assert(files["launch.json"].configurations[1].type == "cppvsdbg")
 			assert(files["launch.json"].configurations[1].program == "${workspaceFolder}/dist/app/output.exe")
 		end)

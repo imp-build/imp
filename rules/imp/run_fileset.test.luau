@@ -33,7 +33,11 @@ return {
 
 		core.test.case("stages exact paths into the sandbox", function()
 			local files = core.files({ paths = { "rules/imp/BUILD.luau" } })
-			assert(core.test.resolve(staged(files, "test -f rules/imp/BUILD.luau && test ! -e rules/imp/file_set.test.luau")) == 0)
+			assert(
+				core.test.resolve(
+					staged(files, "test -f rules/imp/BUILD.luau && test ! -e rules/imp/file_set.test.luau")
+				) == 0
+			)
 		end),
 
 		core.test.case("stages separate overlapping glob and exact inputs", function()
@@ -61,7 +65,10 @@ return {
 					outputs = { paths = output.value(), contents = output.value() },
 					run = function(exec, inputs)
 						exec.action({ argv = { "unused" }, inputs = { inputs.files } })
-						return { paths = exec.paths(inputs.files), contents = core.read_file_in_digest(exec.digest(inputs.files), "rules/imp/BUILD.luau") }
+						return {
+							paths = exec.paths(inputs.files),
+							contents = core.read_file_in_digest(exec.digest(inputs.files), "rules/imp/BUILD.luau"),
+						}
 					end,
 				})
 				local paths = core.test.resolve(result.outputs.paths)
@@ -73,9 +80,11 @@ return {
 
 		core.test.case("actions require exact files to be declared task inputs", function()
 			local files = core.files({ paths = { "rules/imp/BUILD.luau" } })
-			local result = core.task({ run = function(exec)
-				exec.action({ argv = { "unused" }, inputs = { files } })
-			end })
+			local result = core.task({
+				run = function(exec)
+					exec.action({ argv = { "unused" }, inputs = { files } })
+				end,
+			})
 			core.test.with_fake_run(function(host)
 				local ok, err = pcall(core.test.resolve, result)
 				assert(not ok and string.find(tostring(err), "declared task input", 1, true), tostring(err))
@@ -84,9 +93,11 @@ return {
 		end),
 
 		core.test.case("actions reject legacy plain input specifications", function()
-			local result = core.task({ run = function(exec)
-				exec.action({ argv = { "unused" }, inputs = { { kind = "file", path = "rules/imp/BUILD.luau" } } })
-			end })
+			local result = core.task({
+				run = function(exec)
+					exec.action({ argv = { "unused" }, inputs = { { kind = "file", path = "rules/imp/BUILD.luau" } } })
+				end,
+			})
 			core.test.with_fake_run(function()
 				local ok, err = pcall(core.test.resolve, result)
 				assert(not ok, tostring(err))

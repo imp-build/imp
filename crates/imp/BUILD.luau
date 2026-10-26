@@ -4,9 +4,9 @@ local testTar = require("@workspace/BUILD").testTar
 local testGzip = require("@workspace/BUILD").testGzip
 local testGit = require("@workspace/BUILD").testGit
 local imp = cargoPackage({
-    bin = "imp",
-    deps = {protoAssets.files},
-    test_tools = {testTar, testGzip, testGit},
-    workspace_member = true,
+	bin = "imp",
+	deps = { protoAssets.files },
+	test_tools = { testTar, testGzip, testGit },
+	workspace_member = true,
 })
 return { imp = imp }

@@ -8,7 +8,9 @@ local function check(flags, fn)
 	core.test.with_fake_toolchain_host(function(host)
 		biome.reset_for_test()
 		biome.biome_toolchain("2.5.4", { default = true })
-		core.test.with_fake_goal_flags(flags, function() fn(host) end)
+		core.test.with_fake_goal_flags(flags, function()
+			fn(host)
+		end)
 	end)
 end
 return {
@@ -46,13 +48,21 @@ return {
 	core.test.case("empty sources do not run Biome", function()
 		check({}, function(host)
 			local graph = require("@imp/rules/js/biome/graph")
-			local empty = { root = "rules/js/biome/testdata", sources = core.files({ root = "rules/js/biome/testdata", include = { "absent.js" } }) }
+			local empty = {
+				root = "rules/js/biome/testdata",
+				sources = core.files({ root = "rules/js/biome/testdata", include = { "absent.js" } }),
+			}
 			local source = { [fmt.FMT] = graph.biome_fmt_root(empty), [lint.LINT] = graph.biome_lint_root(empty) }
 			local formatted = core.test.resolve(source[fmt.FMT])
 			local clean = core.test.resolve(source[lint.LINT])
 			assert(#formatted.paths == 0 and not formatted.check.failed)
 			assert(clean.ok and not clean.fix_applied)
-			for _, run in ipairs(host.runs) do assert(not string.find(run.display, "biome fmt", 1, true) and not string.find(run.display, "biome lint", 1, true)) end
+			for _, run in ipairs(host.runs) do
+				assert(
+					not string.find(run.display, "biome fmt", 1, true)
+						and not string.find(run.display, "biome lint", 1, true)
+				)
+			end
 		end)
 	end),
 }

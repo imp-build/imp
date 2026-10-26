@@ -4,7 +4,9 @@ return {
 		local guide = core.read_file("@imp/rules/python/DOC.md")
 		local setup = assert(string.match(guide, "## Set up a Luau workspace(.-)## Run goals"))
 		local code = assert(string.match(setup, "```lua\n(.-)```"))
-		for module in string.gmatch(code, 'require%("([^"]+)"%)') do require(module) end
+		for module in string.gmatch(code, 'require%("([^"]+)"%)') do
+			require(module)
+		end
 		local python = require("@imp/rules/python")
 		local fmt = require("@imp/rules/workflows/fmt")
 		local lint = require("@imp/rules/workflows/lint")

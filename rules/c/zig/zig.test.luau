@@ -148,13 +148,16 @@ return {
 				return captured
 			end)
 			local script = {
-				'if command -v dirname >/dev/null 2>&1; then exit 1; fi',
+				"if command -v dirname >/dev/null 2>&1; then exit 1; fi",
 				'mkdir "tool chain"',
-				'printf %s ' .. shell_quote('#!/bin/sh\nprintf "<%s>\\n" "$@"\n') .. ' > "tool chain/zig"',
+				"printf %s " .. shell_quote('#!/bin/sh\nprintf "<%s>\\n" "$@"\n') .. ' > "tool chain/zig"',
 				'chmod +x "tool chain/zig"',
 			}
 			for _, wrapper in ipairs(wrappers) do
-				table.insert(script, 'printf %s ' .. shell_quote(wrapper.content) .. ' > "tool chain/' .. wrapper.name .. '"')
+				table.insert(
+					script,
+					"printf %s " .. shell_quote(wrapper.content) .. ' > "tool chain/' .. wrapper.name .. '"'
+				)
 				table.insert(script, 'chmod +x "tool chain/' .. wrapper.name .. '"')
 				table.insert(script, '"./tool chain/' .. wrapper.name .. '" "argument with spaces" "*"')
 			end
@@ -199,7 +202,9 @@ return {
 
 		core.test.case("uses current arch-then-os artifact naming from 0.14.1 onward", function()
 			assert(zig.artifact_name("0.14.1", LINUX) == "zig-x86_64-linux-0.14.1.tar.xz")
-			assert(zig.artifact_name("0.16.0", { os = "windows", arch = "aarch64" }) == "zig-aarch64-windows-0.16.0.zip")
+			assert(
+				zig.artifact_name("0.16.0", { os = "windows", arch = "aarch64" }) == "zig-aarch64-windows-0.16.0.zip"
+			)
 		end),
 
 		core.test.case("treats non-numeric versions (dev builds) as current naming", function()
@@ -293,7 +298,12 @@ return {
 					{ "'zig'", "'ar'", "rcs", "'liba.a'", "@'a.rsp'" }
 				)
 				same(
-					commands.link_command({ out_path = "out/libm.so", is_cxx = false, is_shared = true, rsp_path = "m.rsp" }),
+					commands.link_command({
+						out_path = "out/libm.so",
+						is_cxx = false,
+						is_shared = true,
+						rsp_path = "m.rsp",
+					}),
 					{ "'zig'", "'cc'", "-shared", "'-Wl,-soname,libm.so'", "-o", "'out/libm.so'", "@'m.rsp'" }
 				)
 			end)
@@ -340,7 +350,10 @@ return {
 			core.test.with_fake_toolchain_host(LINUX, function(host)
 				zig.reset_for_test()
 				for _, plat in ipairs(zig.supported_platforms()) do
-					host.set_run_stdout(`lock zig 0.14.0 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					host.set_run_stdout(
+						`lock zig 0.14.0 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
 				local declared = zig.zig_toolchain("0.14.0", { default = true, lockfile = "@workspace/locks/zig.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])

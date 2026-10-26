@@ -262,7 +262,9 @@ return {
 				"  OBJECT_DIR = CMakeFiles\\hello.dir",
 			}, "\n")
 			local graph = ninja.parse_ninja(text, read_include)
-			assert(graph.rules.C_COMPILER__hello_unscanned_.command == "C:/tools/clang.exe -MF $DEP_FILE -o $out -c $in")
+			assert(
+				graph.rules.C_COMPILER__hello_unscanned_.command == "C:/tools/clang.exe -MF $DEP_FILE -o $out -c $in"
+			)
 			assert(graph.edges[1].vars.DEP_FILE == "CMakeFiles/hello.dir/hello.c.o.d")
 			assert(graph.edges[1].vars.OBJECT_DIR == "CMakeFiles/hello.dir")
 		end),
@@ -309,27 +311,37 @@ return {
 
 		-- A dependency on a target type that `list_named_cmake_targets`
 		-- leaves out is never a boundary, so the walk goes through it.
-		core.test.case("walks through a dependency that isn't in the boundary set, exactly like reachable_edges", function()
-			local edges = parse().edges
-			local plain = without_phony(ninja.reachable_edges(edges, { "app" }))
-			local bounded = without_phony(ninja.reachable_edges_bounded(edges, { "app" }, {}).edges)
-			assert(same_list(bounded, plain))
-		end),
+		core.test.case(
+			"walks through a dependency that isn't in the boundary set, exactly like reachable_edges",
+			function()
+				local edges = parse().edges
+				local plain = without_phony(ninja.reachable_edges(edges, { "app" }))
+				local bounded = without_phony(ninja.reachable_edges_bounded(edges, { "app" }, {}).edges)
+				assert(same_list(bounded, plain))
+			end
+		),
 
 		-- A Windows SHARED_LIBRARY dependency can show up as `| lib.dll.a ||
 		-- lib.dll`: the link reads the import library, and the executable
 		-- loads the DLL at run time. Both are boundaries.
-		core.test.case("reports both an implicit (|) and an order-only (||) reference to the same dependency", function()
-			local text = table.concat({
-				"rule LINK",
-				"  command = cc $in -o $out -limpl",
-				"",
-				"build exe: LINK main.o | lib.dll.a || lib.dll",
-			}, "\n")
-			local edges = ninja.parse_ninja(text, read_include).edges
-			local reached = ninja.reachable_edges_bounded(edges, { "exe" }, { ["lib.dll.a"] = true, ["lib.dll"] = true })
-			assert(same_list(sorted(reached.boundaries), { "lib.dll", "lib.dll.a" }))
-		end),
+		core.test.case(
+			"reports both an implicit (|) and an order-only (||) reference to the same dependency",
+			function()
+				local text = table.concat({
+					"rule LINK",
+					"  command = cc $in -o $out -limpl",
+					"",
+					"build exe: LINK main.o | lib.dll.a || lib.dll",
+				}, "\n")
+				local edges = ninja.parse_ninja(text, read_include).edges
+				local reached = ninja.reachable_edges_bounded(
+					edges,
+					{ "exe" },
+					{ ["lib.dll.a"] = true, ["lib.dll"] = true }
+				)
+				assert(same_list(sorted(reached.boundaries), { "lib.dll", "lib.dll.a" }))
+			end
+		),
 	}),
 
 	core.test.suite("ninja_graph command resolution", {
@@ -356,13 +368,19 @@ return {
 			assert(ninja.sandbox_root_from_workdir("/x/other/", "build") == nil)
 		end),
 
-		core.test.case("rewrites command-position absolute tool paths to bare names, leaves argument paths alone", function()
-			local result = ninja.rewrite_tool_invocations(
-				"/usr/bin/cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c"
-			)
-			assert(result.command == "cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c", result.command)
-			assert(same_list(result.tool_names, { "cc" }))
-		end),
+		core.test.case(
+			"rewrites command-position absolute tool paths to bare names, leaves argument paths alone",
+			function()
+				local result = ninja.rewrite_tool_invocations(
+					"/usr/bin/cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c"
+				)
+				assert(
+					result.command == "cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c",
+					result.command
+				)
+				assert(same_list(result.tool_names, { "cc" }))
+			end
+		),
 
 		core.test.case("rewrites every chained invocation after && but not their arguments", function()
 			local result = ninja.rewrite_tool_invocations(
@@ -381,24 +399,28 @@ return {
 			assert(same_list(result.tool_names, { "a", "b", "c" }))
 		end),
 
-		core.test.case("resolve_edge_command combines expansion, rebasing (relative to build dir), and tool rewriting", function()
-			local graph = parse()
-			local core_obj = edge_with_output(graph.edges, "CMakeFiles/core.dir/src/core.c.o")
-			-- Ninja runs commands in the build directory, so a rebased
-			-- source path climbs out of "build" with one "../".
-			local resolved = ninja.resolve_edge_command(core_obj, graph.rules, graph.top_vars, root(), "build")
-			assert(contains(resolved.command, "cc "))
-			assert(not contains(resolved.command, SANDBOX_ROOT))
-			assert(contains(resolved.command, "-c ../src/core.c"), resolved.command)
-			assert(same_list(resolved.tool_names, { "cc" }))
-		end),
+		core.test.case(
+			"resolve_edge_command combines expansion, rebasing (relative to build dir), and tool rewriting",
+			function()
+				local graph = parse()
+				local core_obj = edge_with_output(graph.edges, "CMakeFiles/core.dir/src/core.c.o")
+				-- Ninja runs commands in the build directory, so a rebased
+				-- source path climbs out of "build" with one "../".
+				local resolved = ninja.resolve_edge_command(core_obj, graph.rules, graph.top_vars, root(), "build")
+				assert(contains(resolved.command, "cc "))
+				assert(not contains(resolved.command, SANDBOX_ROOT))
+				assert(contains(resolved.command, "-c ../src/core.c"), resolved.command)
+				assert(same_list(resolved.tool_names, { "cc" }))
+			end
+		),
 
 		-- A tool through the Imp mount is only on the PATH of its own mount,
 		-- so it is never a tool name.
 		core.test.case("resolve_edge_command rewrites imp's own relative tool-mount paths too", function()
 			local graph = parse()
 			local core_obj = edge_with_output(graph.edges, "CMakeFiles/core.dir/src/core.c.o")
-			local command = ninja.replace_all(graph.rules[core_obj.rule].command, "/usr/bin/cc", ".imp/tools/zig/zig cc")
+			local command =
+				ninja.replace_all(graph.rules[core_obj.rule].command, "/usr/bin/cc", ".imp/tools/zig/zig cc")
 			local rules = with_rule(graph, core_obj.rule, { command = command })
 			local resolved = ninja.resolve_edge_command(core_obj, rules, graph.top_vars, root(), "build")
 			assert(contains(resolved.command, "zig cc "), resolved.command)
@@ -408,17 +430,23 @@ return {
 
 		-- CMake makes CMAKE_AR absolute at configure time, so a rebase gives
 		-- "../.imp/tools/zig/zigar", which is still a tool invocation.
-		core.test.case("resolve_edge_command rewrites imp tool-mount paths even after CMake made them absolute", function()
-			local graph = parse()
-			local lib_edge = edge_with_output(graph.edges, "libcore.a")
-			local command =
-				ninja.replace_all(graph.rules[lib_edge.rule].command, "/usr/bin/ar", `{SANDBOX_ROOT}/.imp/tools/zig/zigar`)
-			local rules = with_rule(graph, lib_edge.rule, { command = command })
-			local resolved = ninja.resolve_edge_command(lib_edge, rules, graph.top_vars, root(), "build")
-			assert(contains(resolved.command, "zigar qc"), resolved.command)
-			assert(not contains(resolved.command, ".imp/tools/zig/zigar "))
-			assert(not table.find(resolved.tool_names, "zigar"))
-		end),
+		core.test.case(
+			"resolve_edge_command rewrites imp tool-mount paths even after CMake made them absolute",
+			function()
+				local graph = parse()
+				local lib_edge = edge_with_output(graph.edges, "libcore.a")
+				local command = ninja.replace_all(
+					graph.rules[lib_edge.rule].command,
+					"/usr/bin/ar",
+					`{SANDBOX_ROOT}/.imp/tools/zig/zigar`
+				)
+				local rules = with_rule(graph, lib_edge.rule, { command = command })
+				local resolved = ninja.resolve_edge_command(lib_edge, rules, graph.top_vars, root(), "build")
+				assert(contains(resolved.command, "zigar qc"), resolved.command)
+				assert(not contains(resolved.command, ".imp/tools/zig/zigar "))
+				assert(not table.find(resolved.tool_names, "zigar"))
+			end
+		),
 
 		core.test.case("resolve_edge_command handles the static-library link edge's multi-command chain", function()
 			local graph = parse()
@@ -469,25 +497,28 @@ return {
 
 		-- $POST_BUILD can be its own `cmd.exe /C "..."` inside the wrapper of
 		-- the rule template. Each prefix and each quote goes, at any depth.
-		core.test.case("resolve_edge_command unwraps a cmd.exe /C wrapper nested inside another via $POST_BUILD", function()
-			local graph = parse()
-			local lib_edge = edge_with_output(graph.edges, "libcore.a")
-			local rules = with_rule(graph, lib_edge.rule, {
-				command = 'cmd.exe /C "$PRE_LINK && C:/tools/ar.exe qc $TARGET_FILE $LINK_FLAGS $in && $POST_BUILD"',
-			})
-			local nested = with_vars(lib_edge, {
-				PRE_LINK = ":",
-				POST_BUILD = 'cmd.exe /C "cd /D ../out && C:/tools/cmake.exe -E copy a.dll b.dll"',
-			})
-			local resolved = ninja.resolve_edge_command(nested, rules, graph.top_vars, root(), "build")
-			assert(not contains(resolved.command, '"'))
-			assert(
-				resolved.command
-					== ": && ar.exe qc libcore.a  CMakeFiles/core.dir/src/core.c.o && cd ../out && cmake.exe -E copy a.dll b.dll",
-				resolved.command
-			)
-			assert(same_list(sorted(resolved.tool_names), { "ar.exe", "cmake.exe" }))
-		end),
+		core.test.case(
+			"resolve_edge_command unwraps a cmd.exe /C wrapper nested inside another via $POST_BUILD",
+			function()
+				local graph = parse()
+				local lib_edge = edge_with_output(graph.edges, "libcore.a")
+				local rules = with_rule(graph, lib_edge.rule, {
+					command = 'cmd.exe /C "$PRE_LINK && C:/tools/ar.exe qc $TARGET_FILE $LINK_FLAGS $in && $POST_BUILD"',
+				})
+				local nested = with_vars(lib_edge, {
+					PRE_LINK = ":",
+					POST_BUILD = 'cmd.exe /C "cd /D ../out && C:/tools/cmake.exe -E copy a.dll b.dll"',
+				})
+				local resolved = ninja.resolve_edge_command(nested, rules, graph.top_vars, root(), "build")
+				assert(not contains(resolved.command, '"'))
+				assert(
+					resolved.command
+						== ": && ar.exe qc libcore.a  CMakeFiles/core.dir/src/core.c.o && cd ../out && cmake.exe -E copy a.dll b.dll",
+					resolved.command
+				)
+				assert(same_list(sorted(resolved.tool_names), { "ar.exe", "cmake.exe" }))
+			end
+		),
 
 		-- BoringSSL's CXX_STATIC_LIBRARY_LINKER rule declares `rspfile =
 		-- $RSP_FILE` and `rspfile_content = $in $LINK_PATH $LINK_LIBRARIES`.
@@ -499,7 +530,8 @@ return {
 				rspfile = "$RSP_FILE",
 				rspfile_content = "$in $LINK_PATH $LINK_LIBRARIES",
 			})
-			local rsp_edge = with_vars(lib_edge, { RSP_FILE = "CMakeFiles/core.rsp", LINK_PATH = "", LINK_LIBRARIES = "" })
+			local rsp_edge =
+				with_vars(lib_edge, { RSP_FILE = "CMakeFiles/core.rsp", LINK_PATH = "", LINK_LIBRARIES = "" })
 			local resolved = ninja.resolve_edge_command(rsp_edge, rules, graph.top_vars, root(), "build")
 			assert(resolved.command == "ar qc libcore.a  @CMakeFiles/core.rsp", resolved.command)
 			assert(resolved.rspfile.path == "CMakeFiles/core.rsp")

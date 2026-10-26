@@ -7,4 +7,8 @@ local function python_runtime(value)
 end
 return {
 	--- @category configuration
-	python_runtime = python_runtime, default_python_runtime_version = function() return version end }
+	python_runtime = python_runtime,
+	default_python_runtime_version = function()
+		return version
+	end,
+}

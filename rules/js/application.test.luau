@@ -14,8 +14,12 @@ local function fake(fn)
 	end)
 end
 local function app_options(ts)
-	return { base = "rules/js/example", src = if ts then "app_ts" else "app",
-		entry = if ts then "index.js" else "src/index.js", sources = { "src/**/*" } }
+	return {
+		base = "rules/js/example",
+		src = if ts then "app_ts" else "app",
+		entry = if ts then "index.js" else "src/index.js",
+		sources = { "src/**/*" },
+	}
 end
 return {
 	core.test.case("applications declare build and program facets", function()
@@ -65,7 +69,9 @@ return {
 			table.insert(seen, "second")
 			return {}
 		end)
-		fake(function() js.js_app(app_options(false)) end)
+		fake(function()
+			js.js_app(app_options(false))
+		end)
 		assert(table.concat(seen, ",") == "first,second")
 	end),
 }

@@ -53,7 +53,8 @@ return {
 			{ address = "//pkg:b", result = { { name = "unit-b", ok = true } } },
 			{ address = "//pkg:a", result = { { name = "unit-a", ok = true } } },
 		})
-		local expected = `//pkg:a unit-a  {GREEN}PASS{RESET}\n//pkg:b unit-b  {GREEN}PASS{RESET}\ntest: 2/2 unit(s) passed`
+		local expected =
+			`//pkg:a unit-a  {GREEN}PASS{RESET}\n//pkg:b unit-b  {GREEN}PASS{RESET}\ntest: 2/2 unit(s) passed`
 		assert(text == expected, text)
 	end),
 

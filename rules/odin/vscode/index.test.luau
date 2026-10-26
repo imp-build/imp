@@ -10,8 +10,13 @@ local function package(path, options)
 	return odin.odin_package(options)
 end
 local function resolve(handle)
-	return core.test.resolve(core.task({ inputs = { value = handle }, outputs = { value = core.output.value() },
-		run = function(_, input) return { value = input.value } end }).outputs.value)
+	return core.test.resolve(core.task({
+		inputs = { value = handle },
+		outputs = { value = core.output.value() },
+		run = function(_, input)
+			return { value = input.value }
+		end,
+	}).outputs.value)
 end
 return {
 	core.test.case("import adds a VS Code handle and preserves formatter hooks", function()
@@ -20,7 +25,10 @@ return {
 	end),
 	core.test.case("Windows bundle metadata uses the published executable name", function()
 		core.test.with_fake_toolchain_host({ os = "windows", arch = "x86_64" }, function(host)
-			host.set_run_stdout("tree-sitter analyze Odin sources", [=[{"files":{"rules/odin/example/main.odin":{"imports":[],"hasMainEntrypoint":true}}}]=])
+			host.set_run_stdout(
+				"tree-sitter analyze Odin sources",
+				[=[{"files":{"rules/odin/example/main.odin":{"imports":[],"hasMainEntrypoint":true}}}]=]
+			)
 			local shared = core.files({ root = "rules/odin/example", include = { "main.odin" } })
 			local value = package("rules/odin/example", { deps = { { transitive_shared_libs = { shared } } } })
 			local info = resolve(value[vs.VSCODE])
@@ -30,7 +38,10 @@ return {
 
 	core.test.case("metadata scans sources without building the selected package", function()
 		core.test.with_fake_toolchain_host(function(host)
-			host.set_run_stdout("tree-sitter analyze Odin sources", [=[{"files":{"rules/odin/example/main.odin":{"imports":[],"hasMainEntrypoint":true},"rules/odin/example/split/split.odin":{"imports":[],"hasMainEntrypoint":false},"rules/odin/example/split/split_test.odin":{"imports":[],"hasMainEntrypoint":true}}}]=])
+			host.set_run_stdout(
+				"tree-sitter analyze Odin sources",
+				[=[{"files":{"rules/odin/example/main.odin":{"imports":[],"hasMainEntrypoint":true},"rules/odin/example/split/split.odin":{"imports":[],"hasMainEntrypoint":false},"rules/odin/example/split/split_test.odin":{"imports":[],"hasMainEntrypoint":true}}}]=]
+			)
 			local main = resolve(package("rules/odin/example")[vs.VSCODE])
 			assert(main.has_main and not main.is_test and main.executable_path == nil)
 			local library = resolve(package("rules/odin/example/split")[vs.VSCODE])

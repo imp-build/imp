@@ -1,30 +1,42 @@
 local core = require("@imp/core")
 local rust = require("@imp/rules/rust/toolchain")
 local locks = require("@imp/rules/workflows/lockfiles")
-local function contains(text, part) return string.find(text, part, 1, true) ~= nil end
+local function contains(text, part)
+	return string.find(text, part, 1, true) ~= nil
+end
 local function resolve_env(kache)
 	local graph = rust.graph_toolchain()
 	return core.test.resolve(core.task({
-		inputs = { tool = graph.tool, cargo = graph.cargo_home_tool }, outputs = { value = core.output.value() },
-		run = function(exec, input) return { value = rust.graph_tool_env(exec, input.tool, input.cargo, graph.toolchain_id, graph.version, kache) } end,
+		inputs = { tool = graph.tool, cargo = graph.cargo_home_tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, input)
+			return {
+				value = rust.graph_tool_env(exec, input.tool, input.cargo, graph.toolchain_id, graph.version, kache),
+			}
+		end,
 	}).outputs.value)
 end
 return {
- core.test.case("Rust custom lockfile supplies the download checksum", function()
-  core.test.with_fake_toolchain_host(function(host)
-   rust.rust_toolchain("1.98.1", { default = true, lockfile = "@imp/rules/rust/testdata/rust-custom.json" })
-   resolve_env(false)
-   assert(contains(table.concat(host.runs[1].argv, " "), string.rep("ab", 32)))
-  end)
- end),
- core.test.case("Rust lockfile root uses the declared workspace address", function()
-  core.test.with_fake_run(function(host)
-   for _, plat in ipairs(rust.supported_platforms()) do host.set_run_stdout(`lock rust 1.98.1 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n") end
-   local declared = rust.rust_toolchain("1.98.1", { lockfile = "@workspace/locks/rust.lock" })
-   local result = core.test.resolve(declared[locks.GEN_LOCKFILES])
-   assert(result.path == "locks/rust.lock")
-  end)
- end),
+	core.test.case("Rust custom lockfile supplies the download checksum", function()
+		core.test.with_fake_toolchain_host(function(host)
+			rust.rust_toolchain("1.98.1", { default = true, lockfile = "@imp/rules/rust/testdata/rust-custom.json" })
+			resolve_env(false)
+			assert(contains(table.concat(host.runs[1].argv, " "), string.rep("ab", 32)))
+		end)
+	end),
+	core.test.case("Rust lockfile root uses the declared workspace address", function()
+		core.test.with_fake_run(function(host)
+			for _, plat in ipairs(rust.supported_platforms()) do
+				host.set_run_stdout(
+					`lock rust 1.98.1 {plat.os}/{plat.arch}`,
+					string.rep("ab", 32) .. "  artifact\n  42\n"
+				)
+			end
+			local declared = rust.rust_toolchain("1.98.1", { lockfile = "@workspace/locks/rust.lock" })
+			local result = core.test.resolve(declared[locks.GEN_LOCKFILES])
+			assert(result.path == "locks/rust.lock")
+		end)
+	end),
 	core.test.case("Rust declares the pinned default and lockfile goal", function()
 		assert(rust.default_version() == "1.98.1")
 		assert(type(rust.default_toolchain()[locks.GEN_LOCKFILES]) == "userdata")
@@ -44,7 +56,10 @@ return {
 			local url = rust.download_url("1.98.1", plat)
 			assert(contains(url, "/archive/1.27.1/"))
 			assert(contains(rust.toolchain_id("1.98.1", plat), "1.98.1-"))
-			assert(rust.artifact_name("1.98.1", plat) == (if plat.os == "windows" then "rustup-init.exe" else "rustup-init"))
+			assert(
+				rust.artifact_name("1.98.1", plat)
+					== (if plat.os == "windows" then "rustup-init.exe" else "rustup-init")
+			)
 		end
 		assert(not pcall(rust.download_url, "1.98.1", { os = "linux", arch = "bad" }))
 	end),
@@ -58,7 +73,9 @@ return {
 		core.test.with_fake_toolchain_host(function(host)
 			rust.rust_toolchain("1.98.1", { default = true })
 			local value = resolve_env(false)
-			assert(value.env.RUSTUP_HOME == ".imp/tools/rustup-home" and value.env.CARGO_HOME == ".imp/tools/cargo-home")
+			assert(
+				value.env.RUSTUP_HOME == ".imp/tools/rustup-home" and value.env.CARGO_HOME == ".imp/tools/cargo-home"
+			)
 			assert(#host.runs == 2)
 			local install = host.runs[2]
 			assert(install.outputs.rustup_home == "rustup-home" and install.outputs.cargo_home == "cargo-home")

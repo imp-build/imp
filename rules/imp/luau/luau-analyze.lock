@@ -1,0 +1,25 @@
+{
+  "tool": "luau-analyze",
+  "versions": {
+    "0.709": {
+      "linux/x86_64": {
+        "url": "https://github.com/luau-lang/luau/releases/download/0.709/luau-ubuntu.zip",
+        "artifact": "luau-ubuntu.zip",
+        "size": 6544581,
+        "sha256": "ccf477dc5efa6336013bf87184730cbc6b57c901da01e6e75913dd159623f3ec"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/luau-lang/luau/releases/download/0.709/luau-macos.zip",
+        "artifact": "luau-macos.zip",
+        "size": 4853869,
+        "sha256": "74422ae9998bb4399967a47a2bce1329d7abd5072012135e8d95e0cf4d07eb85"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/luau-lang/luau/releases/download/0.709/luau-windows.zip",
+        "artifact": "luau-windows.zip",
+        "size": 2649720,
+        "sha256": "2a49105948c35392a7e4dd2b8fcd6818b169ef70e1f306b4247b25d1106df197"
+      }
+    }
+  }
+}

@@ -522,7 +522,7 @@ end
 -- parser, and one Ninja run schedules all compiler scans. The build output
 -- goes to stderr.
 local SCAN_SCRIPT = table.concat({
-	'set -eu; bdir=$1 oldroot=$2 up=$3 mode=$4; ',
+	"set -eu; bdir=$1 oldroot=$2 up=$3 mode=$4; ",
 	'cd "$bdir"; ',
 	-- Configure is a separate task. Do not regenerate its graph in this copy.
 	'sed -i "/^build build[.]ninja.*: RERUN_CMAKE/,/^$/d" build.ninja; ',
@@ -530,9 +530,9 @@ local SCAN_SCRIPT = table.concat({
 	'if [ "$mode" = msvc ]; then flag=/Zs; else flag=-fsyntax-only; fi; ',
 	'sed -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s|$| $flag| }" CMakeFiles/rules.ninja; ',
 	-- Keep Ninja out of a pipeline so that its failure reaches the action.
-	'ninja -f build.ninja -t targets all > .imp-cmake-targets.txt; ',
+	"ninja -f build.ninja -t targets all > .imp-cmake-targets.txt; ",
 	'targets=$(sed -n -E "s/: (C|CXX)_COMPILER.*$//p" .imp-cmake-targets.txt); ',
-	'set -- $targets; ',
+	"set -- $targets; ",
 	'[ "$#" -gt 0 ] || { echo "cmake dependency scan found no compiler targets" >&2; exit 1; }; ',
 	'ninja -f build.ninja -k 0 "$@" >&2; ',
 	"ninja -f build.ninja -t deps > .imp-cmake-deps.txt",
@@ -748,7 +748,10 @@ local function edge_argv(build_dir_path, resolved)
 	local script = `cd '{build_dir_path}' && `
 		.. [[{ rsp=$1; shift; : > "$rsp"; for chunk; do printf '%s' "$chunk" >> "$rsp"; done; } && ]]
 		.. resolved.command
-	return append({ "sh", "-c", script, "cmake-rsp", resolved.rspfile.path }, chunk_rspfile_content(resolved.rspfile.content))
+	return append(
+		{ "sh", "-c", script, "cmake-rsp", resolved.rspfile.path },
+		chunk_rspfile_content(resolved.rspfile.content)
+	)
 end
 
 -- The task input key of one output of a dependency target.
@@ -966,7 +969,9 @@ local function ctest_name_filter_args(test_names)
 	end
 	local escaped = {}
 	for _, name in ipairs(test_names) do
-		table.insert(escaped, (string.gsub(name, "[%.%*%+%?%^%$%{%}%(%)%|%[%]\\]", "\\%0")))
+		table.insert(escaped, (string.gsub(name, "%p", function(character)
+			return if string.find(".*+?^${}()|[]\\", character, 1, true) then "\\" .. character else character
+		end)))
 	end
 	return { "-R", `^({table.concat(escaped, "|")})$` }
 end

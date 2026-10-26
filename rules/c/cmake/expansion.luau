@@ -155,7 +155,10 @@ local function build_target_deps(target_name, named, cross_deps, built_by_name)
 			local file_index = table.find(dep_target.outputs, output_path)
 			if file_index == nil then
 				error(
-					`cmake project: '{target_name}' depends on '{dep.name}' via output '{output_path}', but that output isn't among '{dep.name}''s own declared outputs ({table.concat(dep_target.outputs, ", ")}) - cross_target_dependencies() and this function have gone out of sync`,
+					`cmake project: '{target_name}' depends on '{dep.name}' via output '{output_path}', but that output isn't among '{dep.name}''s own declared outputs ({table.concat(
+						dep_target.outputs,
+						", "
+					)}) - cross_target_dependencies() and this function have gone out of sync`,
 					0
 				)
 			end

@@ -19,12 +19,16 @@ local function grammar_fixture(name, root, include)
 			local suffix = if core.platform_info().os == "windows" then ".exe" else ""
 			local argv = { `{gcc.graph_toolchain_dir(exec, input.gcc)}/bin/cc{suffix}`, "-shared", "-fPIC", `-I{root}` }
 			for _, path in ipairs(exec.paths(input.sources)) do
-				if string.match(path, "%.c$") then table.insert(argv, path) end
+				if string.match(path, "%.c$") then
+					table.insert(argv, path)
+				end
 			end
 			table.insert(argv, "-o")
 			table.insert(argv, output_path)
 			local result = exec.action({
-				argv = argv, inputs = { input.sources }, tools = { input.gcc },
+				argv = argv,
+				inputs = { input.sources },
+				tools = { input.gcc },
 				outputs = { archive = output.file(output_path) },
 			})
 			return { archive = result.outputs.archive }
@@ -34,10 +38,12 @@ local function grammar_fixture(name, root, include)
 end
 
 --- Build the JSON grammar from built-in C sources and headers.
-local json_grammar_fixture = grammar_fixture("json", "treesitter/testdata/tree-sitter-json", { "parser.c", "tree_sitter/*.h" })
+local json_grammar_fixture =
+	grammar_fixture("json", "treesitter/testdata/tree-sitter-json", { "parser.c", "tree_sitter/*.h" })
 
 --- Build the Odin grammar, including its external scanner.
-local odin_grammar_fixture = grammar_fixture("odin", "treesitter/testdata/tree-sitter-odin", { "parser.c", "scanner.c", "tree_sitter/*.h" })
+local odin_grammar_fixture =
+	grammar_fixture("odin", "treesitter/testdata/tree-sitter-odin", { "parser.c", "scanner.c", "tree_sitter/*.h" })
 
 --- Compile the pinned Luau grammar for static reference extraction.
 local luau_grammar = grammar_fixture("luau", "treesitter/grammars/luau", { "parser.c", "scanner.c", "tree_sitter/*.h" })
@@ -58,7 +64,8 @@ local roundtrip_run = core.task({
 	run = function(exec, input)
 		local result = exec.action({
 			argv = { exec.path(input.bin), exec.path(input.fixture) },
-			inputs = { input.bin, input.fixture }, allow_failure = true,
+			inputs = { input.bin, input.fixture },
+			allow_failure = true,
 		})
 		return { units = test.test_vehicle("grammar-roundtrip", result) }
 	end,

@@ -10,9 +10,12 @@ local function python_workspace(options)
 	options = options or {}
 	local ref = project.python_workspace_ref(options.path or core.package_path())
 	local value = table.clone(ref)
-	value[lockfiles.GEN_LOCKFILES] = lock.python_workspace_lock({ workspace = ref.path,
-		sources = project.python_workspace_sources(ref), uv = uv.graph_toolchain(options.uv_version).tool,
-		python_version = options.python_version or runtime.default_python_runtime_version() })
+	value[lockfiles.GEN_LOCKFILES] = lock.python_workspace_lock({
+		workspace = ref.path,
+		sources = project.python_workspace_sources(ref),
+		uv = uv.graph_toolchain(options.uv_version).tool,
+		python_version = options.python_version or runtime.default_python_runtime_version(),
+	})
 	return table.freeze(value)
 end
 return { python_workspace = python_workspace }

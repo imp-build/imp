@@ -103,7 +103,11 @@ return {
 
 				local published = false
 				for _, call in ipairs(host.calls) do
-					if call[1] == "named_cache" and call[2] == "mold-toolchains" and call[3] == "2.41.0/linux-x86_64" then
+					if
+						call[1] == "named_cache"
+						and call[2] == "mold-toolchains"
+						and call[3] == "2.41.0/linux-x86_64"
+					then
 						published = true
 					end
 				end
@@ -122,12 +126,20 @@ return {
 
 		core.test.case("unverified downloads without a sha check", function()
 			with_mold_host(function(host)
-				mold.mold_toolchain("2.41.0", { default = true, unverified = true, lockfile = `{TESTDATA}/missing.json` })
+				mold.mold_toolchain(
+					"2.41.0",
+					{ default = true, unverified = true, lockfile = `{TESTDATA}/missing.json` }
+				)
 				install("2.41.0")
 				assert(#host.runs == 2)
 				local download = host.runs[1]
 				assert(not contains(download.argv[3], "sha256sum"), download.argv[3])
-				assert(has(download.argv, "https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz"))
+				assert(
+					has(
+						download.argv,
+						"https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz"
+					)
+				)
 			end)
 		end),
 
@@ -143,15 +155,18 @@ return {
 			end)
 		end),
 
-		core.test.case("a non-default verified version needs a lockfile entry when the default is unverified", function()
-			with_mold_host(function()
-				mold.mold_toolchain("2.41.0", { default = true, unverified = true })
-				mold.mold_toolchain("9.9.9")
-				local text = error_text(install, "9.9.9")
-				assert(contains(text, "mold 9.9.9"), text)
-				assert(contains(text, "gen-lockfiles"), text)
-			end)
-		end),
+		core.test.case(
+			"a non-default verified version needs a lockfile entry when the default is unverified",
+			function()
+				with_mold_host(function()
+					mold.mold_toolchain("2.41.0", { default = true, unverified = true })
+					mold.mold_toolchain("9.9.9")
+					local text = error_text(install, "9.9.9")
+					assert(contains(text, "mold 9.9.9"), text)
+					assert(contains(text, "gen-lockfiles"), text)
+				end)
+			end
+		),
 
 		core.test.case("graph toolchain construction runs no action", function()
 			with_mold_host(function(host)
@@ -167,17 +182,24 @@ return {
 			end)
 		end),
 
-		core.test.case("rust_linker_env keeps the bare -fuse-ld=mold form and returns the named-cache bin directory", function()
-			with_mold_host(function()
-				mold.mold_toolchain("2.41.0", { default = true })
-				-- This Bootlin-built gcc rejects an absolute -fuse-ld=<path>, so
-				-- the flag keeps the PATH-search form, and path_dirs has the
-				-- absolute bin directory for the caller to add to PATH.
-				local env = core.test.resolve(with_mold_tool("2.41.0", mold.rust_linker_env))
-				assert(#env.rustflags == 2 and env.rustflags[1] == "-C" and env.rustflags[2] == "link-arg=-fuse-ld=mold")
-				assert(#env.path_dirs == 1 and env.path_dirs[1] == CACHE_DIR .. "/bin", env.path_dirs[1])
-			end)
-		end),
+		core.test.case(
+			"rust_linker_env keeps the bare -fuse-ld=mold form and returns the named-cache bin directory",
+			function()
+				with_mold_host(function()
+					mold.mold_toolchain("2.41.0", { default = true })
+					-- This Bootlin-built gcc rejects an absolute -fuse-ld=<path>, so
+					-- the flag keeps the PATH-search form, and path_dirs has the
+					-- absolute bin directory for the caller to add to PATH.
+					local env = core.test.resolve(with_mold_tool("2.41.0", mold.rust_linker_env))
+					assert(
+						#env.rustflags == 2
+							and env.rustflags[1] == "-C"
+							and env.rustflags[2] == "link-arg=-fuse-ld=mold"
+					)
+					assert(#env.path_dirs == 1 and env.path_dirs[1] == CACHE_DIR .. "/bin", env.path_dirs[1])
+				end)
+			end
+		),
 
 		core.test.case("odin_linker_env selects -linker:mold and returns the named-cache bin directory", function()
 			with_mold_host(function()
@@ -189,8 +211,18 @@ return {
 		end),
 
 		core.test.case("an unsupported platform fails by name", function()
-			assert(contains(error_text(mold.artifact_name, "2.41.0", { os = "macos", arch = "aarch64" }), "unsupported mold toolchain OS: macos"))
-			assert(contains(error_text(mold.artifact_name, "2.41.0", { os = "linux", arch = "riscv64" }), "unsupported mold toolchain architecture: riscv64"))
+			assert(
+				contains(
+					error_text(mold.artifact_name, "2.41.0", { os = "macos", arch = "aarch64" }),
+					"unsupported mold toolchain OS: macos"
+				)
+			)
+			assert(
+				contains(
+					error_text(mold.artifact_name, "2.41.0", { os = "linux", arch = "riscv64" }),
+					"unsupported mold toolchain architecture: riscv64"
+				)
+			)
 			assert(#mold.supported_platforms() == 2)
 		end),
 	}),
@@ -235,9 +267,13 @@ return {
 			core.test.with_fake_run(function(run)
 				mold.reset_for_test()
 				for _, plat in ipairs(mold.supported_platforms()) do
-					run.set_run_stdout(`lock mold 2.40.0 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					run.set_run_stdout(
+						`lock mold 2.40.0 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
-				local declared = mold.mold_toolchain("2.40.0", { default = true, lockfile = "@workspace/locks/mold.lock" })
+				local declared =
+					mold.mold_toolchain("2.40.0", { default = true, lockfile = "@workspace/locks/mold.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/mold.lock", result.path)
 				local written = false

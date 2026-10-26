@@ -36,7 +36,7 @@ local function scan_fixture(mode)
 		compiler = 'test "$2" = /Zs || exit 9; '
 			.. if mode == "msvc headers" then 'printf "Note: including file: ../used.h\\n"' else "true"
 	elseif mode == "compiler failure" then
-		compiler = 'echo scan-compiler-failed >&2; exit 7'
+		compiler = "echo scan-compiler-failed >&2; exit 7"
 	elseif mode == "missing depfile" then
 		compiler = "true"
 	elseif mode == "invalid graph" then
@@ -121,21 +121,24 @@ local cases = {
 	end),
 }
 for _, mode in { "compiler failure", "missing depfile", "invalid graph", "no targets", "patch failure" } do
-	table.insert(cases, core.test.case(`rejects {mode}`, function()
-		local ok, err = pcall(core.test.resolve, scan_fixture(mode))
-		assert(not ok, `scan accepted {mode}`)
-		local text = tostring(err)
-		if mode == "missing depfile" then
-			assert(string.find(text, "Ninja dependency record omitted the direct source", 1, true), text)
-		else
-			assert(string.find(text, "failed with exit code", 1, true), text)
-			if mode == "compiler failure" then
-				assert(string.find(text, "scan-compiler-failed", 1, true), text)
-			elseif mode == "no targets" then
-				assert(string.find(text, "cmake dependency scan found no compiler targets", 1, true), text)
+	table.insert(
+		cases,
+		core.test.case(`rejects {mode}`, function()
+			local ok, err = pcall(core.test.resolve, scan_fixture(mode))
+			assert(not ok, `scan accepted {mode}`)
+			local text = tostring(err)
+			if mode == "missing depfile" then
+				assert(string.find(text, "Ninja dependency record omitted the direct source", 1, true), text)
+			else
+				assert(string.find(text, "failed with exit code", 1, true), text)
+				if mode == "compiler failure" then
+					assert(string.find(text, "scan-compiler-failed", 1, true), text)
+				elseif mode == "no targets" then
+					assert(string.find(text, "cmake dependency scan found no compiler targets", 1, true), text)
+				end
 			end
-		end
-	end))
+		end)
+	)
 end
 
 return { core.test.suite("compiler scan actions", cases) }

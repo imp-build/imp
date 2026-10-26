@@ -2,6 +2,9 @@
 
 Declare tools, generated sources, lockfile downloads, and rule tests.
 
+See [Quality checks for Imp Luau modules](/reference/user-api/imp/luau/) for reusable authoring
+source, formatter, and analyzer rules under `@imp/rules/imp/luau`.
+
 ## Public API
 
 ## Luau modules

@@ -22,5 +22,4 @@ return {
 		local source = js.js_sources({ base = "rules/js/example/app/src" })
 		assert(type(source[lint.LINT]) == "userdata" and source[fmt.FMT] == nil)
 	end),
-
 }

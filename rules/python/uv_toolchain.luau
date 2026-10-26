@@ -9,8 +9,10 @@ local DEFAULT_LOCKFILE = "@imp/rules/python/uv-toolchain.lock"
 local graphs = {}
 local cache_tool = nil
 local triples = {
-	["linux-x86_64"] = "x86_64-unknown-linux-gnu", ["linux-aarch64"] = "aarch64-unknown-linux-gnu",
-	["macos-x86_64"] = "x86_64-apple-darwin", ["macos-aarch64"] = "aarch64-apple-darwin",
+	["linux-x86_64"] = "x86_64-unknown-linux-gnu",
+	["linux-aarch64"] = "aarch64-unknown-linux-gnu",
+	["macos-x86_64"] = "x86_64-apple-darwin",
+	["macos-aarch64"] = "aarch64-apple-darwin",
 	["windows-x86_64"] = "x86_64-pc-windows-msvc",
 }
 local function supported_platforms()
@@ -28,17 +30,24 @@ end
 local function download_url(version, plat)
 	return `https://github.com/astral-sh/uv/releases/download/{version}/{artifact_name(version, plat)}`
 end
-local function cache_key(version, plat) return `{version}/{plat.os}-{plat.arch}` end
+local function cache_key(version, plat)
+	return `{version}/{plat.os}-{plat.arch}`
+end
 local SPEC = lockfiles.register_toolchain_lockfile({
-	name = "uv-toolchain", platforms = supported_platforms(), artifact_name = artifact_name,
-	download_url = download_url, lockfile = DEFAULT_LOCKFILE,
+	name = "uv-toolchain",
+	platforms = supported_platforms(),
+	artifact_name = artifact_name,
+	download_url = download_url,
+	lockfile = DEFAULT_LOCKFILE,
 }, { "0.11.16", "0.12.13" })
 
 -- A graph dependency creates the cache before its first mount. Publishing
 -- the same named-cache key preserves the directory and its existing files.
 --- Return the shared cache tool, independent of a default uv version.
 local function data_tool()
-	if cache_tool then return cache_tool end
+	if cache_tool then
+		return cache_tool
+	end
 	local seed = core.task({
 		display = "seed uv-cache-dir",
 		inputs = { shell = core.native_tool("sh"), mkdir = core.native_tool("mkdir") },
@@ -47,7 +56,12 @@ local function data_tool()
 			local result = exec.action({
 				argv = { "sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", "cache" },
 				tools = { inputs.shell, inputs.mkdir },
-				outputs = { directory = core.output.directory("cache", { named_cache = { name = "uv-cache-dir", key = "shared" } }) },
+				outputs = {
+					directory = core.output.directory(
+						"cache",
+						{ named_cache = { name = "uv-cache-dir", key = "shared" } }
+					),
+				},
 			})
 			return { directory = result.outputs.directory }
 		end,
@@ -59,17 +73,28 @@ local function make_graph(version)
 	local plat = core.platform_info()
 	local key = cache_key(version, plat)
 	local downloaded = lockfile.download_tool_artifact({
-		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE), tool = "uv-toolchain",
-		version = version, plat = plat,
-		url = download_url(version, plat), output = `uv-downloads/{key}/{artifact_name(version, plat)}`,
-		display = `download uv {version}`, unverified = KIND.resolve_unverified(version),
+		lockfile = lockfile.lockfile_for(KIND, version, DEFAULT_LOCKFILE),
+		tool = "uv-toolchain",
+		version = version,
+		plat = plat,
+		url = download_url(version, plat),
+		output = `uv-downloads/{key}/{artifact_name(version, plat)}`,
+		display = `download uv {version}`,
+		unverified = KIND.resolve_unverified(version),
 	})
 	local directory = archive.extract_archive({
-		archive = downloaded, dest = "uv-toolchain", format = if plat.os == "windows" then "zip" else "tar.gz",
+		archive = downloaded,
+		dest = "uv-toolchain",
+		format = if plat.os == "windows" then "zip" else "tar.gz",
 		strip_components = if plat.os == "windows" then nil else 1,
-		named_cache = { name = "uv-toolchains", key = key }, display = `install uv {version}`,
+		named_cache = { name = "uv-toolchains", key = key },
+		display = `install uv {version}`,
 	})
-	return table.freeze({ tool = core.tool(directory, { name = "uv", bin_dirs = { "." } }), cache_tool = data_tool(), version = version })
+	return table.freeze({
+		tool = core.tool(directory, { name = "uv", bin_dirs = { "." } }),
+		cache_tool = data_tool(),
+		version = version,
+	})
 end
 
 --- Declare uv version. Options: default, lockfile, and unverified.
@@ -84,14 +109,20 @@ local function uv_toolchain(version, options)
 	local spec = table.clone(SPEC)
 	spec.version = version
 	spec.lockfile = address
-	return { version = version, lockfile = address, [lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec) }
+	return {
+		version = version,
+		lockfile = address,
+		[lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile(spec),
+	}
 end
 
 --- Return { tool, cache_tool, version } for a declared or default version.
 --- Declare both handles as task inputs before an action uses the cache.
 local function graph_toolchain(version)
 	local resolved = KIND.require_version(version)
-	if graphs[resolved] == nil then graphs[resolved] = make_graph(resolved) end
+	if graphs[resolved] == nil then
+		graphs[resolved] = make_graph(resolved)
+	end
 	return graphs[resolved]
 end
 
@@ -125,11 +156,18 @@ toolchain.register("uv", function()
 end)
 
 return {
-	cache_tool = data_tool, UV = KIND,
+	cache_tool = data_tool,
+	UV = KIND,
 	--- @category configuration
-	uv_toolchain = uv_toolchain, graph_toolchain = graph_toolchain,
-	uv_bin = uv_bin, cache_env = cache_env, cache_key = cache_key,
-	artifact_name = artifact_name, download_url = download_url, supported_platforms = supported_platforms,
-	default_version = KIND.default_version, resolve_version = KIND.resolve_version,
+	uv_toolchain = uv_toolchain,
+	graph_toolchain = graph_toolchain,
+	uv_bin = uv_bin,
+	cache_env = cache_env,
+	cache_key = cache_key,
+	artifact_name = artifact_name,
+	download_url = download_url,
+	supported_platforms = supported_platforms,
+	default_version = KIND.default_version,
+	resolve_version = KIND.resolve_version,
 	reset_for_test = reset_for_test,
 }

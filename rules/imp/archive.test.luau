@@ -69,7 +69,8 @@ return {
 		end),
 
 		core.test.case("extract_archive uses unzip for a Unix zip archive", function()
-			local run = extract({ archive = fake_download("a.zip"), dest = "out", format = "zip-unix", display = "unzip" })
+			local run =
+				extract({ archive = fake_download("a.zip"), dest = "out", format = "zip-unix", display = "unzip" })
 			assert(contains(run.argv[3], "unzip -q"), run.argv[3])
 			assert(run.display == "unzip")
 			assert(same_list(run.tools, { "mkdir", "mv", "sh", "unzip" }))
@@ -113,7 +114,8 @@ return {
 		end),
 
 		core.test.case("extract_archive strips the top-level directory of a zip with a staging directory", function()
-			local run = extract({ archive = fake_download("a.zip"), dest = "out", format = "zip", strip_components = 1 })
+			local run =
+				extract({ archive = fake_download("a.zip"), dest = "out", format = "zip", strip_components = 1 })
 			assert(contains(run.argv[3], "unzip -q"), run.argv[3])
 			assert(contains(run.argv[3], '"$2.stage"'), run.argv[3])
 			assert(contains(run.argv[3], 'mv "$2.stage"/*/* "$2"'), run.argv[3])
@@ -130,7 +132,8 @@ return {
 		end),
 
 		core.test.case("extract_archive treats a strip_components of 0 as no strip", function()
-			local zip = extract({ archive = fake_download("a.zip"), dest = "out", format = "zip", strip_components = 0 })
+			local zip =
+				extract({ archive = fake_download("a.zip"), dest = "out", format = "zip", strip_components = 0 })
 			assert(not contains(zip.argv[3], ".stage"), zip.argv[3])
 			local tar = extract({ archive = fake_download(), dest = "out", format = "tar.gz", strip_components = 0 })
 			assert(not contains(tar.argv[3], "--strip-components"), tar.argv[3])
@@ -138,7 +141,8 @@ return {
 
 		core.test.case("extract_archive returns a directory handle and does not run", function()
 			core.test.with_fake_toolchain_host(function(host)
-				local extracted = archive.extract_archive({ archive = fake_download(), dest = "tool", format = "tar.gz" })
+				local extracted =
+					archive.extract_archive({ archive = fake_download(), dest = "tool", format = "tar.gz" })
 				assert(type(extracted) == "userdata")
 				assert(#host.runs == 0)
 			end)
@@ -160,7 +164,8 @@ return {
 		end),
 
 		core.test.case("extract_archive rejects unknown formats", function()
-			local text = error_text(archive.extract_archive, { archive = fake_download(), dest = "tool", format = "rar" })
+			local text =
+				error_text(archive.extract_archive, { archive = fake_download(), dest = "tool", format = "rar" })
 			assert(contains(text, "unsupported archive format 'rar'"), text)
 		end),
 	}),

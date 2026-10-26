@@ -91,7 +91,11 @@ return {
 				assert(extract.display == "install uv 0.12.13", extract.display)
 				local published = false
 				for _, call in ipairs(host.calls) do
-					if call[1] == "named_cache" and call[2] == "uv-toolchains" and call[3] == "0.12.13/linux-x86_64" then
+					if
+						call[1] == "named_cache"
+						and call[2] == "uv-toolchains"
+						and call[3] == "0.12.13/linux-x86_64"
+					then
 						published = true
 					end
 				end
@@ -110,7 +114,6 @@ return {
 				assert(#host.runs == 0)
 			end)
 		end),
-
 	}),
 
 	core.test.suite("uv workspace lockfile selection", {
@@ -153,7 +156,10 @@ return {
 			core.test.with_fake_run(function(run)
 				uv.reset_for_test()
 				for _, plat in ipairs(uv.supported_platforms()) do
-					run.set_run_stdout(`lock uv-toolchain 0.12.13 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					run.set_run_stdout(
+						`lock uv-toolchain 0.12.13 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
 				local declared = uv.uv_toolchain("0.12.13", { default = true, lockfile = "@workspace/locks/uv.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
@@ -176,8 +182,12 @@ return {
 				local graph = uv.graph_toolchain()
 				assert(graph.cache_tool == uv.graph_toolchain().cache_tool)
 				local function resolve()
-					return core.test.resolve(core.task({ inputs = { cache = graph.cache_tool }, outputs = { value = core.output.value() },
-						run = function(exec, inputs) return { value = uv.cache_env(exec, inputs.cache) } end,
+					return core.test.resolve(core.task({
+						inputs = { cache = graph.cache_tool },
+						outputs = { value = core.output.value() },
+						run = function(exec, inputs)
+							return { value = uv.cache_env(exec, inputs.cache) }
+						end,
 					}).outputs.value)
 				end
 				local env = resolve()
@@ -209,7 +219,12 @@ return {
 			assert(uv.artifact_name("0.12.13", { os = "macos", arch = "aarch64" }) == "uv-aarch64-apple-darwin.tar.gz")
 			assert(uv.cache_key("0.12.13", WINDOWS) == "0.12.13/windows-x86_64")
 			assert(#uv.supported_platforms() == 5)
-			assert(contains(error_text(uv.artifact_name, "0.12.13", { os = "linux", arch = "riscv64" }), "unsupported uv toolchain platform: linux/riscv64"))
+			assert(
+				contains(
+					error_text(uv.artifact_name, "0.12.13", { os = "linux", arch = "riscv64" }),
+					"unsupported uv toolchain platform: linux/riscv64"
+				)
+			)
 		end),
 		core.test.case("installs on Windows", function()
 			with_uv_host(WINDOWS, function(host)

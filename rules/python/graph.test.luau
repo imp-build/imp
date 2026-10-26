@@ -11,17 +11,25 @@ local function check(flags, fn)
 	core.test.with_fake_toolchain_host(function(host)
 		ruff.reset_for_test()
 		ruff.ruff_toolchain("0.16.7", { default = true })
-		core.test.with_fake_goal_flags(flags, function() fn(host) end)
+		core.test.with_fake_goal_flags(flags, function()
+			fn(host)
+		end)
 	end)
 end
 local function action(host, kind)
-	for _, run in ipairs(host.runs) do if run.display == `ruff {kind} {BASE}` then return run end end
+	for _, run in ipairs(host.runs) do
+		if run.display == `ruff {kind} {BASE}` then
+			return run
+		end
+	end
 	error("missing Ruff action")
 end
 local function paths(run)
 	local seen = {}
 	for _, input in ipairs(run.inputs) do
-		for _, path in ipairs(input.paths or {}) do seen[path] = true end
+		for _, path in ipairs(input.paths or {}) do
+			seen[path] = true
+		end
 	end
 	return seen
 end
@@ -33,10 +41,21 @@ return {
 			core.test.resolve(app[lint.LINT])
 			local formatted, checked = action(host, "fmt"), action(host, "lint")
 			local selected = paths(checked)
-			for _, path in ipairs({ BASE .. "/pyproject.toml", BASE .. "/src/pkg/.ruff.toml", "rules/python/testdata/ruff_config/ruff.toml", BASE .. "/src/pkg/mod.py" }) do assert(selected[path], path) end
+			for _, path in ipairs({
+				BASE .. "/pyproject.toml",
+				BASE .. "/src/pkg/.ruff.toml",
+				"rules/python/testdata/ruff_config/ruff.toml",
+				BASE .. "/src/pkg/mod.py",
+			}) do
+				assert(selected[path], path)
+			end
 			assert(not selected[BASE .. "/other/ruff.toml"] and not selected[BASE .. "/tests/ruff.toml"])
-			for _, input in ipairs(checked.inputs) do assert(input.from == "." and input.to == "fixed") end
-			for _, tool in ipairs({ "cp", "mkdir", "dirname" }) do assert(not table.find(checked.tools, tool)) end
+			for _, input in ipairs(checked.inputs) do
+				assert(input.from == "." and input.to == "fixed")
+			end
+			for _, tool in ipairs({ "cp", "mkdir", "dirname" }) do
+				assert(not table.find(checked.tools, tool))
+			end
 			assert(#checked.argv == 6 and checked.argv[6] == BASE .. "/src/pkg/mod.py")
 			assert(formatted.argv[6] == checked.argv[6])
 		end)
@@ -79,7 +98,12 @@ return {
 			local app = python.python_app({ base = BASE, sources = { "absent.py" } })
 			assert(#core.test.resolve(app[fmt.FMT]).paths == 0)
 			assert(core.test.resolve(app[lint.LINT]).ok)
-			for _, run in ipairs(host.runs) do assert(not string.find(run.display, "ruff fmt", 1, true) and not string.find(run.display, "ruff lint", 1, true)) end
+			for _, run in ipairs(host.runs) do
+				assert(
+					not string.find(run.display, "ruff fmt", 1, true)
+						and not string.find(run.display, "ruff lint", 1, true)
+				)
+			end
 			assert(core.test.resolve(python.python_app({ base = BASE })[lint.LINT]).ok)
 		end)
 	end),

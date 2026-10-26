@@ -37,9 +37,12 @@ end
 local function binary_product_layout(options)
 	local bundled = #(options.shared_libraries or {}) > 0
 	local bundle_dir = `build/{options.namespace}/{options.target_slug}.d`
-	return { bundled = bundled, bundle_dir = bundle_dir,
+	return {
+		bundled = bundled,
+		bundle_dir = bundle_dir,
 		published_executable_path = if bundled then options.executable_name else nil,
-		executable_path = if bundled then `{bundle_dir}/{options.executable_name}` else nil }
+		executable_path = if bundled then `{bundle_dir}/{options.executable_name}` else nil,
+	}
 end
 
 --- Plan and finish the common product shape of a native binary.

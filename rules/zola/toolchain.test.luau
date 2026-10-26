@@ -3,7 +3,9 @@ local locks = require("@imp/rules/workflows/lockfiles")
 local module = require("@imp/rules/zola")
 local VERSION = "0.23.6"
 local CUSTOM = "@imp/rules/zola/testdata/locked.json"
-local function contains(text, part) return string.find(text, part, 1, true) ~= nil end
+local function contains(text, part)
+	return string.find(text, part, 1, true) ~= nil
+end
 local function fails(fn, part)
 	local ok, text = pcall(fn)
 	assert(not ok and contains(tostring(text), part), tostring(text))
@@ -16,8 +18,11 @@ local function host_test(fn, platform)
 end
 local function install()
 	return core.test.resolve(core.task({
-		inputs = { tool = module.graph_toolchain().tool }, outputs = { value = core.output.value() },
-		run = function(exec, input) return { value = module.zola_bin(exec, input.tool) } end,
+		inputs = { tool = module.graph_toolchain().tool },
+		outputs = { value = core.output.value() },
+		run = function(exec, input)
+			return { value = module.zola_bin(exec, input.tool) }
+		end,
 	}).outputs.value)
 end
 return {
@@ -34,7 +39,9 @@ return {
 		assert(found)
 	end),
 	core.test.case("zola requires a default or a version", function()
-		host_test(function() fails(module.graph_toolchain, "no zola toolchain version specified") end)
+		host_test(function()
+			fails(module.graph_toolchain, "no zola toolchain version specified")
+		end)
 	end),
 	core.test.case("zola graph construction does not execute acquisition", function()
 		host_test(function(host)
@@ -72,7 +79,13 @@ return {
 			assert(table.find(host.runs[2].argv, "zola-toolchain"))
 			local published = false
 			for _, call in ipairs(host.calls) do
-				if call[1] == "named_cache" and call[2] == "zola-toolchains" and call[3] == VERSION .. "/linux-x86_64" then published = true end
+				if
+					call[1] == "named_cache"
+					and call[2] == "zola-toolchains"
+					and call[3] == VERSION .. "/linux-x86_64"
+				then
+					published = true
+				end
 			end
 			assert(published)
 			assert(table.find(host.runs[2].tools, "gzip"))
@@ -91,7 +104,9 @@ return {
 	end),
 	core.test.case("zola reports missing and unlocked locks and malformed addresses", function()
 		host_test(function()
-			fails(function() module.zola_toolchain(VERSION, { lockfile = "relative.lock" }) end, "must start with")
+			fails(function()
+				module.zola_toolchain(VERSION, { lockfile = "relative.lock" })
+			end, "must start with")
 			module.zola_toolchain(VERSION, { default = true, lockfile = "@workspace/missing.lock" })
 			fails(install, "no lockfile found")
 		end)
@@ -114,14 +129,35 @@ return {
 		end)
 	end),
 	core.test.case("zola preserves all platform mappings and Windows extraction", function()
-		local expected = { "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc" }
+		local expected = {
+			"x86_64-unknown-linux-gnu",
+			"aarch64-unknown-linux-gnu",
+			"x86_64-apple-darwin",
+			"aarch64-apple-darwin",
+			"x86_64-pc-windows-msvc",
+		}
 		assert(#module.supported_platforms() == #expected)
 		for index, plat in ipairs(module.supported_platforms()) do
-			assert(module.artifact_name(VERSION, plat) == "zola-v" .. VERSION .. "-" .. expected[index] .. (if plat.os == "windows" then ".zip" else ".tar.gz"))
-			assert(module.download_url(VERSION, plat) == "https://github.com/getzola/zola/releases/download/v" .. VERSION .. "/" .. module.artifact_name(VERSION, plat))
+			assert(
+				module.artifact_name(VERSION, plat)
+					== "zola-v"
+						.. VERSION
+						.. "-"
+						.. expected[index]
+						.. (if plat.os == "windows" then ".zip" else ".tar.gz")
+			)
+			assert(
+				module.download_url(VERSION, plat)
+					== "https://github.com/getzola/zola/releases/download/v"
+						.. VERSION
+						.. "/"
+						.. module.artifact_name(VERSION, plat)
+			)
 		end
 		assert(module.cache_key(VERSION, { os = "linux", arch = "aarch64" }) == VERSION .. "/linux-aarch64")
-		fails(function() module.artifact_name(VERSION, { os = "linux", arch = "riscv64" }) end, "unsupported zola toolchain platform")
+		fails(function()
+			module.artifact_name(VERSION, { os = "linux", arch = "riscv64" })
+		end, "unsupported zola toolchain platform")
 		host_test(function(host)
 			module.zola_toolchain(VERSION, { default = true, lockfile = CUSTOM })
 			assert(install() == "/cache/zola-toolchains/" .. VERSION .. "/windows-x86_64/zola.exe")
@@ -133,7 +169,10 @@ return {
 		core.test.with_fake_run(function(host)
 			module.reset_for_test()
 			for _, plat in ipairs(module.supported_platforms()) do
-				host.set_run_stdout(`lock zola {VERSION} {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+				host.set_run_stdout(
+					`lock zola {VERSION} {plat.os}/{plat.arch}`,
+					string.rep("ab", 32) .. "  artifact\n  42\n"
+				)
 			end
 			local declared = module.zola_toolchain(VERSION, { default = true, lockfile = "@workspace/locks/zola.lock" })
 			local result = core.test.resolve(declared[locks.GEN_LOCKFILES])

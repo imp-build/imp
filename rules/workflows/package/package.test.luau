@@ -98,10 +98,7 @@ return {
 				{ address = "//d:w", result = artifact("build/foo.DLL") },
 			})
 			local text = table.concat(paths, " ")
-			assert(
-				text == "dist/a/libfoo.so.1 dist/b/libfoo.so.1.2.3 dist/c/libfoo.dylib dist/d/foo.DLL",
-				text
-			)
+			assert(text == "dist/a/libfoo.so.1 dist/b/libfoo.so.1.2.3 dist/c/libfoo.dylib dist/d/foo.DLL", text)
 		end),
 
 		-- An executable keeps the target name. A `.sofa` file ends in the
@@ -121,7 +118,9 @@ return {
 		core.test.case("a root that is not an artifact fails the goal", function()
 			local ok, err = pcall(publish, { { address = "//pkg:a", result = { value = 1 } } })
 			assert(not ok)
-			assert(string.find(tostring(err), "//pkg:a: package graph root must resolve to an artifact handle", 1, true))
+			assert(
+				string.find(tostring(err), "//pkg:a: package graph root must resolve to an artifact handle", 1, true)
+			)
 		end),
 
 		core.test.case("no roots give no report", function()

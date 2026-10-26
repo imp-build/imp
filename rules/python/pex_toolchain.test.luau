@@ -110,7 +110,6 @@ return {
 				assert(#host.runs == 0)
 			end)
 		end),
-
 	}),
 
 	core.test.suite("pex workspace lockfile selection", {
@@ -153,9 +152,13 @@ return {
 			core.test.with_fake_run(function(run)
 				pex.reset_for_test()
 				for _, plat in ipairs(pex.supported_platforms()) do
-					run.set_run_stdout(`lock pex-toolchain 2.102.0 {plat.os}/{plat.arch}`, string.rep("ab", 32) .. "  artifact\n  42\n")
+					run.set_run_stdout(
+						`lock pex-toolchain 2.102.0 {plat.os}/{plat.arch}`,
+						string.rep("ab", 32) .. "  artifact\n  42\n"
+					)
 				end
-				local declared = pex.pex_toolchain("2.102.0", { default = true, lockfile = "@workspace/locks/pex.lock" })
+				local declared =
+					pex.pex_toolchain("2.102.0", { default = true, lockfile = "@workspace/locks/pex.lock" })
 				local result = core.test.resolve(declared[lockfiles.GEN_LOCKFILES])
 				assert(result.path == "locks/pex.lock", result.path)
 				local written = false
@@ -176,8 +179,12 @@ return {
 				local graph = pex.graph_toolchain()
 				assert(graph.cache_tool == pex.graph_toolchain().cache_tool)
 				local function resolve()
-					return core.test.resolve(core.task({ inputs = { cache = graph.cache_tool }, outputs = { value = core.output.value() },
-						run = function(exec, inputs) return { value = pex.cache_env(exec, inputs.cache) } end,
+					return core.test.resolve(core.task({
+						inputs = { cache = graph.cache_tool },
+						outputs = { value = core.output.value() },
+						run = function(exec, inputs)
+							return { value = pex.cache_env(exec, inputs.cache) }
+						end,
 					}).outputs.value)
 				end
 				local env = resolve()
