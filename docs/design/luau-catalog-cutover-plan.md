@@ -283,6 +283,16 @@ tasks in the report's task dependency table. Each task whose boundary requires
 test host fakes depends on the test host fakes task. Re-run this check after a
 JavaScript file is added, removed, or moved.
 
+## Runtime removal status
+
+The [runtime removal coverage record](luau-runtime-removal.md) maps the removed
+Rust harness tests to Luau coverage or existing exclusions. Imp now uses Luau
+without `IMP_RUNTIME`. `imp rules schema` is removed; calls fail during
+argument parsing. Bare `imp rules` and `imp config schema` remain.
+
+Static JavaScript catalog cleanup and the final cutover audit remain separate
+tasks. Historical results below retain the commands used at the time.
+
 ## QuickJS removal gate
 
 Remove QuickJS only after all conditions below pass on

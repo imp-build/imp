@@ -39,8 +39,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::runtime::LiveWorkspace;
 use crate::spike::{
-    stale_graph_addresses, AuthoringRuntime, Workspace, BUILD_FILE, CI_WORKSPACE_FILE,
-    CI_WORKSPACE_LUAU_FILE, WORKSPACE_FILE, WORKSPACE_LUAU_FILE,
+    stale_graph_addresses, Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE,
 };
 use crate::trace_changed::{LabelChangeContext, TraceIndex};
 
@@ -51,8 +50,6 @@ use crate::trace_changed::{LabelChangeContext, TraceIndex};
 /// that are loaded directly rather than imported.
 #[derive(Debug, Clone)]
 pub struct ImportGraph {
-    /// The selected authoring runtime, independent of source filenames.
-    pub runtime: AuthoringRuntime,
     /// Canonical modules loaded as workspace configuration.
     pub workspace_modules: BTreeSet<String>,
     /// Importee module name -> importer module names.
@@ -68,7 +65,6 @@ pub struct ImportGraph {
 impl Default for ImportGraph {
     fn default() -> Self {
         Self {
-            runtime: AuthoringRuntime::JavaScript,
             workspace_modules: [WORKSPACE_FILE.to_owned(), CI_WORKSPACE_FILE.to_owned()]
                 .into_iter()
                 .collect(),
@@ -336,12 +332,8 @@ pub(crate) fn module_graph_targets(
     // directly or as a transitive importer of a changed module). The loop
     // still finishes so `owned_paths` reporting stays complete.
     let mut select_all = false;
-    let luau = graph.runtime == AuthoringRuntime::Luau;
-    let (build_file, workspace_file, ci_workspace_file) = if luau {
-        ("BUILD.luau", WORKSPACE_LUAU_FILE, CI_WORKSPACE_LUAU_FILE)
-    } else {
-        (BUILD_FILE, WORKSPACE_FILE, CI_WORKSPACE_FILE)
-    };
+    let (build_file, workspace_file, ci_workspace_file) =
+        (BUILD_FILE, WORKSPACE_FILE, CI_WORKSPACE_FILE);
 
     for path in changed {
         if path == workspace_file || path == ci_workspace_file {
@@ -371,7 +363,7 @@ pub(crate) fn module_graph_targets(
             continue;
         }
 
-        if luau && path.ends_with(".test.luau") {
+        if path.ends_with(".test.luau") {
             let package = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
             let scope = if package.is_empty() {
                 "//".to_owned()
@@ -493,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_build_js_owns_exactly_its_package() {
+    fn changed_build_luau_owns_exactly_its_package() {
         let ws = workspace(vec![
             target("//app:app"),
             target("//app:extra"),
@@ -502,30 +494,30 @@ mod tests {
         ]);
         let mut graph = ImportGraph::default();
         assert_eq!(
-            owners_of(&ws, &graph, &["app/BUILD.js"]),
+            owners_of(&ws, &graph, &["app/BUILD.luau"]),
             BTreeSet::from(["//app:app".to_owned(), "//app:extra".to_owned()])
         );
         assert_eq!(
-            owners_of(&ws, &graph, &["BUILD.js"]),
+            owners_of(&ws, &graph, &["BUILD.luau"]),
             BTreeSet::from(["//:root".to_owned()])
         );
 
         // A BUILD module can import rule modules, but changing the BUILD file
         // itself must not follow those importer edges into the whole workspace.
-        graph.record_module_file("app/BUILD.js".to_owned(), "//app", Some("//app"));
+        graph.record_module_file("app/BUILD.luau".to_owned(), "//app", Some("//app"));
         graph
             .importers
             .entry("//app".to_owned())
             .or_default()
             .insert(WORKSPACE_FILE.to_owned());
         assert_eq!(
-            owners_of(&ws, &graph, &["app/BUILD.js"]),
+            owners_of(&ws, &graph, &["app/BUILD.luau"]),
             BTreeSet::from(["//app:app".to_owned(), "//app:extra".to_owned()])
         );
     }
 
     #[test]
-    fn changed_build_js_and_workspace_modules_include_label_roots() {
+    fn changed_build_luau_and_workspace_modules_include_label_roots() {
         let mut ws = workspace(vec![target("//app:legacy"), target("//lib:legacy")]);
         ws.label_addresses.insert("//app:generated".to_owned(), 1);
         ws.label_addresses.insert("//lib:generated".to_owned(), 2);
@@ -535,7 +527,7 @@ mod tests {
             .insert(2, "//lib:generated".to_owned());
 
         assert_eq!(
-            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.js"]),
+            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.luau"]),
             BTreeSet::from(["//app:generated".to_owned(), "//app:legacy".to_owned(),])
         );
         assert_eq!(
@@ -550,21 +542,21 @@ mod tests {
     }
 
     #[test]
-    fn changed_build_js_and_rule_module_own_graph_native_roots() {
+    fn changed_build_luau_and_rule_module_own_graph_native_roots() {
         // #65: a package's ownership must not depend on whether its targets
         // are legacy `target()`-declared or exported graph-native roots.
         let mut ws = workspace(vec![target("//app:legacy")]);
         ws.graph.roots = vec![graph_root("//app:hello"), graph_root("//lib:hello")];
 
         assert_eq!(
-            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.js"]),
+            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.luau"]),
             BTreeSet::from(["//app:legacy".to_owned(), "//app:hello".to_owned()])
         );
 
         // A changed rule module transitively invalidates a package's graph
         // roots the same way it does its legacy targets.
         let mut graph = ImportGraph::default();
-        graph.record_module_file("app/BUILD.js".to_owned(), "//app", Some("//app"));
+        graph.record_module_file("app/BUILD.luau".to_owned(), "//app", Some("//app"));
         graph.record_module_file("rules/gcc.js".to_owned(), "//rules/gcc", None);
         graph
             .importers
@@ -591,19 +583,19 @@ mod tests {
     #[test]
     fn changed_workspace_file_owns_everything() {
         let ws = workspace(vec![target("//app:app"), target("//lib:lib")]);
-        let owners = owners_of(&ws, &ImportGraph::default(), &["imp.workspace.js"]);
+        let owners = owners_of(&ws, &ImportGraph::default(), &["imp.workspace.luau"]);
         assert_eq!(owners.len(), 2);
     }
 
     #[test]
     fn changed_rule_module_owns_transitively_importing_packages() {
         let ws = workspace(vec![target("//a:a"), target("//b:b"), target("//c:c")]);
-        // c/BUILD.js imports //tools/macros, which imports //tools/base;
-        // a/BUILD.js imports //tools/base directly; b imports nothing.
+        // c/BUILD.luau imports //tools/macros, which imports //tools/base;
+        // a/BUILD.luau imports //tools/base directly; b imports nothing.
         let mut graph = ImportGraph::default();
-        graph.record_module_file("a/BUILD.js".to_owned(), "//a", Some("//a"));
-        graph.record_module_file("b/BUILD.js".to_owned(), "//b", Some("//b"));
-        graph.record_module_file("c/BUILD.js".to_owned(), "//c", Some("//c"));
+        graph.record_module_file("a/BUILD.luau".to_owned(), "//a", Some("//a"));
+        graph.record_module_file("b/BUILD.luau".to_owned(), "//b", Some("//b"));
+        graph.record_module_file("c/BUILD.luau".to_owned(), "//c", Some("//c"));
         graph.record_module_file("tools/macros.js".to_owned(), "//tools/macros", None);
         graph.record_module_file("tools/base.js".to_owned(), "//tools/base", None);
         for (importee, importer) in [

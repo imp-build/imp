@@ -407,11 +407,7 @@ struct TestFakes {
     diff: Option<LuaTable>,
 }
 
-/// An opt-in Luau workspace runtime for the graph-host pilot.
-///
-/// The runtime currently exposes the narrow graph API used by `rules/asset`.
-/// It is separate from [`crate::runtime::LiveWorkspace`] until the catalog
-/// migration establishes the complete host contract.
+/// Luau workspace runtime for modules, graph handles, and goal callbacks.
 pub struct LuauWorkspace {
     runtime: Runtime,
     loader: ModuleLoader,
@@ -449,7 +445,6 @@ impl LuauWorkspace {
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
             import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph {
-                runtime: crate::spike::AuthoringRuntime::Luau,
                 workspace_modules: Default::default(),
                 ..Default::default()
             })),
@@ -8211,7 +8206,7 @@ end) }
 
     #[tokio::test]
     async fn luau_modes_resolve_profiles_before_discovery_and_clear_failed_invocations() {
-        use crate::spike::{self, AuthoringRuntime, GoalExecutionOptions, GoalSelection};
+        use crate::spike::{self, GoalExecutionOptions, GoalSelection};
         let workspace = tempfile::tempdir().unwrap();
         fs::write(workspace.path().join("imp.workspace.luau"), r#"
 local core = require("@imp/core")
@@ -8241,11 +8236,10 @@ local pinned_expansion = core.expand({ inputs = { opt = core.semantic.mode("opt"
 end })
 return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIFY = core.configured(pinned_expansion:all("VERIFY"), { opt = "release" }) } }
 "#).unwrap();
-        let live = spike::load_workspace_with_runtime(
+        let live = spike::load_workspace_with_rules_and_service(
             workspace.path(),
             crate::loader::RulesSource::discover(),
             Arc::new(imp_execution::service::LocalExecutionService::new()),
-            Some(AuthoringRuntime::Luau),
         )
         .await
         .unwrap();
@@ -8282,7 +8276,7 @@ return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIF
             )
             .await
             .unwrap();
-            let luau = live.luau.as_ref().unwrap().borrow();
+            let luau = live.luau.borrow();
             assert!(luau.configuration.borrow().invocation_values.is_none());
             assert!(luau.host.borrow().invocation_mode.is_empty());
             assert!(luau.host.borrow().scheduler.is_none());
@@ -8324,19 +8318,9 @@ return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIF
         .await
         .unwrap_err();
         assert!(format!("{error:#}").contains("missing"));
+        assert!(live.luau.borrow().host.borrow().scheduler.is_none());
         assert!(live
             .luau
-            .as_ref()
-            .unwrap()
-            .borrow()
-            .host
-            .borrow()
-            .scheduler
-            .is_none());
-        assert!(live
-            .luau
-            .as_ref()
-            .unwrap()
             .borrow()
             .configuration
             .borrow()
@@ -10052,7 +10036,7 @@ return {
     /// The Luau workspace of this repository loads, and every rule test root
     /// (`core.test_root()`) in it passes. Product test roots, such as the
     /// CMake example ctest roots, need real toolchains and are left to
-    /// `IMP_RUNTIME=luau imp test //...`.
+    /// `imp test //...`.
     #[tokio::test]
     async fn repository_luau_workspace_tests_pass() {
         let rules_root = crate::loader::RulesSource::discover()
@@ -10610,7 +10594,7 @@ return { assets = declared }
         )
         .await
         .unwrap();
-        assert!(live.luau.is_some());
+
         assert_eq!(
             live.workspace.workspace_config.get("imp"),
             Some(
@@ -10639,7 +10623,7 @@ return { assets = declared }
         .await
         .unwrap();
         assert_eq!(
-            live.luau.as_ref().unwrap().borrow().action_count(),
+            live.luau.borrow().action_count(),
             1,
             "the hermetic action must run through the Luau host"
         );
@@ -10971,7 +10955,7 @@ return { final = final }
         .await
         .unwrap();
 
-        let luau = live.luau.as_ref().unwrap().borrow();
+        let luau = live.luau.borrow();
         assert_eq!(luau.action_count(), 2);
         assert_eq!(luau.task_result_count(), 3);
         let first_cache_hits = luau.cache_hit_count();
@@ -10990,7 +10974,7 @@ return { final = final }
         )
         .await
         .unwrap();
-        let luau = live.luau.as_ref().unwrap().borrow();
+        let luau = live.luau.borrow();
         assert_eq!(luau.action_count(), 4);
         assert!(luau.cache_hit_count() >= first_cache_hits + 2);
     }
@@ -12583,7 +12567,7 @@ return { consumer = consumer }
         .unwrap_err();
 
         assert!(format!("{error:#}").contains("exit code 7"), "{error:#}");
-        let luau = live.luau.as_ref().unwrap().borrow();
+        let luau = live.luau.borrow();
         assert_eq!(luau.action_count(), 0);
         assert_eq!(luau.task_result_count(), 0);
     }

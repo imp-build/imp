@@ -1,14 +1,14 @@
 # Luau workspace integration
 
 This record is for contributors who verify the repository cutover. Commands
-run from the repository root with a checkout-built binary. CI selects Luau
-with `IMP_RUNTIME=luau`; downloaded CI binaries also need `IMP_RULES_DIR`
-set to the checkout rules directory. QuickJS removal is a separate task.
+run from the repository root with a checkout-built binary. Imp uses Luau without a runtime override. Downloaded CI binaries need
+`IMP_RULES_DIR` set to the checkout rules directory. Static JavaScript catalog
+cleanup and the final release audit remain separate tasks.
 
 ## Repository coverage
 
-`python3 ci/check_luau_workspace.py --imp target/debug/imp` checks 63 BUILD
-files, five explicit JavaScript-only exclusions, and 92 Luau targets. It
+`python3 ci/check_luau_workspace.py --imp target/debug/imp` checks 61 BUILD
+files, four explicit JavaScript-only exclusions, and 90 Luau targets. It
 checks Cargo, docs, and CI workflow coverage, plus the RUN boundary between
 Odin libraries and executables. C, Rust, and Odin BUILD generation are enabled.
 The generation check reports zero files because loaded declarations already
@@ -42,7 +42,7 @@ outputs and are not committed to the source tree.
 
 ## Preview and installed rules
 
-`IMP_RUNTIME=luau target/debug/imp run //docs:site_serve` launches the Python
+`target/debug/imp run //docs:site_serve` launches the Python
 supervisor through the existing RUN workflow. Its declared tools cover both
 the supervisor and nested tool acquisition. The supervisor resolves the Imp
 executable once, packages before serving, and rebuilds after source changes.
@@ -50,7 +50,7 @@ It restarts Zola only when output changes. Rebuild failure retains the last
 successful site. Signal handling stops and reaps both child processes.
 
 The package smoke test runs outside the checkout, clears `IMP_RULES_DIR`,
-and selects each runtime explicitly. It checks the shipped Luau catalog,
+and uses Luau without a runtime override. It checks the shipped Luau catalog,
 BUILD generation, asset builds, and a Luau test root. Windows archive checks
 require Luau entrypoints and the grammar source. Native Windows and macOS
 execution remain separate validation work.

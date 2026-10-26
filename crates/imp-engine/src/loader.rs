@@ -1,69 +1,16 @@
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use rquickjs::{
-    loader::{ImportAttributes, Loader, Resolver},
-    Ctx, Module,
-};
-
-use crate::changed::ImportGraph;
-use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
-
-/// The built-in `imp:core` module exposed to every plugin and BUILD file.
-/// Unlike the rule library this is the engine's own source, so it stays
-/// compiled in.
-pub const CORE_JS: &str = concat!(include_str!("imp_core.js"), include_str!("graph_core.js"));
+// These names describe persisted JavaScript traces, not executable modules.
+const BUILD_FILE: &str = "BUILD.js";
+const WORKSPACE_FILE: &str = "imp.workspace.js";
 
 /// Environment variable that points `//rules/...` at an on-disk directory,
 /// overriding the tree shipped alongside the executable — for developing
 /// against a checked-out copy of imp's rules from an external project.
 pub const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
 
-// ---------------------------------------------------------------------------
-// QuickJS module resolver / loader
-// ---------------------------------------------------------------------------
-
-pub struct ImpResolver {
-    pub workspace_root: PathBuf,
-    pub rules_source: RulesSource,
-    /// Import edges recorded for changed-target detection. QuickJS calls
-    /// `resolve` for every import statement, including ones whose module is
-    /// already cached, so the recorded graph is complete.
-    pub import_graph: Arc<Mutex<ImportGraph>>,
-}
-
-pub struct ImpLoader {
-    pub workspace_root: PathBuf,
-    pub rules_source: RulesSource,
-}
-
-/// Install the package context owned by a workspace BUILD module while its
-/// source evaluates. The context is part of the module source, rather than
-/// inferred from a QuickJS stack, so imported BUILD modules and helper calls
-/// have deterministic ownership.
-pub(crate) fn instrument_build_source(source: &str, package_path: &str) -> String {
-    let package_path = serde_json::to_string(package_path)
-        .expect("workspace package paths are always JSON strings");
-    format!(
-        "const __imp_package_context_release = __imp_package_context_enter({package_path});\n{source}\n__imp_package_context_release();\n"
-    )
-}
-
-fn build_package_path(root: &Path, path: &Path) -> Option<String> {
-    let parent = path.parent()?;
-    let relative = parent.strip_prefix(root).ok()?;
-    if relative.as_os_str().is_empty() {
-        Some(".".to_owned())
-    } else {
-        Some(
-            relative
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/"),
-        )
-    }
-}
-
-/// Where imp's built-in `//rules/...` modules come from. Only consulted as
+/// On-disk rules library discovery. Historical trace readers also use this
+/// source to locate `//rules/...` paths. Only consulted as
 /// a fallback when a `//rules/...` specifier isn't found under the workspace
 /// root itself (e.g. a project vendoring/overriding its own copy).
 ///
@@ -148,8 +95,7 @@ impl RulesSource {
         self.root.as_deref()
     }
 
-    /// One-line "no rule library" note, for errors thrown into JS where the
-    /// whole message must fit QuickJS's 256-byte buffer.
+    /// Compact missing-library diagnostic.
     pub fn missing_summary(&self) -> String {
         format!("no rule library (set {RULES_DIR_ENV})")
     }
@@ -187,7 +133,7 @@ pub fn test_rules_dir() -> Option<PathBuf> {
         .ok()?
         .ancestors()
         .map(|dir| dir.join("rules"))
-        .find(|candidate| candidate.join("BUILD.js").is_file())
+        .find(|candidate| candidate.join("asset/index.luau").is_file())
 }
 
 /// Candidate rule libraries for an executable at `exe`, in precedence order:
@@ -224,251 +170,7 @@ fn probe_exe_relative(exe: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
     (root, candidates)
 }
 
-impl ImpResolver {
-    fn record_import(&self, base: &str, resolution: &WorkspaceModuleResolution) {
-        let mut graph = self.import_graph.lock().unwrap();
-        graph
-            .importers
-            .entry(resolution.name.clone())
-            .or_default()
-            .insert(base.to_owned());
-        // Only files under the workspace root can appear in a git diff; the
-        // built-in rule library normally lives outside it. (Pointing
-        // IMP_RULES_DIR inside a workspace does put built-in rules in the
-        // graph — harmless, and already true before rules moved on-disk.)
-        let path = &resolution.path;
-        let Ok(relative) = path.strip_prefix(&self.workspace_root) else {
-            return;
-        };
-        let relative = relative
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        let scope = (resolution.kind == ModuleKind::Build)
-            .then(|| package_scope_for_build_file(path, &self.workspace_root))
-            .flatten();
-        graph.record_module_file(relative, &resolution.name, scope.as_deref());
-    }
-}
-
-/// The bare `//...` address of the directory containing `base`'s resolved
-/// file — the anchor `./`/`../` relative imports resolve against. `None`
-/// for bases that aren't `//`-addressed workspace files (only `imp:core`
-/// in practice; its own source never uses relative imports).
-fn importer_directory_address(root: &Path, rules: &RulesSource, base: &str) -> Option<String> {
-    let dir = if base == WORKSPACE_FILE {
-        root.to_path_buf()
-    } else if base.starts_with("//") {
-        resolve_workspace_module(root, rules, base)
-            .ok()?
-            .path
-            .parent()?
-            .to_path_buf()
-    } else {
-        return None;
-    };
-    if let Ok(relative) = dir.strip_prefix(root) {
-        return Some(address_from_relative(relative, ""));
-    }
-    if let Some(rules_root) = rules.root() {
-        if let Ok(relative) = dir.strip_prefix(rules_root) {
-            return Some(address_from_relative(relative, "rules"));
-        }
-    }
-    None
-}
-
-fn address_from_relative(relative: &Path, prefix: &str) -> String {
-    let relative = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    let joined = match (prefix.is_empty(), relative.is_empty()) {
-        (true, _) => relative,
-        (false, true) => prefix.to_owned(),
-        (false, false) => format!("{prefix}/{relative}"),
-    };
-    if joined.is_empty() {
-        "//".to_owned()
-    } else {
-        format!("//{joined}")
-    }
-}
-
-/// Resolve a `./`/`../` specifier against `importer_dir` (a bare `//...`
-/// directory address from `importer_directory_address`) into a canonical,
-/// dot-free `//...` address — lexically, without touching the filesystem,
-/// so `resolve_workspace_module`'s own `.js`/`index.js`/`BUILD.js`
-/// candidate search does the actual existence check. A trailing `.js` on
-/// the specifier's final segment is stripped first, so both `./helper` and
-/// `./helper.js` address the same module, matching how `//...` addresses
-/// never spell out the extension.
-fn resolve_relative_module_name(
-    importer_dir: &str,
-    name: &str,
-) -> std::result::Result<String, String> {
-    let mut segments: Vec<String> = importer_dir
-        .strip_prefix("//")
-        .unwrap_or(importer_dir)
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect();
-    let stripped = name.strip_suffix(".js").unwrap_or(name);
-    for component in Path::new(stripped).components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if segments.pop().is_none() {
-                    return Err(format!("relative import '{name}' escapes the workspace"));
-                }
-            }
-            Component::Normal(segment) => segments.push(segment.to_string_lossy().into_owned()),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("relative import '{name}' must be a relative path"));
-            }
-        }
-    }
-    Ok(if segments.is_empty() {
-        "//".to_owned()
-    } else {
-        format!("//{}", segments.join("/"))
-    })
-}
-
-/// The package scope (`//dir`, or `//` at the root) a BUILD.js file defines.
-fn package_scope_for_build_file(path: &Path, workspace_root: &Path) -> Option<String> {
-    let directory = path.parent()?.strip_prefix(workspace_root).ok()?;
-    if directory.as_os_str().is_empty() {
-        return Some("//".to_owned());
-    }
-    Some(format!(
-        "//{}",
-        directory
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/")
-    ))
-}
-
-impl Resolver for ImpResolver {
-    fn resolve<'js>(
-        &mut self,
-        _ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
-    ) -> rquickjs::Result<String> {
-        if name == "imp:core" {
-            return Ok(name.to_owned());
-        }
-
-        if name.starts_with("imp:") {
-            return Err(rquickjs::Error::new_resolving_message(
-                base,
-                name,
-                format!(
-                    "unknown built-in module '{name}' while importing from {}",
-                    module_location(&self.workspace_root, &self.rules_source, base)
-                ),
-            ));
-        }
-
-        if name.starts_with("//") {
-            let resolution =
-                resolve_workspace_module(&self.workspace_root, &self.rules_source, name).map_err(
-                    |message| {
-                        rquickjs::Error::new_resolving_message(
-                            base,
-                            name,
-                            format!(
-                                "{message} while importing from {}",
-                                module_location(&self.workspace_root, &self.rules_source, base)
-                            ),
-                        )
-                    },
-                )?;
-            self.record_import(base, &resolution);
-            return Ok(resolution.name);
-        }
-
-        if name.starts_with('.') {
-            let importer = module_location(&self.workspace_root, &self.rules_source, base);
-            let Some(importer_dir) =
-                importer_directory_address(&self.workspace_root, &self.rules_source, base)
-            else {
-                return Err(rquickjs::Error::new_resolving_message(
-                    base,
-                    name,
-                    format!(
-                        "relative import '{name}' is unsupported while importing from {importer}"
-                    ),
-                ));
-            };
-            let canonical =
-                resolve_relative_module_name(&importer_dir, name).map_err(|message| {
-                    rquickjs::Error::new_resolving_message(
-                        base,
-                        name,
-                        format!("{message} while importing from {importer}"),
-                    )
-                })?;
-            let resolution =
-                resolve_workspace_module(&self.workspace_root, &self.rules_source, &canonical)
-                    .map_err(|message| {
-                        rquickjs::Error::new_resolving_message(
-                            base,
-                            name,
-                            format!("{message} while importing from {importer}"),
-                        )
-                    })?;
-            self.record_import(base, &resolution);
-            return Ok(resolution.name);
-        }
-
-        Err(rquickjs::Error::new_resolving_message(
-            base,
-            name,
-            format!(
-                "module specifier '{name}' is unsupported while importing from {}; use //... or imp:*",
-                module_location(&self.workspace_root, &self.rules_source, base)
-            ),
-        ))
-    }
-}
-
-impl Loader for ImpLoader {
-    fn load<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
-    ) -> rquickjs::Result<Module<'js>> {
-        if name == "imp:core" {
-            return Module::declare(ctx.clone(), name, CORE_JS);
-        }
-
-        if name.starts_with("//") {
-            let resolution =
-                resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
-                    .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
-            let source = std::fs::read_to_string(&resolution.path).map_err(|e| {
-                rquickjs::Error::new_loading_message(
-                    name,
-                    format!("read {}: {e}", resolution.path.display()),
-                )
-            })?;
-            let source = if resolution.kind == ModuleKind::Build {
-                build_package_path(&self.workspace_root, &resolution.path)
-                    .map(|package_path| instrument_build_source(&source, &package_path))
-                    .unwrap_or(source)
-            } else {
-                source
-            };
-            return Module::declare(ctx.clone(), name, source);
-        }
-
-        Err(rquickjs::Error::new_loading(name))
-    }
-}
-
+/// Module metadata retained for persisted trace inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleKind {
     BuiltIn,
@@ -518,8 +220,7 @@ pub fn resolve_workspace_module(
         }
     }
 
-    // QuickJS formats thrown errors through a 256-byte stack buffer, and
-    // rquickjs prepends ~80 bytes of "Error resolving module 'x' from 'y': "
+    // Keep historical trace module diagnostics compact.
     // before this reaches it — leaving roughly 180. So this stays one line and
     // spends the budget on the roots, which is the part a reader can't guess.
     // The `.js` / `index.js` / `BUILD.js` candidates under each root are a
@@ -709,257 +410,6 @@ pub fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// imp's own rule library, as an installed binary would see it.
-    fn repo_rules_dir() -> PathBuf {
-        test_rules_dir().expect("locate the repo's rules/ tree")
-    }
-
-    #[test]
-    fn workspace_file_wins_over_builtin() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("rules/workflows")).unwrap();
-        std::fs::write(root.path().join("rules/workflows/fmt.js"), "sentinel").unwrap();
-        let contents = resolve_workspace_file(
-            root.path(),
-            &RulesSource::directory(repo_rules_dir()),
-            "//rules/workflows/fmt.js",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(contents, "sentinel");
-    }
-
-    #[test]
-    fn builtin_rules_fallback() {
-        let root = tempfile::tempdir().unwrap();
-        let contents = resolve_workspace_file(
-            root.path(),
-            &RulesSource::directory(repo_rules_dir()),
-            "//rules/workflows/fmt/index.js",
-        )
-        .unwrap()
-        .unwrap();
-        assert!(contents.contains("graphFmtGoal"));
-    }
-
-    #[test]
-    fn build_source_releases_package_context_after_evaluation() {
-        let instrumented = instrument_build_source("export const value = 1;", "pkg");
-        assert!(instrumented.starts_with(
-            "const __imp_package_context_release = __imp_package_context_enter(\"pkg\");"
-        ));
-        assert!(instrumented.ends_with("__imp_package_context_release();\n"));
-    }
-
-    #[test]
-    fn dev_rules_fallback() {
-        let root = tempfile::tempdir().unwrap();
-        let dev = tempfile::tempdir().unwrap();
-        std::fs::write(dev.path().join("dev.lock"), "{}").unwrap();
-        let contents = resolve_workspace_file(
-            root.path(),
-            &RulesSource::directory(dev.path()),
-            "//rules/dev.lock",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(contents, "{}");
-    }
-
-    #[test]
-    fn missing_file_is_none_and_traversal_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let rules = RulesSource::directory(repo_rules_dir());
-        assert!(
-            resolve_workspace_file(root.path(), &rules, "//no/such.lock")
-                .unwrap()
-                .is_none()
-        );
-        assert!(resolve_workspace_file(root.path(), &rules, "//../etc/passwd").is_err());
-        assert!(resolve_workspace_file(root.path(), &rules, "//").is_err());
-    }
-
-    /// A `//rules/...` read with no rule library must say so, rather than
-    /// reporting the file as merely absent — callers turn `Ok(None)` into
-    /// "your lockfiles are stale", which sends people down the wrong path.
-    #[test]
-    fn addressed_rules_file_without_library_is_an_error() {
-        let root = tempfile::tempdir().unwrap();
-        let err =
-            resolve_workspace_file(root.path(), &RulesSource::none(), "//rules/rust/rust.lock")
-                .unwrap_err();
-        assert!(err.contains("no built-in rules directory"), "{err}");
-
-        // Non-rules addresses are still a plain miss.
-        assert!(
-            resolve_workspace_file(root.path(), &RulesSource::none(), "//other/thing.lock")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn module_resolution_reports_both_roots_and_missing_library() {
-        let root = tempfile::tempdir().unwrap();
-        let rules = tempfile::tempdir().unwrap();
-
-        let err = resolve_workspace_module(
-            root.path(),
-            &RulesSource::directory(rules.path()),
-            "//rules/missing",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("cannot resolve workspace module '//rules/missing'"),
-            "{err}"
-        );
-        // Both the workspace root and the rule library were probed.
-        assert!(err.contains(&root.path().display().to_string()), "{err}");
-        assert!(err.contains(&rules.path().display().to_string()), "{err}");
-        assert!(!err.contains("no rule library"), "{err}");
-
-        let err = resolve_workspace_module(root.path(), &RulesSource::none(), "//rules/missing")
-            .unwrap_err();
-        assert!(err.contains("no rule library"), "{err}");
-        assert!(err.contains(RULES_DIR_ENV), "{err}");
-    }
-
-    /// QuickJS formats thrown errors through a 256-byte stack buffer and
-    /// rquickjs prepends "Error resolving module 'x' from 'y': " before that,
-    /// so a resolution failure has roughly 180 bytes to say anything useful.
-    /// Blow the budget and the tail — which is where the paths live — is
-    /// silently cut off mid-word for the user.
-    #[test]
-    fn resolution_error_fits_the_quickjs_message_buffer() {
-        let root = Path::new("/home/someone/projects/my-service");
-        let rules = Path::new("/home/someone/.local/share/imp/rules");
-
-        for source in [RulesSource::directory(rules), RulesSource::none()] {
-            let err = resolve_workspace_module(root, &source, "//rules/python/ruff_toolchain")
-                .unwrap_err();
-            assert!(
-                err.len() <= 180,
-                "resolution error is {} bytes, over the QuickJS budget:\n{err}",
-                err.len()
-            );
-        }
-    }
-
-    /// On case-insensitive filesystems (Windows NTFS, default macOS APFS), a
-    /// bare `is_file()` check for `<rel>.js` would incorrectly match a
-    /// differently-cased sibling: requesting `//rules/workflows/build`
-    /// probes `rules/workflows/build.js` first, which must not match the
-    /// package's own `rules/workflows/BUILD.js` and skip the real module at
-    /// `rules/workflows/build/index.js`.
-    #[test]
-    fn module_resolution_is_case_sensitive_for_the_direct_js_candidate() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("rules/workflows/build")).unwrap();
-        std::fs::write(
-            root.path().join("rules/workflows/BUILD.js"),
-            "export const js = 1;",
-        )
-        .unwrap();
-        std::fs::write(
-            root.path().join("rules/workflows/build/index.js"),
-            "export const BUILD = 1;",
-        )
-        .unwrap();
-
-        let resolution =
-            resolve_workspace_module(root.path(), &RulesSource::none(), "//rules/workflows/build")
-                .unwrap();
-        assert_eq!(resolution.form, ModuleForm::Index);
-        assert_eq!(
-            resolution.path,
-            root.path().join("rules/workflows/build/index.js")
-        );
-    }
-
-    /// `import "//rules"` resolves to the library's own BUILD.js. This never
-    /// worked against the old embedded copy, which only ever probed
-    /// `<rel>.js`/`<rel>/index.js`/`<rel>/BUILD.js` and so skipped the
-    /// top-level BUILD.js when `rel` was empty.
-    #[test]
-    fn bare_rules_address_resolves_to_library_build_file() {
-        let root = tempfile::tempdir().unwrap();
-        let rules = tempfile::tempdir().unwrap();
-        std::fs::write(rules.path().join(BUILD_FILE), "export const x = 1;").unwrap();
-
-        let resolution = resolve_workspace_module(
-            root.path(),
-            &RulesSource::directory(rules.path()),
-            "//rules",
-        )
-        .unwrap();
-        assert_eq!(resolution.path, rules.path().join(BUILD_FILE));
-        assert_eq!(resolution.kind, ModuleKind::Build);
-    }
-
-    #[test]
-    fn importer_directory_address_covers_root_workspace_and_rules() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("pkg/sub")).unwrap();
-        std::fs::write(root.path().join("pkg/sub").join(BUILD_FILE), "").unwrap();
-        std::fs::write(root.path().join(WORKSPACE_FILE), "").unwrap();
-        let rules = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(rules.path().join("c")).unwrap();
-        std::fs::write(rules.path().join("c/index.js"), "").unwrap();
-        std::fs::write(rules.path().join("d.js"), "").unwrap();
-        let source = RulesSource::directory(rules.path());
-
-        assert_eq!(
-            importer_directory_address(root.path(), &source, WORKSPACE_FILE),
-            Some("//".to_owned())
-        );
-        assert_eq!(
-            importer_directory_address(root.path(), &source, "//pkg/sub"),
-            Some("//pkg/sub".to_owned())
-        );
-        assert_eq!(
-            importer_directory_address(root.path(), &source, "//rules/c"),
-            Some("//rules/c".to_owned())
-        );
-        // Direct-form module (d.js): its own directory is the parent "rules",
-        // not "//rules/d" — unlike Index/Build forms, where the bare address
-        // already names the directory.
-        assert_eq!(
-            importer_directory_address(root.path(), &source, "//rules/d"),
-            Some("//rules".to_owned())
-        );
-        assert_eq!(
-            importer_directory_address(root.path(), &source, "imp:core"),
-            None
-        );
-    }
-
-    #[test]
-    fn resolve_relative_module_name_covers_child_parent_and_extension() {
-        assert_eq!(
-            resolve_relative_module_name("//pkg/sub", "./helper").unwrap(),
-            "//pkg/sub/helper"
-        );
-        assert_eq!(
-            resolve_relative_module_name("//pkg/sub", "./helper.js").unwrap(),
-            "//pkg/sub/helper"
-        );
-        assert_eq!(
-            resolve_relative_module_name("//pkg/sub", "../other").unwrap(),
-            "//pkg/other"
-        );
-        assert_eq!(
-            resolve_relative_module_name("//pkg", "./child/helper").unwrap(),
-            "//pkg/child/helper"
-        );
-        assert_eq!(
-            resolve_relative_module_name("//", "./sibling").unwrap(),
-            "//sibling"
-        );
-        assert!(resolve_relative_module_name("//pkg", "../../outside").is_err());
-        assert!(resolve_relative_module_name("//", "..").is_err());
-    }
-
     #[test]
     fn exe_relative_probe_prefers_installed_layout() {
         let prefix = tempfile::tempdir().unwrap();
@@ -972,8 +422,6 @@ mod tests {
         assert_eq!(root.unwrap(), share);
         assert_eq!(searched.len(), 2);
     }
-
-    /// An unpacked release archive must run in place, without an install step.
     #[test]
     fn exe_relative_probe_falls_back_to_sibling_rules() {
         let stage = tempfile::tempdir().unwrap();
@@ -982,7 +430,6 @@ mod tests {
         let (root, _) = probe_exe_relative(&stage.path().join("imp"));
         assert_eq!(root.unwrap(), stage.path().join("rules"));
     }
-
     #[test]
     fn exe_relative_probe_finds_checkout_rules() {
         let checkout = tempfile::tempdir().unwrap();
@@ -995,9 +442,6 @@ mod tests {
         let (root, _) = probe_exe_relative(&debug.join("imp"));
         assert_eq!(root.unwrap(), checkout.path().join("rules"));
     }
-
-    /// A `target/` directory alone does not make a checkout: without the imp
-    /// crate manifest, the probe must not use a nearby `rules/`.
     #[test]
     fn exe_relative_probe_ignores_target_without_checkout() {
         let other = tempfile::tempdir().unwrap();
@@ -1009,7 +453,6 @@ mod tests {
         assert!(root.is_none());
         assert_eq!(searched.len(), 2);
     }
-
     #[test]
     fn exe_relative_probe_reports_every_location_it_tried() {
         let empty = tempfile::tempdir().unwrap();

@@ -27,11 +27,11 @@ return { sources = require("@imp/rules/js").js_sources() }
 Add a JavaScript source file. From the workspace root, run:
 
 ```sh
-IMP_RUNTIME=luau imp fmt --check //:sources
-IMP_RUNTIME=luau imp fmt //:sources
-IMP_RUNTIME=luau imp lint //:sources
-IMP_RUNTIME=luau imp lint --fix //:sources
-IMP_RUNTIME=luau imp @biome --version
+imp fmt --check //:sources
+imp fmt //:sources
+imp lint //:sources
+imp lint --fix //:sources
+imp @biome --version
 ```
 
 Format check and lint report problems without changing workspace files.

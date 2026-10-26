@@ -10,7 +10,7 @@ Declare tools, generated sources, lockfile downloads, and rule tests.
 `archive`, `lockfile`, `generate`, `codegen`, and `toolchain` have Luau
 modules beside the JavaScript modules.
 The repository CI selects Luau explicitly. To use the Luau
-modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
+modules here, select the Luau workspace, as
 `docs/design/luau-authoring-contract.md` describes.
 
 | Module | Luau export |

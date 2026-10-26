@@ -3,8 +3,6 @@ local core = require("@imp/core")
 local codegen = require("@imp/rules/imp/codegen")
 return {
 	generated_stamp = codegen.stamp_file({ output = "generated/imp-stamp.txt", text = "imp build ran" }),
-	engineAssets = asset.resource_package({ srcs = { "crates/imp-engine/src/imp_core.js",
-		"crates/imp-engine/src/graph_core.js", } }),
 	rulesTree = asset.resource_package({ srcs = { "rules/**/*" } }),
 	luauWorkspace = asset.resource_package({ srcs = { "imp.workspace.luau", "imp.workspace.ci.luau", "BUILD.luau", "crates/**/BUILD.luau", "docs/core_api.luau" } }),
 	testTar = core.native_tool("tar"),

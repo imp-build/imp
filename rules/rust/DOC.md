@@ -17,9 +17,8 @@ require("@imp/rules/workflows/lint")
 return {}
 ```
 
-During the runtime migration, set `IMP_RUNTIME=luau` for these commands. The
-JavaScript runtime and modules remain available separately. One invocation
-uses one runtime.
+Imp uses Luau for workspace and BUILD modules. JavaScript application inputs
+remain supported.
 
 The Rust toolchain module declares a pinned default. To select another pinned
 version and a workspace lockfile, import the toolchain in the workspace file:
@@ -110,11 +109,11 @@ sources.
 From the workspace root, after declaring the target:
 
 ```sh
-IMP_RUNTIME=luau imp build //path/to/package:server
-IMP_RUNTIME=luau imp test //path/to/package:server
-IMP_RUNTIME=luau imp fmt --check //path/to/package:server
-IMP_RUNTIME=luau imp lint //path/to/package:server
-IMP_RUNTIME=luau imp package //path/to/package:server
+imp build //path/to/package:server
+imp test //path/to/package:server
+imp fmt --check //path/to/package:server
+imp lint //path/to/package:server
+imp package //path/to/package:server
 ```
 
 Each workflow slot holds one graph handle. BUILD resolves to named binary
@@ -144,7 +143,7 @@ require("@imp/rules/workflows/generate_build")
 return { rust = { build_generate = true, doctest = true } }
 ```
 
-Then run `IMP_RUNTIME=luau imp goal generate-build`. This writes generated
+Then run `imp goal generate-build`. This writes generated
 `BUILD.luau` files. Use `--check` to report stale files without writing them.
 The generator uses sandboxed `cargo metadata` tasks with the declared Rust
 toolchain. It skips owned manifests and declared package paths, and excludes

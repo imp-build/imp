@@ -14,7 +14,6 @@ imp-exec-api = { path = "../imp-exec-api" }
 imp-execution = { path = "../imp-execution" }
 imp-daemon = { path = "../imp-daemon" }
 imp-scheduler = { path = "../imp-scheduler" }
-imp-exec-bridge = { path = "../imp-exec-bridge" }
 imp-logging = { path = "../imp-logging" }
 anyhow.workspace = true
 clap.workspace = true
@@ -23,7 +22,6 @@ walkdir.workspace = true
 ignore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rquickjs.workspace = true
 tokio.workspace = true
 log.workspace = true
 indicatif.workspace = true

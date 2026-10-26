@@ -50,11 +50,11 @@ return {
 From that workspace root, select the Luau runtime:
 
 ```sh
-IMP_RUNTIME=luau imp build //:app
-IMP_RUNTIME=luau imp run //:app -- one "two words"
-IMP_RUNTIME=luau imp test //:tests
-IMP_RUNTIME=luau imp run '//:scripts#scripts/demo.py' -- one "two words"
-IMP_RUNTIME=luau imp package //:app
+imp build //:app
+imp run //:app -- one "two words"
+imp test //:tests
+imp run '//:scripts#scripts/demo.py' -- one "two words"
+imp package //:app
 ```
 
 Python apps stage only their declared source files under `.imp-pex-sources`
@@ -70,7 +70,7 @@ Nested script directories require separate declarations.
 
 **Limit:** The Luau CLI requires an explicit expansion selector such as
 `//:scripts#scripts/demo.py`. Bare file-path lookup (`imp run scripts/demo.py`)
-is not available in Luau yet; the JavaScript runtime retains that behavior.
+is not available. Select the expansion child explicitly.
 
 `python_project` accepts paths relative to its uv workspace, or paths already
 prefixed with the workspace path. When `project` is absent, app and test rules
@@ -100,7 +100,7 @@ From this repository root, validate the Luau package with the checkout binary:
 
 ```sh
 cargo build -p imp
-IMP_RUNTIME=luau target/debug/imp test //rules/python:rules_test
+target/debug/imp test //rules/python:rules_test
 python3 rules/python/testdata/consumer_check.py --imp target/debug/imp
 ```
 
@@ -154,7 +154,7 @@ permits an unverified download and logs a warning.
 From that workspace root, generate the declared lockfiles with:
 
 ```sh
-IMP_RUNTIME=luau imp goal gen-lockfiles //:pex //:uv
+imp goal gen-lockfiles //:pex //:uv
 ```
 
 The command selects the two BUILD exports and writes `locks/pex.lock` and

@@ -14,7 +14,6 @@ EXCLUSIONS = {
     "rules/BUILD.js": "JavaScript source formatting inventory; Luau formatting is a separate post-cutover task.",
     "rules/imp/test/BUILD.js": "QuickJS test-harness implementation; Luau tests use core.test_root.",
     "rules/workflows/build/BUILD.js": "QuickJS workflow tests; Luau workflow tests are declared by rules/workflows/BUILD.luau.",
-    "crates/imp/src/BUILD.js": "Embedded JavaScript source formatting; removed with the QuickJS implementation.",
     "examples/proposed-rules/BUILD.js": "Illustrative proposal with a provisioned local toolchain, not a supported consumer.",
 }
 
@@ -50,7 +49,7 @@ def main():
     binary = args.imp.resolve()
     root = Path.cwd()
     builds = inventory(root)
-    env = {**os.environ, "IMP_RUNTIME": "luau"}
+    env = os.environ.copy()
 
     def run(*arguments):
         result = subprocess.run(

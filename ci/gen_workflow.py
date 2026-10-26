@@ -625,7 +625,6 @@ def render_workflow():
         *GENERATED_HEADER,
         "name: Deploy docs",
         "env:",
-        "  IMP_RUNTIME: luau",
         "  IMP_RULES_DIR: ${{ github.workspace }}/rules",
         "",
         "on:",
@@ -655,8 +654,6 @@ def render_release_workflow():
     lines = [
         *GENERATED_HEADER,
         "name: Build release artifacts",
-        "env:",
-        "  IMP_RUNTIME: luau",
         "",
         # Was `push: branches: [main]`, which rebuilt both platforms on every
         # commit — ~92 billed min/day — to feed a rolling draft release nobody

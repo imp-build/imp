@@ -1,6 +1,5 @@
 local cargoPackage = require("@imp/rules/rust").cargo_package
 local protoAssets = require("@workspace/crates/imp-daemon/BUILD").protoAssets
-local engineAssets = require("@workspace/BUILD").engineAssets
 local rulesTree = require("@workspace/BUILD").rulesTree
 local luauWorkspace = require("@workspace/BUILD").luauWorkspace
 local testTar = require("@workspace/BUILD").testTar
@@ -25,7 +24,7 @@ local testXz = require("@workspace/BUILD").testXz
 local testChmod = require("@workspace/BUILD").testChmod
 local testSleep = require("@workspace/BUILD").testSleep
 local imp_engine = cargoPackage({
-    deps = {engineAssets.files, protoAssets.files},
+    deps = {protoAssets.files},
     test_deps = {rulesTree.files, luauWorkspace.files},
     test_tools = {
         testTar,

@@ -7,9 +7,7 @@ Declare libraries, executables, and tests with explicit compiler providers.
 ## Luau modules
 
 These modules provide the Luau graph API. `//rules/c/cmake`'s own docs
-describe the CMake modules. Select the Luau
-workspace with `IMP_RUNTIME=luau`, as
-`docs/design/luau-authoring-contract.md` describes.
+describe the CMake modules. Imp uses Luau for workspace and BUILD modules.
 
 ### Raw targets
 
@@ -147,6 +145,6 @@ values. These points need a real host:
   converts it.
 - A CMake replay edge that runs a bare `rc` or `mt` through that `PATH`.
 
-To verify, run `IMP_RUNTIME=luau imp build` on Windows for a task that
+To verify, run `imp build` on Windows for a task that
 compiles and links a C source with `gcc.graph_toolchain()`,
 `zig.graph_toolchain()`, and `msvc.msvc_toolchain()`.

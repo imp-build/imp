@@ -82,7 +82,7 @@ local preview = core.program({
     describe = function(exec, input)
         local tools = {}
         for name, handle in pairs(input) do if name ~= "script" then table.insert(tools, handle) end end
-        return { argv = { "sh", "-c", 'zola=$1; shift; exec python3 "$IMP_SANDBOX_ROOT/docs/serve.py" --imp imp --zola "$zola" "$@"', "docs-preview", zola.zola_bin(exec, input.zola) }, inputs = { exec.digest(input.script) }, tools = tools, env = { IMP_RUNTIME = "luau" }, display = "watch and serve docs" }
+        return { argv = { "sh", "-c", 'zola=$1; shift; exec python3 "$IMP_SANDBOX_ROOT/docs/serve.py" --imp imp --zola "$zola" "$@"', "docs-preview", zola.zola_bin(exec, input.zola) }, inputs = { exec.digest(input.script) }, tools = tools, display = "watch and serve docs" }
     end,
 })
 

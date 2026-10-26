@@ -38,8 +38,8 @@ return {
 }
 ```
 
-From the workspace root, run `IMP_RUNTIME=luau imp build //images:app` to
-build the layout in the CAS. Run `IMP_RUNTIME=luau imp package //images:app`
+From the workspace root, run `imp build //images:app` to
+build the layout in the CAS. Run `imp package //images:app`
 to write `dist/images/app/image.tar`. The archive contains an OCI layout;
 verify that the destination image loader accepts that archive format.
 
@@ -67,7 +67,7 @@ labels merge with inherited labels. Empty values preserve inherited values.
 `oci_push({ image, repo, tag })` and
 `oci_mirror({ from = { repo, tag }, to = { repo, tag } })` return only a
 `PUBLISH` root. Mirror also accepts `from.digest` in place of `from.tag`.
-Select these roots with `IMP_RUNTIME=luau imp publish //images:publish`.
+Select these roots with `imp publish //images:publish`.
 These actions change the registry and bypass the action cache. No build or
 package command selects them.
 
@@ -90,7 +90,7 @@ return {
 **Warning:** Lockfile generation writes the selected file into the workspace.
 
 With this target in the root BUILD module, run
-`IMP_RUNTIME=luau imp goal gen-lockfiles //:crane`. The toolchain declaration
+`imp goal gen-lockfiles //:crane`. The toolchain declaration
 returns `version`, `lockfile`, and `GEN_LOCKFILES`. A missing lockfile or
 entry fails acquisition and names the regeneration command. The optional
 `unverified = true` permits an unverified download with a warning.
@@ -117,8 +117,8 @@ outputs, and verified Crane acquisition. Registry actions use test fakes;
 the check does not publish images.
 
 Run the focused rule tests from the checkout with
-`IMP_RUNTIME=luau target/debug/imp test //rules/oci/...`. Run all Luau rule
-tests with `IMP_RUNTIME=luau target/debug/imp test //rules/...`. Use the
+`target/debug/imp test //rules/oci/...`. Run all Luau rule
+tests with `target/debug/imp test //rules/...`. Use the
 current source-built binary for both commands. Before delivery, also run
 `cargo test --workspace`, `imp fmt //...`, `imp lint //...`,
 `imp test //...`, and `git diff --check`.

@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--imp", type=Path, required=True)
     binary = parser.parse_args().imp.resolve()
-    env = {**os.environ, "IMP_RUNTIME": "luau"}
+    env = os.environ.copy()
     with tempfile.TemporaryDirectory(prefix="imp-lockfiles-consumer-") as directory:
         root = Path(directory)
         artifact = b"local lockfile consumer artifact\n"

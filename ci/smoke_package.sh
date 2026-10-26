@@ -13,8 +13,7 @@
 #   <staging-dir>/share/imp/rules/...
 
 set -eu
-# Select each runtime explicitly, independent of the caller.
-export IMP_RUNTIME=js
+unset IMP_RUNTIME
 
 stage="${1:?usage: ci/smoke_package.sh <staging-dir>}"
 case "$stage" in
@@ -42,75 +41,8 @@ done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-cat >"$work/imp.workspace.js" <<'EOF'
-import "//rules/imp/codegen";
-EOF
-
-cat >"$work/BUILD.js" <<'EOF'
-import { stampFile } from "//rules/imp/codegen";
-import { rulesTest } from "//rules/imp/test";
-
-export const stamp = stampFile({
-    output: "generated/smoke.txt",
-    text: "packaged rules resolved from disk",
-});
-
-export const rules_test = rulesTest({
-    root: "//consumer",
-});
-EOF
-
-mkdir -p "$work/consumer"
-cat >"$work/consumer/rules_test.js" <<'EOF'
-import { BUILD } from "//rules/workflows/build";
-import { describe, test } from "//rules/imp/test";
-
-describe("builtin rules", () => {
-    test("resolve from the packaged bundle", () => {
-        if (typeof BUILD !== "symbol") {
-            throw new Error("expected the builtin BUILD workflow");
-        }
-    });
-});
-EOF
-
-# Must run *from* the scratch workspace: imp discovers its root from the
-# working directory, so staying in the repo would silently test the repo's own
-# rules/ instead of the packaged tree — the exact blind spot this covers.
-cd "$work"
-
-# IMP_RULES_DIR would short-circuit the exe-relative lookup this exists to
-# test. XDG_CACHE_HOME keeps the run from touching the caller's real cache.
+# Exercise the installed Luau catalog outside the checkout.
 unset IMP_RULES_DIR
-XDG_CACHE_HOME="$work/cache" "$bin" targets //... >"$work/out" 2>"$work/err" || {
-    echo "smoke: imp targets //... failed" >&2
-    tail -30 "$work/err" >&2
-    exit 1
-}
-
-grep -q '//:stamp' "$work/out" || {
-    echo "smoke: expected //:stamp in target list" >&2
-    cat "$work/out" >&2
-    exit 1
-}
-
-unset IMP_RULES_DIR
-XDG_CACHE_HOME="$work/cache" "$bin" test //:rules_test >"$work/test-out" 2>"$work/test-err" || {
-  echo "smoke: rulesTest failed" >&2
-  cat "$work/test-out" >&2
-  cat "$work/test-err" >&2
-  exit 1
-}
-
-grep -q 'test: 1/1 unit(s) passed' "$work/test-out" || {
-  echo "smoke: rulesTest did not report a passing unit" >&2
-  cat "$work/test-out" >&2
-  cat "$work/test-err" >&2
-  exit 1
-}
-
-# Exercise the installed Luau catalog from a separate workspace.
-export IMP_RUNTIME=luau
 # This also proves that the Luau rule files ship in the release tree.
 [ -f "$rules/asset/index.luau" ] || fail "missing $rules/asset/index.luau"
 mkdir -p "$work/luau"
@@ -236,4 +168,4 @@ XDG_CACHE_HOME="$work/cache" "$bin" test //:rules_test >"$work/luau-test-out" 2>
 }
 grep -q 'test: 1/1 unit(s) passed' "$work/luau-test-out" || fail "installed Luau test did not run"
 
-echo "smoke: ok — $bin resolved packaged JS and Luau rules from $rules"
+echo "smoke: ok — $bin resolved packaged Luau rules from $rules"

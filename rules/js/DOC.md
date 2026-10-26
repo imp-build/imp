@@ -19,9 +19,9 @@ From this repository's root, use the Luau workspace to build the four targets
 and run the applications:
 
 ```sh
-IMP_RUNTIME=luau imp build //rules/js/example:hello //rules/js/example:hello_src //rules/js/example:app //rules/js/example:app_ts
-IMP_RUNTIME=luau imp run //rules/js/example:app
-IMP_RUNTIME=luau imp run //rules/js/example:app_ts
+imp build //rules/js/example:hello //rules/js/example:hello_src //rules/js/example:app //rules/js/example:app_ts
+imp run //rules/js/example:app
+imp run //rules/js/example:app_ts
 ```
 
 The applications print `Hello from the jsApp example!` and
@@ -57,8 +57,8 @@ return {
 }
 ```
 
-From the workspace root, run `IMP_RUNTIME=luau imp build //:app`, then
-`IMP_RUNTIME=luau imp run //:app -- argument`. An application needs a
+From the workspace root, run `imp build //:app`, then
+`imp run //:app -- argument`. An application needs a
 `package.json` and `pnpm-lock.yaml`. TypeScript applications also need a
 TypeScript dependency and `tsconfig.json` with `outDir` set to `dist`. A
 TypeScript entry is relative to `dist`; a JavaScript entry is relative to
@@ -101,7 +101,7 @@ A missing file or entry fails acquisition with a regeneration hint.
 **Warning:** Lockfile generation writes the selected files into the workspace.
 
 With the toolchain targets in the example, run
-`IMP_RUNTIME=luau imp goal gen-lockfiles //:node //:pnpm` from the workspace
+`imp goal gen-lockfiles //:node //:pnpm` from the workspace
 root. Existing locked versions remain in the generated lockfile.
 
 For rule authors, each module exports `graph_toolchain(version)`, which returns

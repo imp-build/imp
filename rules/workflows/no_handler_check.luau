@@ -32,7 +32,7 @@ local function invoke(goal, handlers)
 				argv = { "sh", "-c", 'printf "%s" "$1" > imp.workspace.luau; printf "%s" "$2" > BUILD.luau; exec imp "$3" //...', "fixture", workspace, inputs.build, inputs.goal },
 				inputs = { inputs.rules },
 				tools = { inputs.imp, inputs.sh },
-				env = { IMP_RUNTIME = "luau", IMP_RULES_DIR = "." },
+				env = { IMP_RULES_DIR = "." },
 				allow_failure = true,
 				display = `check {inputs.goal} missing-handler warning`,
 			})

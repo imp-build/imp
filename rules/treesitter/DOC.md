@@ -36,7 +36,7 @@ From the repository root, build the checkout binary and run:
 
 ```sh
 cargo build -p imp
-IMP_RUNTIME=luau target/debug/imp test //rules/treesitter/...
+target/debug/imp test //rules/treesitter/...
 python3 rules/treesitter/testdata/consumer_check.py --imp target/debug/imp
 ```
 

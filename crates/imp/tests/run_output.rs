@@ -12,29 +12,20 @@ fn workspace_with_run(script: &str) -> TempDir {
 }
 
 fn write_run_target(root: &TempDir, script: &str) {
-    std::fs::write(root.path().join("imp.workspace.js"), "").expect("write workspace marker");
-
-    let script = serde_json::to_string(script).expect("encode shell script as JavaScript string");
+    std::fs::write(root.path().join("imp.workspace.luau"), "return {}\n")
+        .expect("write workspace marker");
+    let script = serde_json::to_string(script).expect("encode shell script");
     let build = format!(
         r#"
-import {{ label, run, runGoal }} from "imp:core";
-
-const probe = label();
-runGoal(probe, async function runOutputProbe() {{
-    return run({{
-        argv: ["sh", "-c", {script}],
-        display: "run output probe",
-        sandbox: true,
-        impure: true,
-        workspaceCwd: true,
-        stream: true,
-    }});
-}});
-
-export {{ probe }};
+local core = require("@imp/core")
+local run = require("@imp/rules/workflows/run")
+return {{ probe = {{ [run.RUN] = core.program({{
+    inputs = {{ sh = core.native_tool("sh") }},
+    describe = function() return {{ argv = {{ "sh", "-c", {script} }}, display = "run output probe" }} end,
+}}) }} }}
 "#
     );
-    std::fs::write(root.path().join("BUILD.js"), build).expect("write run target");
+    std::fs::write(root.path().join("BUILD.luau"), build).expect("write run target");
 }
 
 fn imp_run(root: &std::path::Path) -> Option<Command> {
@@ -50,6 +41,7 @@ fn imp_run(root: &std::path::Path) -> Option<Command> {
     let mut command = Command::new(imp_binary);
     command
         .current_dir(root)
+        .env_remove("IMP_RUNTIME")
         .arg("run")
         .arg("//:probe")
         .env("XDG_CACHE_HOME", std::env::temp_dir().join("imp"))

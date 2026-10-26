@@ -51,7 +51,7 @@ return {
 
 ```sh
 # From the repository root, after `cargo build -p imp`:
-IMP_RUNTIME=luau target/debug/imp test //rules/c/cmake/example:hello_cmake_main //rules/c/cmake/example:uses_cmake_lib_test
+target/debug/imp test //rules/c/cmake/example:hello_cmake_main //rules/c/cmake/example:uses_cmake_lib_test
 ```
 
 `cmake_project_specs()` returns the declared projects in declaration order.

@@ -1,6 +1,6 @@
 //! Exported JavaScript graph roots and selector integration.
 //!
-//! Task construction and callback values stay live in QuickJS, while this
+//! Task construction and callback values stay live in Luau, while this
 //! module owns the durable, inspectable root catalog used by native selection.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

@@ -61,8 +61,8 @@ return {
 }
 ```
 
-Replace `my-generator` and its arguments with your generator command. If the
-workspace has both runtime configuration files, set `IMP_RUNTIME=luau`.
+Replace `my-generator` and its arguments with your generator command. Declare
+the workspace in `imp.workspace.luau`.
 
 From the workspace root, select that exported value:
 

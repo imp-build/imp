@@ -15,11 +15,11 @@ From the workspace root, select a declared Python target:
 
 ```sh
 # Rewrite Python files owned by the selected application.
-IMP_RUNTIME=luau imp fmt //services/acme:app
+imp fmt //services/acme:app
 
 # Read-only formatting and lint checks.
-IMP_RUNTIME=luau imp fmt --check //services/acme:app
-IMP_RUNTIME=luau imp lint //services/acme:app
+imp fmt --check //services/acme:app
+imp lint //services/acme:app
 ```
 
 Ruff reads the project's own configuration. Formatting and linting stage
@@ -49,7 +49,7 @@ workflow to print diagnostics and a combined summary for every selected
 target.
 
 ```sh
-IMP_RUNTIME=luau imp lint --fix //services/acme:app
+imp lint --fix //services/acme:app
 ```
 
 `--fix` adds `ruff check --fix` and materializes only the changed `.py`
@@ -76,7 +76,7 @@ return { ruff = ruff.ruff_toolchain("0.16.7", {
 ```
 
 **Warning:** From that workspace root,
-`IMP_RUNTIME=luau imp goal gen-lockfiles //:ruff` writes `locks/ruff.lock`.
+`imp goal gen-lockfiles //:ruff` writes `locks/ruff.lock`.
 The declaration returns `version`, `lockfile`, and a `GEN_LOCKFILES` root.
 Without a lockfile option, acquisition uses the shipped lockfile. Missing
 entries fail with a generation command. `unverified = true` permits an

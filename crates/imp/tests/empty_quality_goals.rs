@@ -9,7 +9,7 @@ fn write(root: &Path, path: &str, source: &str) {
     std::fs::write(path, source).unwrap();
 }
 
-fn run(root: &Path, runtime: &str, args: &[&str]) -> Output {
+fn run(root: &Path, _runtime: &str, args: &[&str]) -> Output {
     let rules = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -18,7 +18,7 @@ fn run(root: &Path, runtime: &str, args: &[&str]) -> Output {
         .join("rules");
     Command::new(env!("CARGO_BIN_EXE_imp"))
         .current_dir(root)
-        .env("IMP_RUNTIME", runtime)
+        .env_remove("IMP_RUNTIME")
         .env("IMP_RULES_DIR", rules)
         .env_remove("GITHUB_ACTIONS")
         .args(args)
@@ -34,56 +34,28 @@ fn assert_no_warning(output: &Output, success: bool) {
     );
 }
 
-fn workspace(root: &Path, runtime: &str) {
-    if runtime == "js" {
-        write(
-            root,
-            "imp.workspace.js",
-            "import '//rules/workflows/fmt';\nimport '//rules/workflows/lint';\n",
-        );
-        write(
-            root,
-            "BUILD.js",
-            r#"
-import { task } from "imp:core";
-import { BUILD } from "//rules/workflows/build";
-export const built = { [BUILD]: task({ async run() {} }) };
-"#,
-        );
-    } else {
-        write(root, "imp.workspace.luau", "require('@imp/rules/workflows/fmt')\nrequire('@imp/rules/workflows/lint')\nreturn {}\n");
-        write(
-            root,
-            "BUILD.luau",
-            r#"
+fn workspace(root: &Path, _runtime: &str) {
+    write(
+        root,
+        "imp.workspace.luau",
+        "require('@imp/rules/workflows/fmt')\nrequire('@imp/rules/workflows/lint')\nreturn {}\n",
+    );
+    write(
+        root,
+        "BUILD.luau",
+        r#"
 local core = require("@imp/core")
 local build = require("@imp/rules/workflows/build")
 return { built = { [build.BUILD] = core.task({ run = function() end }) } }
 "#,
-        );
-    }
+    );
 }
 
-fn add_handlers(root: &Path, runtime: &str) {
-    if runtime == "js" {
-        write(
-            root,
-            "checked/BUILD.js",
-            r#"
-import { task, output } from "imp:core";
-import { FMT } from "//rules/workflows/fmt";
-import { LINT } from "//rules/workflows/lint";
-export const checked = {
-    [FMT]: task({ outputs: { paths: output.value() }, async run() { return { paths: [] }; } }),
-    [LINT]: task({ outputs: { ok: output.value() }, async run() { return { ok: true }; } }),
-};
-"#,
-        );
-    } else {
-        write(
-            root,
-            "checked/BUILD.luau",
-            r#"
+fn add_handlers(root: &Path, _runtime: &str) {
+    write(
+        root,
+        "checked/BUILD.luau",
+        r#"
 local core = require("@imp/core")
 local fmt = require("@imp/rules/workflows/fmt")
 local lint = require("@imp/rules/workflows/lint")
@@ -94,8 +66,7 @@ return { checked = {
         run = function() return { result = { ok = true } } end }).outputs.result,
 } }
 "#,
-        );
-    }
+    );
 }
 
 #[test]
@@ -104,7 +75,7 @@ fn quality_goals_warn_only_when_the_complete_selection_has_no_handler() {
         eprintln!("skip CLI warning check: cargo did not stage the imp binary");
         return;
     }
-    for runtime in ["js", "luau"] {
+    for runtime in ["luau"] {
         let root = tempfile::tempdir().unwrap();
         workspace(root.path(), runtime);
         for goal in ["fmt", "lint"] {
@@ -156,35 +127,12 @@ fn quality_goals_warn_only_when_the_complete_selection_has_no_handler() {
 }
 
 #[test]
-fn label_handlers_do_not_trigger_the_missing_handler_warning() {
-    if !Path::new(env!("CARGO_BIN_EXE_imp")).is_file() {
-        eprintln!("skip CLI warning check: cargo did not stage the imp binary");
-        return;
-    }
-    let root = tempfile::tempdir().unwrap();
-    workspace(root.path(), "js");
-    write(
-        root.path(),
-        "labels/BUILD.js",
-        r#"
-import { attach, label } from "imp:core";
-export const checked = label();
-attach(checked, "fmt", async () => {});
-attach(checked, "lint", async () => {});
-"#,
-    );
-    for goal in ["fmt", "lint"] {
-        assert_no_warning(&run(root.path(), "js", &[goal, "//..."]), true);
-    }
-}
-
-#[test]
 fn unchanged_selection_keeps_its_existing_nothing_to_do_message() {
     if !Path::new(env!("CARGO_BIN_EXE_imp")).is_file() {
         eprintln!("skip CLI warning check: cargo did not stage the imp binary");
         return;
     }
-    for runtime in ["js", "luau"] {
+    for runtime in ["luau"] {
         let root = tempfile::tempdir().unwrap();
         workspace(root.path(), runtime);
         for args in [
@@ -249,5 +197,49 @@ return { empty = {
         for selector in ["//...", "//:empty"] {
             assert_no_warning(&run(root.path(), "luau", &[goal, selector]), true);
         }
+    }
+}
+
+#[test]
+fn changed_roots_without_the_requested_workflow_remain_a_silent_noop() {
+    if !Path::new(env!("CARGO_BIN_EXE_imp")).is_file() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    workspace(root.path(), "luau");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Imp Test",
+            "-c",
+            "user.email=imp@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(root.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let build = root.path().join("BUILD.luau");
+    std::fs::write(&build, std::fs::read_to_string(&build).unwrap() + "\n").unwrap();
+    for goal in ["fmt", "lint"] {
+        let output = run(
+            root.path(),
+            "luau",
+            &[goal, "//...", "--changed-since", "HEAD"],
+        );
+        assert_no_warning(&output, true);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("nothing to do"),
+            "{output:?}"
+        );
     }
 }

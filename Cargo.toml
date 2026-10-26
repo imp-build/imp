@@ -21,7 +21,6 @@ rusqlite     = { version = "0.31", features = ["bundled"] }
 sha2         = "0.10"
 tempfile     = "3"
 futures      = { version = "0.3", default-features = false, features = ["std"] }
-rquickjs     = { version = "0.14.0", features = ["loader", "futures", "macro"] }
 signal-hook  = "0.4"
 log          = "0.4"
 tonic        = "0.12"

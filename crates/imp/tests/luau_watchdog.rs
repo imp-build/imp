@@ -55,7 +55,7 @@ return { slow = core.task({
     };
     let output = Command::new(binary)
         .current_dir(root.path())
-        .env("IMP_RUNTIME", "luau")
+        .env_remove("IMP_RUNTIME")
         .env("IMP_RULES_DIR", rules)
         .args(args)
         .output()

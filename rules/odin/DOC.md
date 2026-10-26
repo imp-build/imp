@@ -32,7 +32,7 @@ require("@imp/rules/workflows/lockfiles")
 return {}
 ```
 
-Select the Luau runtime with `IMP_RUNTIME=luau`. Odin imports register the
+Odin imports register the
 shared `opt` mode axis and its debug and release profiles. Compiler and
 formatter defaults use pinned, verified downloads and shared named caches.
 No host Odin installation is required. Do not create a cache for each task.
@@ -65,11 +65,11 @@ them to the workspace.
 From the workspace root, with the runtime selected:
 
 ```sh
-IMP_RUNTIME=luau imp build //src/lib:lib
-IMP_RUNTIME=luau imp test //src/lib:lib_tests
-IMP_RUNTIME=luau imp lint //src/lib:lib
-IMP_RUNTIME=luau imp fmt --check //src/lib:lib
-IMP_RUNTIME=luau imp package //src/lib:lib
+imp build //src/lib:lib
+imp test //src/lib:lib_tests
+imp lint //src/lib:lib
+imp fmt --check //src/lib:lib
+imp package //src/lib:lib
 ```
 
 For a binary target, `imp run //src/app:app -- one "two words"` forwards the
@@ -137,7 +137,7 @@ return { compiler = compiler, formatter_lock = fmt.odinfmt_gen_lockfiles() }
 From the workspace root:
 
 ```sh
-IMP_RUNTIME=luau imp goal gen-lockfiles //:compiler //:formatter_lock
+imp goal gen-lockfiles //:compiler //:formatter_lock
 ```
 
 The shipped lockfiles are the default. A custom lockfile pins download URLs,
@@ -186,8 +186,8 @@ Require `@imp/rules/workflows/generate_build` and set
 `odin = { build_generate = true }` in workspace configuration. Then run:
 
 ```sh
-IMP_RUNTIME=luau imp goal generate-build
-IMP_RUNTIME=luau imp goal generate-build --check
+imp goal generate-build
+imp goal generate-build --check
 ```
 
 The generator writes `BUILD.luau` declarations for unowned source directories.
@@ -204,7 +204,7 @@ From a Luau workspace, require `@imp/rules/odin/vscode` in
 adds the `vs` workflow to each package. From the workspace root, run:
 
 ```sh
-IMP_RUNTIME=luau imp vs //...
+imp vs //...
 ```
 
 The goal writes `.vscode/launch.json` and `.vscode/tasks.json`. It replaces
@@ -219,8 +219,7 @@ Both modes publish to the same location; the last package task determines
 which mode is present. Libraries and test packages get package tasks without
 launch entries. Labels include the full target address.
 
-The editor must find a Luau-capable `imp` on `PATH` and inherit
-`IMP_RUNTIME=luau` during this migration. VS Code uses `cppvsdbg` on Windows
+The editor must find a current `imp` on `PATH`. VS Code uses `cppvsdbg` on Windows
 and `lldb-dap` on other hosts. Install the matching debugger extension.
 Windows document structure is covered by fake-host tests. Running the editor
 and debugger on Windows still requires a Windows validation run.

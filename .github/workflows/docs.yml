@@ -3,7 +3,6 @@
 
 name: Deploy docs
 env:
-  IMP_RUNTIME: luau
   IMP_RULES_DIR: ${{ github.workspace }}/rules
 
 on:

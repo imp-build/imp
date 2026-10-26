@@ -15,7 +15,6 @@ use imp_engine::{
     runtime, selector, spike,
 };
 use imp_scheduler as scheduler;
-use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
 type Tree = ui::Tree;
 
@@ -29,14 +28,13 @@ type Tree = ui::Tree;
     about = "Extensible workspace build system",
     long_about = "Extensible workspace build system.\n\n\
 Run a managed toolchain binary directly with `imp @TOOL <args>` (e.g. `imp @odin build foo.odin -out:foo`); \
-args are passed through verbatim, no `--` needed. TOOL is any toolchain-shaped \
-top-level export in imp.workspace.js (e.g. odin, odinfmt), a registered Luau toolchain, or the built-in kcov."
+args are passed through verbatim, no `--` needed. TOOL names a registered Luau toolchain or the built-in kcov."
 )]
 struct Cli {
     /// Route sandboxed execution through the local daemon.
     #[arg(long, global = true)]
     daemon: bool,
-    /// Log verbosity. Defaults to the workspace's `imp.logLevel` config, or
+    /// Log verbosity. Defaults to the workspace's `imp.log_level` config, or
     /// "info" if unset.
     #[arg(long, global = true, value_enum)]
     level: Option<LogLevelArg>,
@@ -151,10 +149,7 @@ enum Cmd {
         output: Option<PathBuf>,
     },
     /// List target types and rules in the workspace
-    Rules {
-        #[command(subcommand)]
-        command: Option<RulesCmd>,
-    },
+    Rules {},
     /// Run any registered goal by name, e.g. `imp goal vs //:target`
     #[command(disable_help_flag = true)]
     Goal {
@@ -169,20 +164,6 @@ enum Cmd {
     /// Rust variant here. Equivalent to `imp goal <name> ...`.
     #[command(external_subcommand)]
     External(Vec<String>),
-    /// Coordinate isolated JS rule tests. Invoked by the rules-test product;
-    /// not for direct use.
-    #[command(hide = true)]
-    RulesTest {
-        /// Workspace-rooted test modules, e.g. //rules/odin/index_test
-        modules: Vec<String>,
-    },
-    /// Execute one discovered JS rules test in an isolated child process.
-    #[command(hide = true)]
-    RulesTestCase {
-        module: String,
-        ordinal: usize,
-        fixture: String,
-    },
     /// Run or inspect the local execution daemon.
     Daemon {
         #[command(subcommand)]
@@ -233,13 +214,6 @@ enum ConfigCmd {
 }
 
 #[derive(Subcommand)]
-enum RulesCmd {
-    /// Print target kinds' composed attrs schemas (a subclass's `static
-    /// schema` merged over every ancestor's, base-first)
-    Schema,
-}
-
-#[derive(Subcommand)]
 enum DaemonCmd {
     Serve,
     Status,
@@ -284,7 +258,7 @@ struct GoalArgs {
 }
 
 /// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
-/// `fmt`'s `--check`) aren't known until the workspace/JS loads, so this
+/// `fmt`'s `--check`) aren't known until the workspace loads, so this
 /// phase can't validate them yet — it just vacuums up everything after the
 /// goal name. `parse_goal_args` re-parses this, after workspace load, against
 /// a `Command` built from `GoalArgs` plus that goal's declared flags.
@@ -302,11 +276,10 @@ fn parse_goal_args(
     goal: &str,
     flag_defs: &std::collections::BTreeMap<String, spike::GoalFlagDef>,
     raw: &[String],
-    luau_workspace: bool,
 ) -> clap::ArgMatches {
     let mut cmd = Command::new(goal.to_owned());
     cmd = GoalArgs::augment_args(cmd);
-    if goal == "test" && luau_workspace {
+    if goal == "test" {
         cmd = cmd.arg(
             Arg::new("case")
                 .long("case")
@@ -432,13 +405,7 @@ fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -
     }
 }
 
-/// Resolve `@name` to an absolute binary path via the workspace's own
-/// declarations. Luau uses its registered graph path output. In JavaScript,
-/// `name` must be a top-level `export const <name> = ...` in
-/// `imp.workspace.js` whose target kind has a registered `"toolchain"`
-/// product (see `product(SomeToolchain, TOOLCHAIN, fn)` in the toolchain rule
-/// modules, and `invokeToolchainProduct` in `imp_core.js`). No per-tool
-/// Rust code is required to add a new `@tool`.
+/// Resolve a registered Luau toolchain to an absolute executable path.
 async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let workspace_root = spike::find_workspace_root(&cwd)?;
@@ -481,59 +448,13 @@ async fn resolve_tool_bin_with_rules(
     *live.scheduler.lock().unwrap() = Some(sched);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 
-    if let Some(luau) = &live.luau {
-        let scheduler = live.scheduler.lock().unwrap().clone();
-        return luau.borrow_mut().resolve_tool_bin(name, scheduler).await;
-    }
-
-    // `//:{name}` export lookup first: this is a target handle a workspace
-    // exported at that address (e.g. `export const mold = ...`), and it
-    // covers every toolchain whose declaration API still returns a target
-    // handle. Falls back to resolveToolchainByName() below when it misses —
-    // a toolchain whose declaration API returns a graph-native handle
-    // instead (e.g. biome, ruff, odinfmt) never lands an export in the
-    // target map at all, even when it's declared and its module is
-    // imported, since only target handles register there.
-    let js_id = live
-        .workspace
-        .targets
-        .get(&format!("//:{name}"))
-        .map(|target| target.js_id);
-
-    let path = live
-        .ctx
-        .async_with(async |ctx| -> rquickjs::Result<String> {
-            let promise = Module::import(&ctx, "imp:core")
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("imp:core", format!("{e}")))?;
-            let core_ns: Object =
-                promise.into_future().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
-                })?;
-            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
-            let value: Value = if let Some(js_id) = js_id {
-                let invoke: Function = core_ns.get("invokeToolchainProduct")?;
-                invoke.call((js_id,)).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
-                })?
-            } else {
-                let resolve_by_name: Function = core_ns.get("resolveToolchainByName")?;
-                resolve_by_name.call((name,)).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("resolveToolchainByName", format!("{e}"))
-                })?
-            };
-            let result: MaybePromise = promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
-                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
-            })?;
-            let value: Value = result.into_future().await.catch(&ctx).map_err(|e| {
-                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
-            })?;
-            String::from_js(&ctx, value)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("resolve @{name} from workspace: {e}"))?;
-
-    Ok(PathBuf::from(path))
+    let scheduler = live.scheduler.lock().unwrap().clone();
+    let result = live
+        .luau
+        .borrow_mut()
+        .resolve_tool_bin(name, scheduler)
+        .await;
+    result
 }
 
 /// Print `--help`, extending the derived static `Command` with one real
@@ -758,11 +679,8 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
     let live = runtime::load_workspace(&workspace_root).await?;
     let max_age_days = effective_gc_max_age_days(&live.workspace, None);
 
-    // A namedCache() details() callback may shell out via run({ impure:
-    // true, sandbox: false }), which needs an execution context — install
-    // a minimal, UI-less one (same pattern as resolve_workspace_tool_bin)
-    // only when there's actually a callback that might use it.
-    if details && !live.workspace.named_cache_details.is_empty() {
+    // Cache detail callbacks can resolve declared tools. Install their scheduler.
+    if details {
         *live.exec_root.lock().unwrap() = Some(workspace_root.clone());
         let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -806,12 +724,8 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
                 entry.count,
                 human_bytes(entry.bytes)
             );
-            let text = if let Some(luau) = &live.luau {
-                let details = luau.borrow().named_cache_details(&entry.name);
-                details.await?
-            } else {
-                spike::named_cache_details(&live, &entry.name).await?
-            };
+            let details = live.luau.borrow().named_cache_details(&entry.name);
+            let text = details.await?;
             if let Some(text) = text {
                 for line in text.lines() {
                     println!("      {line}");
@@ -956,7 +870,7 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
         )
         .await
         .into(),
-        Cmd::Rules { command } => cmd_rules(command.as_ref(), tree).await.into(),
+        Cmd::Rules {} => cmd_rules(tree).await.into(),
         Cmd::Config { command } => cmd_config(command).await.into(),
         Cmd::Goal { name, args } => {
             let (result, summary, report) = cmd_execute_goal(
@@ -989,16 +903,6 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
                 report,
             }
         }
-        Cmd::RulesTest { modules } => cmd_rules_test(modules, Arc::clone(&cancellation), tree)
-            .await
-            .into(),
-        Cmd::RulesTestCase {
-            module,
-            ordinal,
-            fixture,
-        } => cmd_rules_test_case(module, *ordinal, fixture, Arc::clone(&cancellation))
-            .await
-            .into(),
         Cmd::Daemon { .. } | Cmd::Cache { .. } => {
             unreachable!("handled before UI setup")
         }
@@ -1128,27 +1032,6 @@ async fn cmd_execute_goal(
         cli_level,
     )
     .await
-}
-
-async fn cmd_rules_test(
-    modules: &[String],
-    cancellation: Arc<AtomicBool>,
-    _tree: &Tree,
-) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    spike::run_rules_tests_isolated(&workspace_root, modules, cancellation).await
-}
-
-async fn cmd_rules_test_case(
-    module: &str,
-    ordinal: usize,
-    fixture: &str,
-    cancellation: Arc<AtomicBool>,
-) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    spike::run_rules_test_case(&workspace_root, module, ordinal, fixture, cancellation).await
 }
 
 /// Per-task completion counts accumulated by the render loop, reported as a
@@ -1302,8 +1185,7 @@ async fn cmd_execute_live_impl(
             } else {
                 (raw, Vec::new())
             };
-            let matches =
-                parse_goal_args(goal, &goal_def.flags, goal_raw, workspace.luau.is_some());
+            let matches = parse_goal_args(goal, &goal_def.flags, goal_raw);
             let args = GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
             let mut flags = serde_json::Map::new();
             for name in goal_def.flags.keys() {
@@ -1312,7 +1194,7 @@ async fn cmd_execute_live_impl(
                     serde_json::Value::Bool(matches.get_flag(name)),
                 );
             }
-            if goal == "test" && workspace.luau.is_some() {
+            if goal == "test" {
                 for name in ["case", "suite"] {
                     if let Some(value) = matches.get_one::<String>(name) {
                         flags.insert(name.to_owned(), serde_json::Value::String(value.clone()));
@@ -1817,7 +1699,7 @@ async fn cmd_execute_live_impl(
     *workspace.ui_multi.lock().unwrap() = Some(tree.multi());
 
     // Drive the goal, with a deadlock watchdog: a genuine async dependency
-    // cycle (which QuickJS gives us no way to detect precisely) surfaces as the
+    // cycle surfaces as the
     // scheduler staying fully idle while the evaluation is unfinished. Report it
     // instead of hanging.
     const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -2256,32 +2138,16 @@ async fn cmd_graph(
     Ok(())
 }
 
-async fn cmd_rules(command: Option<&RulesCmd>, tree: &Tree) -> Result<()> {
-    match command {
-        None => workspace_cmd!(tree, |workspace, out| {
-            spike::format_products(&workspace, &mut out)?;
-        }),
-        Some(RulesCmd::Schema) => {
-            let current_dir = std::env::current_dir().context("determine current directory")?;
-            let workspace_root = spike::find_workspace_root(&current_dir)?;
-            let live = runtime::load_workspace(&workspace_root).await?;
-            let schemas: Vec<_> = live
-                .workspace
-                .target_schemas
-                .iter()
-                .map(|(kind, schema)| serde_json::json!({ "kind": kind, "schema": schema }))
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&schemas)?);
-            Ok(())
-        }
-    }
+async fn cmd_rules(tree: &Tree) -> Result<()> {
+    workspace_cmd!(tree, |workspace, out| {
+        spike::format_products(&workspace, &mut out)?;
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeSet;
     use std::path::Path;
 
     fn workspace_with_imp_config(config: serde_json::Value) -> spike::Workspace {
@@ -2660,7 +2526,7 @@ mod tests {
                 description: Some("Verify without writing".to_owned()),
             },
         )]);
-        let matches = parse_goal_args("fmt", &flag_defs, &raw, false);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, Some(2));
@@ -2677,7 +2543,7 @@ mod tests {
             "--axis=target=x86_64-unknown-linux-gnu".to_owned(),
             "//:pkg".to_owned(),
         ];
-        let matches = parse_goal_args("build", &Default::default(), &raw, false);
+        let matches = parse_goal_args("build", &Default::default(), &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
 
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
@@ -2699,7 +2565,7 @@ mod tests {
             "opt=debug".to_owned(),
             "//:pkg".to_owned(),
         ];
-        let matches = parse_goal_args("build", &Default::default(), &raw, false);
+        let matches = parse_goal_args("build", &Default::default(), &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
 
         assert_eq!(args.profile.as_deref(), Some("windows-release"));
@@ -2713,20 +2579,20 @@ mod tests {
             "check".to_owned(),
             spike::GoalFlagDef { description: None },
         )]);
-        let matches = parse_goal_args("fmt", &flag_defs, &raw, false);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert!(matches.get_flag("check"));
     }
 
     #[test]
-    fn parse_goal_args_accepts_luau_test_case_and_suite_filters_only_for_luau() {
+    fn parse_goal_args_accepts_test_case_and_suite_filters() {
         let case_args = vec![
             "--case".to_owned(),
             "parses.value".to_owned(),
             "//pkg:tests".to_owned(),
         ];
-        let case_matches = parse_goal_args("test", &Default::default(), &case_args, true);
+        let case_matches = parse_goal_args("test", &Default::default(), &case_args);
         let parsed = GoalArgs::from_arg_matches(&case_matches).unwrap();
         assert_eq!(parsed.selectors, vec!["//pkg:tests".to_owned()]);
         assert_eq!(
@@ -2739,138 +2605,11 @@ mod tests {
             "parses".to_owned(),
             "//pkg:tests".to_owned(),
         ];
-        let suite_matches = parse_goal_args("test", &Default::default(), &suite_args, true);
+        let suite_matches = parse_goal_args("test", &Default::default(), &suite_args);
         assert_eq!(
             suite_matches.get_one::<String>("suite").map(String::as_str),
             Some("parses")
         );
-    }
-
-    #[tokio::test]
-    async fn workspace_js_workers_config_feeds_live_js_lanes() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-
-        write_file(
-            &p.join(spike::WORKSPACE_FILE),
-            r#"
-            export const impConfig = { jsWorkers: 2 };
-"#,
-        );
-        write_file(
-            &p.join(spike::BUILD_FILE),
-            r#"
-import { goal, product, target, targetKind, toolName } from "imp:core";
-const BUILD = goal("build");
-const K_workspace_js_workers_test = targetKind("workspace-js-workers-test");
-
-export const a = target({ kind: "workspace-js-workers-test" });
-export const b = target({ kind: "workspace-js-workers-test" });
-
-export const build = product(K_workspace_js_workers_test, BUILD, toolName("workspace-js-workers-test-tool"), async function build(handle) {
-    await Promise.resolve();
-    return handle.label.name;
-});
-"#,
-        );
-
-        let live = spike::load_workspace(p).await.unwrap();
-        let js_workers = effective_js_workers(&live.workspace, None).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
-            1,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tx,
-        );
-        *live.scheduler.lock().unwrap() = Some(scheduler);
-
-        let selectors = vec![":a".to_owned(), ":b".to_owned()];
-        spike::execute_goal_live(
-            &live,
-            p,
-            "build",
-            &selectors,
-            false,
-            js_workers,
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
-
-        let mut slots = BTreeSet::new();
-        while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::LaneStarted {
-                kind: crate::scheduler::LaneKind::Js,
-                slot,
-                display,
-                ..
-            } = event
-            {
-                if display == "build(//:a)" || display == "build(//:b)" {
-                    slots.insert(slot);
-                }
-            }
-        }
-
-        assert_eq!(slots, BTreeSet::from([0, 1]));
-    }
-
-    #[tokio::test]
-    async fn resolve_tool_bin_finds_a_target_exported_at_its_own_address() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-
-        // A toolchain whose declaration API returns the target handle
-        // itself (mold/rust/kache's shape): `//:demo` lands in the
-        // workspace's target map, so resolve_tool_bin_in_workspace's
-        // `//:{name}` lookup finds it without ever touching
-        // resolveToolchainByName().
-        write_file(
-            &p.join(spike::WORKSPACE_FILE),
-            r#"
-import { Toolchain, toolName } from "imp:core";
-
-class DemoToolchain extends Toolchain {
-    static kind = "demo-toolchain";
-    static tool = toolName("demo");
-    bin() { return "/abs/demo-target-bin"; }
-}
-
-export const demo = new DemoToolchain({ kind: "demo-toolchain", attrs: {} }, { default: true });
-"#,
-        );
-
-        let path = resolve_tool_bin_in_workspace(p, "demo").await.unwrap();
-        assert_eq!(path, PathBuf::from("/abs/demo-target-bin"));
-    }
-
-    #[tokio::test]
-    async fn resolve_tool_bin_falls_back_to_a_toolchains_own_default_when_unexported() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-
-        // A toolchain whose declaration API returns a graph-native handle
-        // (biome/ruff/odinfmt's shape): nothing is exported at `//:demo`,
-        // so the `//:{name}` lookup misses and resolve_tool_bin_in_workspace
-        // must fall back to resolveToolchainByName(), which reads the
-        // class's own default() instance instead.
-        write_file(
-            &p.join(spike::WORKSPACE_FILE),
-            r#"
-import { Toolchain, toolName } from "imp:core";
-
-class DemoToolchain extends Toolchain {
-    static kind = "demo-toolchain";
-    static tool = toolName("demo");
-    bin() { return "/abs/demo-fallback-bin"; }
-}
-
-new DemoToolchain({ kind: "demo-toolchain", attrs: {} }, { default: true });
-"#,
-        );
-
-        let path = resolve_tool_bin_in_workspace(p, "demo").await.unwrap();
-        assert_eq!(path, PathBuf::from("/abs/demo-fallback-bin"));
     }
 
     #[cfg(unix)]
@@ -2943,17 +2682,5 @@ return {{}}
         .await
         .unwrap_err();
         assert!(format!("{error:#}").contains("unknown tool '@missing'"));
-    }
-
-    #[tokio::test]
-    async fn resolve_tool_bin_reports_an_unknown_tool_name() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(&p.join(spike::WORKSPACE_FILE), r#"import "imp:core";"#);
-
-        let error = resolve_tool_bin_in_workspace(p, "nonexistent-tool")
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("unknown tool"));
     }
 }

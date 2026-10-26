@@ -1,17 +1,17 @@
 # Luau authoring and module contract
 
-**Status: Pilot.** This document describes the Luau runtime slice available in
-the current Imp source tree. The existing JavaScript runtime remains the
-default. Select Luau by adding `imp.workspace.luau` to the workspace root. A
-workspace cannot contain both `imp.workspace.js` and `imp.workspace.luau`.
+This contract is for rule authors and contributors. It describes module
+identity, graph handles, workspace configuration, and the Luau host boundary.
 
-The pilot loads workspace `BUILD.luau` files and installed Luau rules. It
-provides the `asset` and `resource_package` rules and runs their `build` tasks
-through Imp's hermetic executor. The pilot does not migrate the complete rule
-catalog, implement toolchain downloads, or provide all JavaScript workspace
-configuration and introspection features. Treat other APIs and behavior in
-this document as planned unless this section or a later section marks them
-available.
+Imp uses Luau as its only authoring runtime. It loads workspace `BUILD.luau`
+files and installed Luau rules, then runs declared actions through the hermetic
+executor. JavaScript authoring execution and QuickJS are removed. A workspace
+may retain an obsolete JavaScript file beside `imp.workspace.luau`; Imp does
+not evaluate it. JavaScript-only workspaces must migrate.
+
+The supported catalog has Luau implementations. Static JavaScript catalog
+cleanup and the final release audit remain separate cutover tasks. Sections
+marked planned or illustrative do not define runnable APIs.
 
 ## Stage a file set under a prefix
 
@@ -49,23 +49,21 @@ source paths). Each mapping counts as one input in `input_count`.
 
 **Verified:** The current implementation is in
 `crates/imp-engine/src/luau.rs`. This table records its public host surface and
-the gaps that block catalog migration.
+the current compatibility limits.
 
-| Area | Current Luau behavior | Migration gap |
+| Area | Current Luau behavior | Current limit |
 | --- | --- | --- |
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
-| Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
+| Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | Luau configuration uses `snake_case`. Legacy JavaScript configuration modules are not evaluated. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. The `generate-build` goal of `@imp/rules/workflows/generate_build` writes and checks generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `self_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | Workspace graph introspection remains outside this slice. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
-| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/codegen`, `fmt`, `generate`, `generate_build`, `lint`, `lockfiles`, `publish`, and `run` register the `codegen`, `fmt` (with `--check`), `generate` (with `--check`), `generate-build` (with `--check`), `lint` (with `--fix`), `gen-lockfiles`, `publish`, and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
-| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/cmake`, `c/generate_build`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `oci`, `oci/toolchain`, `rust`, `rust/toolchain`, `rust/kache`, `rust/cargo_task_inputs`, `rust/workspace_expansion`, `rust/generate_build`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | Other packages, such as the Odin build generator, remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/codegen`, `fmt`, `generate`, `generate_build`, `lint`, `lockfiles`, `publish`, and `run` register the `codegen`, `fmt` (with `--check`), `generate` (with `--check`), `generate-build` (with `--check`), `lint` (with `--fix`), `gen-lockfiles`, `publish`, and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | JavaScript authoring tests are not executed. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
+| Installed rules | The tree contains Luau `asset`, `c`, `c/toolchain`, `c/gcc`, `c/cmake`, `c/generate_build`, `c/mold`, `c/msvc`, `c/zig`, `resource_package`, `oci`, `oci/toolchain`, `rust`, `rust/toolchain`, `rust/kache`, `rust/cargo_task_inputs`, `rust/workspace_expansion`, `rust/generate_build`, `workflows/build`, `workflows/codegen`, `workflows/fmt`, `workflows/generate`, `workflows/generate_build`, `workflows/lint`, `workflows/lockfiles`, `workflows/package`, `workflows/publish`, `workflows/run`, `workflows/test`, `workflows/report`, `imp/archive`, `imp/codegen`, `imp/generate`, `imp/lockfile`, `imp/native-tool`, `imp/self-tool`, and `imp/toolchain` modules. | The supported package catalog uses Luau. Obsolete JavaScript files remain until static catalog cleanup. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
-path handles, and explicit action environment settings. The broader Tree-sitter
-rule remains a later capability probe; its test and workspace requirements are
-outside this host task.
+path handles, and explicit action environment settings. Tree-sitter and the other supported rule packages use the same host boundary.
 
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
@@ -103,22 +101,16 @@ units. Failures include the test module's canonical workspace address and
 source location. If a filter matches no tests in the selected test roots, the
 goal fails before the workflow runs.
 
-A workspace root can contain `imp.workspace.js`, `imp.workspace.luau`, or
-both. When it contains both, JavaScript is the default runtime. Set
-`IMP_RUNTIME=luau` to select the Luau runtime, or `IMP_RUNTIME=js` to select
-JavaScript. A selected runtime must have its workspace file, and another
-value fails. One invocation uses one runtime: the JavaScript runtime loads
-only `BUILD.js` modules, and the Luau runtime loads only `BUILD.luau`
-modules. Luau test roots discover only `.test.luau` modules. JavaScript test
-roots retain their existing `_test.js` discovery path.
+Imp loads `imp.workspace.luau` and `BUILD.luau` modules. Luau test roots
+discover `.test.luau` modules. JavaScript authoring execution is removed.
+A JavaScript-only workspace fails with instructions to migrate its workspace
+and BUILD modules. When both workspace files exist, Imp uses Luau.
+`IMP_RUNTIME` is removed; an existing value has no effect.
 
-**Verified:** this repository contains both workspace files. A port task adds
-the `BUILD.luau` and `.test.luau` modules of its package and runs them from the
-repository root:
+From the repository root, after `cargo build -p imp`, run:
 
 ```sh
-# From the repository root, after `cargo build -p imp`:
-IMP_RUNTIME=luau target/debug/imp test //rules/...
+target/debug/imp test //rules/...
 ```
 
 A Cargo build in the checkout reads `@imp/rules` from the checkout's `rules/`
@@ -129,7 +121,7 @@ workspace. Set `IMP_RULES_DIR="$PWD/rules"` only for a build in a different
 test root (`core.test_root()`) of the repository, so
 `imp test //crates/imp-engine:imp_engine` covers them. Product test roots that
 need real toolchains, such as the CMake example ctest roots, run with
-`IMP_RUNTIME=luau imp test //...`.
+`imp test //...`.
 
 ### Test host fakes
 
@@ -294,8 +286,9 @@ explicit graph handles. Workspace configuration schemas validate workspace
 settings; they do not validate rule options or target attributes. The
 [target schema test outcomes](luau-catalog-cutover-plan.md#target-schema-test-outcomes)
 record the individual test exclusions and the approved removal of
-`imp rules schema` during QuickJS runtime removal. The command still exists
-until that cutover; no replacement command is planned. Rule-option and default
+`imp rules schema`. Calls to the removed command fail during argument parsing
+with a nonzero exit. No replacement command exists. Bare `imp rules` and
+`imp config schema` remain available. Rule-option and default
 discovery is separate proposed design work.
 
 Luau does not provide the JavaScript `env`, `which`, `run`, or
@@ -862,7 +855,7 @@ local leaf = core.task({
 local release = core.configured(leaf, { opt = "release" })
 ```
 
-From this repository's root, run `IMP_RUNTIME=luau imp build
+From this repository's root, run `imp build
 //rules/imp/config/example:probe`. The probe combines the ambient leaf, a
 release leaf, and a task that reads no axes. With the default mode, its report
 is `leaf:debug|leaf:release|shared:none`. The leaf runs twice and the shared
@@ -879,9 +872,9 @@ JavaScript field uses `camelCase`.
 
 The Imp-owned `imp` namespace accepts `js_workers` (JavaScript workers),
 `jobs`, `fs_jobs`, `passthrough_env`, and `log_level`. The `cache` namespace
-accepts `gc_max_age_days`. These retain the JavaScript runtime's behavior.
-The JavaScript runtime continues to use `jsWorkers`, `fsJobs`,
-`passthroughEnv`, `logLevel`, and `gcMaxAgeDays`.
+accepts `gc_max_age_days`. The compatibility field `js_workers` remains
+accepted, but Luau does not create JavaScript worker lanes. Legacy JavaScript
+configuration modules and their camelCase fields are not evaluated.
 
 Workspace configuration returns one table with namespace names as keys. The
 loader validates declared fields, applies defaults, and reports the source
@@ -1044,8 +1037,7 @@ return {
 
 ## Planned behavior
 
-The following example shows planned APIs. It is not runnable with the current
-pilot.
+The following example shows planned APIs. It is illustrative and is not a runnable API example.
 
 ```lua
 local imp = require("@imp/core")
@@ -1068,8 +1060,8 @@ return {
 }
 ```
 
-The host API spellings in this example are illustrative. The pilot currently
-provides only the APIs needed by the asset rule and build workflow.
+The host API spellings in this example are illustrative. Use the verified
+host capability table and the current rule guides for runnable declarations.
 
 In this example, `app` and `check` are graph roots because their values are
 opaque graph handles. `shared` is workspace-owned because the relative import

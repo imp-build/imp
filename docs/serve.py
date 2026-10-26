@@ -76,7 +76,7 @@ class Preview:
     def rebuild(self):
         self.builder = subprocess.Popen(
             [self.imp, "package", "//docs:site"],
-            env={**os.environ, "IMP_RUNTIME": "luau"},
+            env=os.environ.copy(),
         )
         status = self.builder.wait()
         self.builder = None

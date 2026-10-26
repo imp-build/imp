@@ -78,6 +78,4 @@ workspace default through the Luau toolchain registry. Import the toolchain
 module and declare a default version before using the command. No fixed CLI
 list of rule-owned tool names is required. See [Toolchains and caches](../toolchains-and-caches/).
 
-During the runtime transition, this repository selects Luau with
-`IMP_RUNTIME=luau`. A workspace that has only the Luau workspace file selects
-Luau automatically.
+Imp uses Luau for all workspace and BUILD modules. `IMP_RUNTIME` has no effect.

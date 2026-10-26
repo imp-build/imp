@@ -6,7 +6,7 @@ Luau default is `0.23.6`; the shipped lockfile also contains `0.22.1`.
 
 ## Public API
 
-Use `imp.workspace.luau` and select Luau with `IMP_RUNTIME=luau`. Register
+Use `imp.workspace.luau`. Register
 `@imp/rules/workflows/lockfiles` in that workspace module when you need the
 `gen-lockfiles` goal.
 
@@ -24,7 +24,7 @@ return {
 ```
 
 From that workspace root, run
-`IMP_RUNTIME=luau imp goal gen-lockfiles //:zola` to write
+`imp goal gen-lockfiles //:zola` to write
 `locks/zola.lock`. Omit `lockfile` to acquire from the lockfile shipped with
 Imp. A workspace file does not replace a shipped lockfile implicitly.
 Missing lock entries fail acquisition and name `gen-lockfiles` in the error.

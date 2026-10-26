@@ -32,13 +32,11 @@ in the cache. Keep those boundaries intact when changing code.
 
 ## Develop and test
 
-Run commands from the repository root. Select Luau during the transition with
-`export IMP_RUNTIME=luau`. The executable must be able to find the
+Run commands from the repository root. Imp uses Luau. The executable must be able to find the
 built-in `rules/` tree. For checkout development, install the local shim with
 `./install.sh --local`; it rebuilds Imp and sets `IMP_RULES_DIR` to this
 checkout's `rules/` directory. A copied or released `imp` binary does not
-follow the checkout: it can run old rules and lack new options such as
-`IMP_RUNTIME`. Use the shim, or run the build in `target/` directly.
+follow the checkout: it can run old rules and lack current authoring APIs. Use the shim, or run the build in `target/` directly.
 
 A Cargo build in this checkout (`target/debug/imp` or `target/release/imp`)
 finds the checkout's `rules/` from its own path. Set

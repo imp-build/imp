@@ -26,7 +26,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .join("rules");
     let output = Command::new(env!("CARGO_BIN_EXE_imp"))
         .current_dir(root)
-        .env("IMP_RUNTIME", "luau")
+        .env_remove("IMP_RUNTIME")
         .env("IMP_RULES_DIR", rules)
         .env_remove("GITHUB_ACTIONS")
         .args(args)

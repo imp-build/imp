@@ -2,8 +2,6 @@
 # Regenerate with: imp generate //ci:docs_workflow
 
 name: Build release artifacts
-env:
-  IMP_RUNTIME: luau
 
 on:
   push:

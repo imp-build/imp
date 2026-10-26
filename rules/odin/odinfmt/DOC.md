@@ -17,8 +17,8 @@ blocks with that version. This defect is in the formatter executable.
 From the workspace root, with an existing Odin target:
 
 ```sh
-IMP_RUNTIME=luau imp fmt //src/game:game
-IMP_RUNTIME=luau imp fmt --check //src/game:game_tests
+imp fmt //src/game:game
+imp fmt --check //src/game:game_tests
 ```
 
 Odinfmt has no native read-only check mode. Both commands run `odinfmt -w`
