@@ -9,7 +9,7 @@ return {
 	end),
 	core.test.case("formatter limits invocations to Odin source paths", function()
 		core.test.with_fake_toolchain_host(function(host)
-			local sources = core.files({ root = "rules/odin/example", include = { "main.odin", "BUILD.js" } })
+			local sources = core.files({ root = "rules/odin/example", include = { "main.odin", "BUILD.luau" } })
 			local result
 			core.test.with_fake_goal_flags({}, function() result = core.test.resolve(formatter.odin_fmt_root({ sources = sources, base = "rules/odin/example" })) end)
 			assert(#result.paths == 1 and result.paths[1] == "rules/odin/example/main.odin")

@@ -58,7 +58,7 @@ def main():
     args = parser.parse_args()
     binary = args.imp.resolve()
     rules = Path(__file__).resolve().parents[2]
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     with tempfile.TemporaryDirectory(prefix="imp-odin-consumer-") as directory:
         root = Path(directory)
 

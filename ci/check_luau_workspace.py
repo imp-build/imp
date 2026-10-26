@@ -6,16 +6,8 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
-
-# These modules have no supported Luau target to port. Keep the exclusions
-# narrow so a new JavaScript-only BUILD file fails this check.
-EXCLUSIONS = {
-    "rules/BUILD.js": "JavaScript source formatting inventory; Luau formatting is a separate post-cutover task.",
-    "rules/imp/test/BUILD.js": "QuickJS test-harness implementation; Luau tests use core.test_root.",
-    "rules/workflows/build/BUILD.js": "QuickJS workflow tests; Luau workflow tests are declared by rules/workflows/BUILD.luau.",
-    "examples/proposed-rules/BUILD.js": "Illustrative proposal with a provisioned local toolchain, not a supported consumer.",
-}
 
 
 def inventory(root):
@@ -27,18 +19,28 @@ def inventory(root):
             if d
             not in (".git", ".imp", "target", "dist", "node_modules", "__pycache__")
         ]
-        if "BUILD.js" in files:
-            builds.append((Path(directory) / "BUILD.js").relative_to(root).as_posix())
-    missing = [
-        p
-        for p in builds
-        if not (root / p).with_suffix(".luau").is_file() and p not in EXCLUSIONS
-    ]
-    assert not missing, (
-        f"BUILD files without Luau implementations or exclusions: {missing}"
+        if "BUILD.luau" in files:
+            builds.append((Path(directory) / "BUILD.luau").relative_to(root).as_posix())
+    subprocess.run(
+        [sys.executable, "-B", str(root / "probes/js-luau-conversion/inventory.py")],
+        cwd=root,
+        check=True,
     )
-    for path in EXCLUSIONS:
-        assert path in builds, f"stale exclusion: {path}"
+    subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            str(root / "probes/js-luau-conversion"),
+            "-p",
+            "inventory_test.py",
+        ],
+        cwd=root,
+        check=True,
+    )
     return builds
 
 
@@ -108,10 +110,8 @@ def main():
     assert re.search(r"generate-build: \d+ file\(s\) checked, 0 out of date", result), (
         result
     )
-    for path, reason in sorted(EXCLUSIONS.items()):
-        print(f"excluded {path}: {reason}")
     print(
-        f"Luau workspace check passed: {len(builds)} BUILD files, {len(EXCLUSIONS)} exclusions, {len(targets)} targets; C, Rust, and Odin generation enabled."
+        f"Luau workspace check passed: {len(builds)} Luau BUILD files, {len(targets)} targets; C, Rust, and Odin generation enabled."
     )
     print(result.strip())
 

@@ -13,7 +13,7 @@ Ruff format and lint products are available through separate Luau facets.
 **Verified:** The migration branch provides `@imp/rules/python`. Its public
 functions are `python_workspace`, `python_project`, `python_runtime`,
 `python_app`, `python_test`, and `python_sources`. Options and returned fields
-use `snake_case`. JavaScript remains available during the migration.
+use `snake_case`. Imp uses Luau for workspace and BUILD modules.
 
 **Runnable example:** From a workspace with `pyproject.toml`, a locked
 `uv.lock`, application files under `src/hello`, and pytest files under `tests`,
@@ -47,7 +47,7 @@ return {
 }
 ```
 
-From that workspace root, select the Luau runtime:
+From that workspace root, run:
 
 ```sh
 imp build //:app

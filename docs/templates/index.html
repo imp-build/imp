@@ -14,13 +14,12 @@
         </div>
     </div>
     <div class="hero__sample">
-        <pre class="code-panel"><code><span class="code-panel__comment">// BUILD.js</span>
-import { odinPackage } from "//rules/odin";
+        <pre class="code-panel"><code><span class="code-panel__comment">-- BUILD.luau</span>
+local odin = require("@imp/rules/odin")
 
-export const hello = odinPackage({
-    srcs: ["*.odin"],
-    toolchain: "dev-2026-03",
-});</code></pre>
+return {
+    hello = odin.odin_package({ path = "." }),
+}</code></pre>
         <pre class="code-panel code-panel--terminal"><code><span class="code-panel__prompt">$</span> imp build //:hello
 <span class="code-panel__comment">toolchain dev-2026-03 (cached)</span>
 <span class="code-panel__comment">odin build //:hello</span>
@@ -37,8 +36,8 @@ export const hello = odinPackage({
         <p>Every build step is cached by the content it actually depends on — not timestamps, not guesswork.</p>
     </div>
     <div class="feature">
-        <h3>Plain JavaScript</h3>
-        <p>Build graphs are declared in <code>BUILD.js</code>, evaluated inside an embedded runtime — no separate config language to learn.</p>
+        <h3>Build graphs in Luau</h3>
+        <p>Declare build graphs in <code>BUILD.luau</code>. Import rule modules and compose explicit graph values.</p>
     </div>
 </section>
 <section class="content-body">

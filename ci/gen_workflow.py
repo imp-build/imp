@@ -47,14 +47,13 @@ FULL_HISTORY_CHECKOUT = {
 
 # Everything that ends up inside the compiled binary. Notably NOT `rules/**`:
 # the rule library ships beside the binary and is read from disk at runtime, so
-# a rules-only change doesn't produce a different executable. `crates/**/*.js`
-# stays because imp_core.js is still include_str!'d.
+# a rules-only change does not produce a different executable.
 #
 # kache already makes the *compile* mostly incremental, but a 99% cache hit
 # still costs ~3.5min of rustc replay plus linking. Most pushes touch no Rust
 # at all, so cache the linked artifact itself and skip the job's work outright.
 IMP_BINARY_HASH = (
-    "${{ hashFiles('crates/**/*.rs', 'crates/**/*.js', "
+    "${{ hashFiles('crates/**/*.rs', "
     "'**/Cargo.toml', 'Cargo.lock') }}"
 )
 IMP_BINARY_CACHE_MISS = "steps.imp-binary.outputs.cache-hit != 'true'"

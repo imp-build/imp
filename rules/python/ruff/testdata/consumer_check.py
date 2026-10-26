@@ -11,7 +11,7 @@ def main():
     parser.add_argument("--imp", type=Path, required=True)
     binary = parser.parse_args().imp.resolve()
     rules = Path(__file__).resolve().parents[3]
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     with tempfile.TemporaryDirectory(prefix="imp-ruff-consumer-") as directory:
         root = Path(directory)
         workspace = '''require("@imp/rules/python/ruff/fmt")

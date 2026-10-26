@@ -8,7 +8,7 @@ local function fails(fn, text)
 	assert(string.find(tostring(err), text, 1, true), tostring(err))
 end
 local function scratch(extra)
-	local options = { base = "scratch", source_base = ".", layers = { { srcs = { "rules/oci/index.js" }, path = "/app" } } }
+	local options = { base = "scratch", source_base = ".", layers = { { srcs = { "rules/oci/index.luau" }, path = "/app" } } }
 	for key, value in pairs(extra or {}) do options[key] = value end
 	return oci.oci_build(options)
 end
@@ -104,7 +104,7 @@ return {
 		core.test.with_fake_run(function(host)
 			local base = scratch()
 			local derived = scratch({ base = base, layers = {
-				{ srcs = { "rules/oci/index.js" }, path = "/one", mode = "0755", uid = 12, gid = 34 },
+				{ srcs = { "rules/oci/index.luau" }, path = "/one", mode = "0755", uid = 12, gid = 34 },
 				{ srcs = { "rules/oci/DOC.md" }, path = "/two" },
 			} })
 			core.test.resolve(derived.BUILD)

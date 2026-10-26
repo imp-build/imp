@@ -9,7 +9,7 @@ return {}
 ```
 
 Each import enables one product. The default toolchain pins Ruff `0.16.7`.
-JavaScript modules remain available during migration.
+Imp uses Luau for workspace and BUILD modules.
 
 From the workspace root, select a declared Python target:
 
@@ -59,8 +59,8 @@ fixing.
 ## Public API
 
 Import the Ruff formatter or linter facet from the documented entrypoints.
-Users select the products with `imp fmt` and `imp lint` after setting
-`IMP_RUNTIME=luau`. Toolchain download helpers are not user BUILD APIs.
+Users select the products with `imp fmt` and `imp lint`.
+Toolchain download helpers are not user BUILD APIs.
 
 ## Declare the toolchain
 

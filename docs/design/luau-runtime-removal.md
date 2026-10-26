@@ -284,12 +284,13 @@ The JavaScript-only CLI tool-export and worker-lane tests are removed. The
 retained Luau tool resolver checks arguments and exit status. The label-only
 quality-warning case is excluded with the label API.
 
-## Remaining catalog work
+## Catalog cleanup
 
-The following task removes obsolete workspace and CI JavaScript modules,
+The catalog cleanup removes obsolete workspace and CI JavaScript modules,
 `BUILD.js` declarations, JavaScript rule modules and tests, the old documentation
-extractor, and obsolete authoring examples. It refreshes the static migration
-inventory. JavaScript and TypeScript application inputs remain supported.
+extractor, and obsolete authoring examples. The removal manifest and cutover
+audit are in `probes/js-luau-conversion/`. JavaScript and TypeScript application
+inputs remain supported. See the [removal audit](luau-catalog-cutover-plan.md#removal-audit).
 
 The final cutover task owns the complete cross-workspace release audit and
 native-platform evidence. Runtime removal alone does not complete that task.

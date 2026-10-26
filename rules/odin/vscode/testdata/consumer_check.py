@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--imp", type=Path, required=True)
     binary = parser.parse_args().imp.resolve()
-    env = {**os.environ, "IMP_RUNTIME": "luau"}
+    env = {**os.environ}
     with tempfile.TemporaryDirectory(prefix="imp-vs-consumer-") as directory:
         root = Path(directory)
 

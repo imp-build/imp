@@ -7,8 +7,8 @@ run binaries, and publish artifacts through the Luau graph. Import
 ## Public API
 
 Use `odin_package(options)` and `odin_test_package(options)` from
-`@imp/rules/odin`. Options use snake_case. The JavaScript implementation stays
-available during the runtime migration. These examples use Luau.
+`@imp/rules/odin`. Options use snake_case. Imp uses Luau for workspace and
+BUILD modules.
 
 An ordinary package provides build, lint, package, and run roots. The run root
 is usable only when the package has a `main` entrypoint. A test package

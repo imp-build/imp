@@ -1,15 +1,87 @@
 # Luau catalog cutover plan
 
-**Status: Planned.** This plan is for contributors and maintainers who migrate
-Imp's workspace modules, installed rules, and tests from JavaScript to Luau. It
-defines review ownership, import islands, host prerequisites, and the gate for
-removing QuickJS. It does not describe behavior that is available today.
+**Status: Catalog cleanup implemented; final cutover validation is separate.**
+This record is for contributors and maintainers. Imp uses Luau for authoring.
+The migration rules and conversion tables below record the historical port
+plan. They are not current runtime selection instructions.
 
-## Current evidence
+## Removal audit
+
+From the repository root, run:
+
+```sh
+python3 probes/js-luau-conversion/inventory.py
+```
+
+The command checks `probes/js-luau-conversion/removal-manifest.json`.
+The manifest records 210 removed authoring files, replacement or exclusion
+paths, and three retained application inputs. The JavaScript applications are
+`rules/js/example/src/hello.js` and `rules/js/example/app/src/index.js`.
+The TypeScript input is `rules/js/example/app_ts/src/index.ts`.
+Their Luau BUILD declarations remain supported.
+
+The audit fails if a removed file remains, a replacement or evidence path is
+missing, a source record is duplicated, a retained input is missing or
+untracked, or an unexpected tracked JavaScript or TypeScript file exists.
+It accepts pending Git deletions without reading the removed source.
+Replacement paths establish module ownership, not proof of full test coverage.
+
+The following retained assertions have no verified focused replacement:
+
+- Asset resource files, explicit source base, and rejection of paths outside
+  the workspace. The Rust asset pilot covers module identity and execution.
+  JavaScript carrier-field assertions do not apply to Luau.
+- An immutable lint root for JavaScript application declarations. The Luau
+  Biome formatter suite covers immutable source roots with lint facets; the
+  graph suite covers lint execution and failures.
+- The cache-only build goal makes no workspace writes for selected roots.
+  The Luau implementation returns without writing, but has no equivalent test.
+
+These are coverage gaps, not approved behavior exclusions. The user chose
+follow-up work instead of new product tests during this cleanup. Peon task
+`imp:2026-10-26-close-retained-catalog-test-gaps` records the missing assertions
+and existing coverage. Preserve the approved host API exclusions below.
+
+## Catalog cleanup verification
+
+Verified on Linux on 2026-10-26. Commands ran from the repository root.
+The checkout binary was first on `PATH` for passing Imp and consumer checks.
+The installed launcher failed `imp fmt //...`, `imp lint //...`, and
+`imp test //...` with exit 1 because it still required `imp.workspace.js`.
+No alternate `IMP_CACHE_DIR` or repository rules override was set.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `python3 -B probes/js-luau-conversion/inventory.py` | 0 | 210 removals; two JavaScript and one TypeScript application inputs retained; three coverage-gap records |
+| `python3 -B -m unittest discover -s probes/js-luau-conversion -p inventory_test.py` | 0 | Eight audit regression tests passed |
+| `imp fmt //...` | 0 | 26 unchanged, zero changed or failed |
+| `imp lint //...` | 0 | 27 clean, zero fixed or failed |
+| `imp test //...` | 0 | 732/732 test units passed, including the Rust workspace and Tree-sitter round-trip |
+| `python3 -B ci/check_luau_workspace.py --imp target/debug/imp` | 0 | 58 Luau BUILD files, 90 targets, zero stale generated BUILD files |
+| `python3 -B rules/python/testdata/consumer_check.py --imp target/debug/imp` | 0 | Documented targets and real Python consumers passed |
+| `python3 -B rules/js/testdata/consumer_check.py --imp target/debug/imp` | 0 | Real JavaScript and TypeScript consumers passed |
+| `python3 -B rules/oci/testdata/consumer_check.py --imp target/debug/imp` | 0 | OCI layouts, metadata, determinism, edits, and expected failures passed |
+| `imp build //rules/js/example:app //rules/js/example:app_ts //rules/js/example:hello //rules/js/example:hello_src` | 0 | All retained example graph roots built |
+| `imp run //rules/js/example:app` | 0 | JavaScript application printed its greeting |
+| `imp run //rules/js/example:app_ts` | 0 | TypeScript application printed its greeting |
+| `ci/smoke_package.sh <staged-tree>` | 0 | Copied checkout binary and rules resolved outside the checkout |
+
+An independent review found that a deleted tracked JavaScript source could
+lose its manifest record without failing the audit. The audit now requires
+a manifest record for every tracked source path, even when the file is absent. A regression test
+covers the absent source with a missing removal record. The eight audit tests,
+Ruff checks, and workspace checker passed after the fix.
+
+The broad suite includes expected failing CMake actions. The Python and OCI
+consumer checks also test failures and exit zero when those checks pass.
+No native macOS or Windows execution was run. Final cutover and release
+acceptance remain owned by the separate validation task.
+
+## Historical conversion evidence
 
 The conversion report at `probes/js-luau-conversion/inventory.py` reads tracked
 JavaScript files and assigns each file to one named migration boundary or one
-explicit exclusion. Its current result is:
+explicit exclusion. Its historical result was:
 
 | Role | Mechanical | Review | Redesign | Excluded | Total |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -24,7 +96,7 @@ an `imp init` command or rule package. The conversion categories are heuristic
 review signals. They are not semantic proof that a module can be translated
 mechanically.
 
-## Migration rules
+## Historical migration rules
 
 - Do not evaluate JavaScript and Luau modules in one graph. There is no
   cross-runtime bridge.
@@ -49,7 +121,7 @@ mechanically.
 ## Review boundaries
 
 The report lists every file in these boundaries. The counts below match the
-current 211-file inventory. “Split” means that the next sprint must replace the
+historical 211-file inventory. “Split” means that the next sprint must replace the
 current broad task with the listed ownership boundaries before conversion work
 starts.
 

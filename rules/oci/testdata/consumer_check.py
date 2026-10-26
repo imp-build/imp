@@ -105,7 +105,7 @@ def main():
     args = parser.parse_args()
     binary = args.imp.resolve()
     rules = Path(__file__).resolve().parents[2]
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     snapshots = []
     for _ in range(2):
         with tempfile.TemporaryDirectory(prefix="imp-oci-consumer-") as directory:

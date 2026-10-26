@@ -25,11 +25,10 @@ workflow handles each target provides.
 
 ## Luau workflow modules
 
-**Verified:** on 2026-10-24, `@imp/rules/workflows/build`, `codegen`, `fmt`,
-`generate`, `generate_build`, `lint`, `lockfiles`, `package`, `publish`, `run`,
-`test`, and `vs` have Luau modules beside the JavaScript modules. The repository CI selects
-the Luau workspace, as
-`docs/design/luau-authoring-contract.md` describes.
+`@imp/rules/workflows/build`, `codegen`, `fmt`, `generate`, `generate_build`,
+`lint`, `lockfiles`, `package`, `publish`, `run`, `test`, and `vs` provide Luau
+modules. Imp uses Luau for workspace and BUILD modules. See
+`docs/design/luau-authoring-contract.md`.
 
 Each module registers its goal with `core.goal` and exports the slot key:
 `BUILD`, `CODEGEN`, `FMT`, `GENERATE`, `GEN_LOCKFILES`, `LINT`, `PACKAGE`,

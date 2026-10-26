@@ -2,18 +2,27 @@
 
 This record is for contributors who verify the repository cutover. Commands
 run from the repository root with a checkout-built binary. Imp uses Luau without a runtime override. Downloaded CI binaries need
-`IMP_RULES_DIR` set to the checkout rules directory. Static JavaScript catalog
-cleanup and the final release audit remain separate tasks.
+`IMP_RULES_DIR` set to the checkout rules directory. The obsolete JavaScript authoring catalog is removed. The final release
+audit remains a separate task.
 
 ## Repository coverage
 
-`python3 ci/check_luau_workspace.py --imp target/debug/imp` checks 61 BUILD
-files, four explicit JavaScript-only exclusions, and 90 Luau targets. It
-checks Cargo, docs, and CI workflow coverage, plus the RUN boundary between
-Odin libraries and executables. C, Rust, and Odin BUILD generation are enabled.
-The generation check reports zero files because loaded declarations already
-own the relevant source directories. The checker lists every exclusion and
-its reason.
+`python3 ci/check_luau_workspace.py --imp target/debug/imp` checks the Luau
+BUILD inventory, Cargo, docs, CI workflows, and the RUN boundary between Odin
+libraries and executables. C, Rust, and Odin BUILD generation are enabled.
+The checker runs the cutover audit and its regression tests. The audit rejects
+obsolete or unexpected JavaScript authoring files and checks retained inputs.
+
+The removed JavaScript-only declarations have these recorded exclusions:
+
+- `rules/BUILD.js`: the obsolete JavaScript authoring formatting inventory.
+  Luau source formatting remains separate post-cutover work.
+- `rules/imp/test/BUILD.js` and `rules/imp/test/index.js`: the QuickJS test
+  harness. Luau uses `core.test_root()` and scoped host fakes.
+- `rules/workflows/build/BUILD.js`: the QuickJS workflow test declaration.
+  Luau workflow tests use `rules/workflows/BUILD.luau`.
+- `examples/proposed-rules/BUILD.js`: an illustrative proposal with a local
+  toolchain, not a supported consumer.
 
 ## Reference data flow
 

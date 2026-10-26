@@ -6,12 +6,9 @@ Declare tools, generated sources, lockfile downloads, and rule tests.
 
 ## Luau modules
 
-**Verified:** on 2026-10-11, `@imp/rules/imp/native-tool`, `self-tool`,
-`archive`, `lockfile`, `generate`, `codegen`, and `toolchain` have Luau
-modules beside the JavaScript modules.
-The repository CI selects Luau explicitly. To use the Luau
-modules here, select the Luau workspace, as
-`docs/design/luau-authoring-contract.md` describes.
+`@imp/rules/imp/native-tool`, `self-tool`, `archive`, `lockfile`, `generate`,
+`codegen`, and `toolchain` provide Luau modules. Imp uses Luau for workspace
+and BUILD modules. See `docs/design/luau-authoring-contract.md`.
 
 | Module | Luau export |
 | --- | --- |

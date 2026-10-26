@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--imp", type=Path, required=True)
     binary = parser.parse_args().imp.resolve()
     rules = Path(__file__).resolve().parents[2]
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     with tempfile.TemporaryDirectory(prefix="imp-generate-consumer-") as directory:
         root = Path(directory)
         (root / "imp.workspace.luau").write_text(WORKSPACE)

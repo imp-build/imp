@@ -30,7 +30,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/release/imp
-          key: imp-binary-v1-${{ runner.os }}-${{ hashFiles('crates/**/*.rs', 'crates/**/*.js', '**/Cargo.toml', 'Cargo.lock') }}
+          key: imp-binary-v1-${{ runner.os }}-${{ hashFiles('crates/**/*.rs', '**/Cargo.toml', 'Cargo.lock') }}
 
       - if: steps.imp-binary.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable

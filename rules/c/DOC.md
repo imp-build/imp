@@ -102,8 +102,8 @@ local compile = core.task({
 Each module declares its pinned default when it loads on a platform that it
 supports: gcc 2025.08-1 on Linux x86_64 and 16.2.0posix-14.0.0-ucrt-r1 on
 Windows x86_64, Zig 0.16.0 on Linux and Windows, and NASM 3.02 and mold
-2.42.1 on their only platforms. The JavaScript gcc and Zig modules fail to
-load on another platform. The Luau modules declare no default there.
+2.42.1 on their only platforms. The Luau modules declare no default on
+unsupported platforms.
 
 `gcc_toolchain(version, options?)`, `zig_toolchain(version, options?)`,
 `nasm_toolchain(version?, options?)`, and `mold_toolchain(version, options?)`

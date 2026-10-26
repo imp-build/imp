@@ -1,11 +1,4 @@
--- The Luau workspace of this repository. `imp.workspace.js` stays the default
--- runtime until the Luau catalog cutover is complete. Select this workspace
--- with Luau, for example:
---
---   imp test //rules/...
---
--- Require each workflow module that a BUILD.luau module uses, so that its
--- goal is registered. Add the modules of each ported rule package here.
+-- Register workflows before BUILD.luau modules declare their graph roots.
 require("@imp/rules/workflows/build")
 require("@imp/rules/workflows/builtin_lockfiles")
 require("@imp/rules/workflows/codegen")

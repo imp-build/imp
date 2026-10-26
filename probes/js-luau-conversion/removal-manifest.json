@@ -1,0 +1,1897 @@
+{
+  "version": 1,
+  "retained_inputs": [
+    "rules/js/example/app/src/index.js",
+    "rules/js/example/src/hello.js",
+    "rules/js/example/app_ts/src/index.ts"
+  ],
+  "removed_authoring": [
+    {
+      "source": "BUILD.js",
+      "replacements": [
+        "BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "ci/BUILD.js",
+      "replacements": [
+        "ci/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-daemon/BUILD.js",
+      "replacements": [
+        "crates/imp-daemon/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-engine/BUILD.js",
+      "replacements": [
+        "crates/imp-engine/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-exec-api/BUILD.js",
+      "replacements": [
+        "crates/imp-exec-api/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-execution/BUILD.js",
+      "replacements": [
+        "crates/imp-execution/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-logging/BUILD.js",
+      "replacements": [
+        "crates/imp-logging/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-remote-cache/BUILD.js",
+      "replacements": [
+        "crates/imp-remote-cache/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-scheduler/BUILD.js",
+      "replacements": [
+        "crates/imp-scheduler/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp-store/BUILD.js",
+      "replacements": [
+        "crates/imp-store/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "crates/imp/BUILD.js",
+      "replacements": [
+        "crates/imp/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "docs/BUILD.js",
+      "replacements": [
+        "docs/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "docs/js_api_extract.js",
+      "replacements": [
+        "docs/luau_api_extract.py"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "docs/js_api_extract_test.js",
+      "replacements": [
+        "docs/luau_api_extract_test.py"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "examples/proposed-rules/BUILD.js",
+      "exclusion": "Illustrative proposal with a provisioned local toolchain; not a supported consumer.",
+      "evidence": [
+        "docs/design/luau-workspace-integration.md"
+      ]
+    },
+    {
+      "source": "imp.workspace.ci.js",
+      "replacements": [
+        "imp.workspace.ci.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "imp.workspace.js",
+      "replacements": [
+        "imp.workspace.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/BUILD.js",
+      "exclusion": "Obsolete JavaScript authoring formatting inventory. Luau source formatting is separate post-cutover work.",
+      "evidence": [
+        "docs/design/luau-workspace-integration.md"
+      ]
+    },
+    {
+      "source": "rules/asset/BUILD.js",
+      "replacements": [
+        "rules/asset/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/asset/index.js",
+      "replacements": [
+        "rules/asset/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/asset/index_test.js",
+      "replacements": [
+        "crates/imp-engine/src/luau.rs"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ],
+      "coverage_gap": {
+        "description": "Resource files, explicit base, and path rejection assertions are not all covered by the Rust asset execution test. JavaScript carrier fields do not apply.",
+        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
+      }
+    },
+    {
+      "source": "rules/c/BUILD.js",
+      "replacements": [
+        "rules/c/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/BUILD.js",
+      "replacements": [
+        "rules/c/cmake/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/ctest_testfile.js",
+      "replacements": [
+        "rules/c/cmake/ctest_testfile.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/ctest_testfile_test.js",
+      "replacements": [
+        "rules/c/cmake/ctest_testfile.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/example/BUILD.js",
+      "replacements": [
+        "rules/c/cmake/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/expansion.js",
+      "replacements": [
+        "rules/c/cmake/expansion.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/expansion_test.js",
+      "replacements": [
+        "rules/c/cmake/expansion.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/graph_replay.js",
+      "replacements": [
+        "rules/c/cmake/graph_replay.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/index.js",
+      "replacements": [
+        "rules/c/cmake/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/ninja_graph.js",
+      "replacements": [
+        "rules/c/cmake/ninja_graph.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/ninja_graph_test.js",
+      "replacements": [
+        "rules/c/cmake/ninja_graph.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/scan_test.js",
+      "replacements": [
+        "rules/c/cmake/scan.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/toolchain.js",
+      "replacements": [
+        "rules/c/cmake/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/cmake/toolchain_test.js",
+      "replacements": [
+        "rules/c/cmake/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/gcc/BUILD.js",
+      "replacements": [
+        "rules/c/gcc/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/gcc/index.js",
+      "replacements": [
+        "rules/c/gcc/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/gcc/toolchain_test.js",
+      "replacements": [
+        "rules/c/gcc/gcc.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/generate_build/index.js",
+      "replacements": [
+        "rules/c/generate_build/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/graph_example/BUILD.js",
+      "replacements": [
+        "rules/c/graph_example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/index.js",
+      "replacements": [
+        "rules/c/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/index_test.js",
+      "replacements": [
+        "rules/c/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/mold/BUILD.js",
+      "replacements": [
+        "rules/c/mold/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/mold/index.js",
+      "replacements": [
+        "rules/c/mold/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/mold/toolchain_test.js",
+      "replacements": [
+        "rules/c/mold/mold.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/msvc/BUILD.js",
+      "replacements": [
+        "rules/c/msvc/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/msvc/index.js",
+      "replacements": [
+        "rules/c/msvc/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/msvc/nasm_toolchain_test.js",
+      "replacements": [
+        "rules/c/msvc/msvc.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/toolchain.js",
+      "replacements": [
+        "rules/c/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/toolchain_test.js",
+      "replacements": [
+        "rules/c/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/zig/BUILD.js",
+      "replacements": [
+        "rules/c/zig/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/zig/index.js",
+      "replacements": [
+        "rules/c/zig/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/c/zig/toolchain_test.js",
+      "replacements": [
+        "rules/c/zig/zig.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/BUILD.js",
+      "replacements": [
+        "rules/imp/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/action_cores_test.js",
+      "replacements": [
+        "rules/imp/action_cores.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/archive/index.js",
+      "replacements": [
+        "rules/imp/archive/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/archive_test.js",
+      "replacements": [
+        "rules/imp/archive.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/codegen/index.js",
+      "replacements": [
+        "rules/imp/codegen/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/codegen_test.js",
+      "replacements": [
+        "rules/imp/codegen.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/config/example/BUILD.js",
+      "replacements": [
+        "rules/imp/config/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/file_set_test.js",
+      "replacements": [
+        "rules/imp/file_set.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/generate/index.js",
+      "replacements": [
+        "rules/imp/generate/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/generate_test.js",
+      "replacements": [
+        "rules/imp/generate.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/graph_identity_test.js",
+      "replacements": [
+        "rules/imp/graph_identity.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/label_test.js",
+      "exclusion": "Luau has no labels or target addresses as graph values; approved host API exclusion.",
+      "evidence": [
+        "docs/design/luau-authoring-contract.md"
+      ]
+    },
+    {
+      "source": "rules/imp/lockfile/index.js",
+      "replacements": [
+        "rules/imp/lockfile/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/lockfile_test.js",
+      "replacements": [
+        "rules/imp/lockfile.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/memo_test.js",
+      "exclusion": "Luau has no JavaScript memo trace API; approved host API exclusion.",
+      "evidence": [
+        "docs/design/luau-authoring-contract.md"
+      ]
+    },
+    {
+      "source": "rules/imp/mode/index.js",
+      "replacements": [
+        "rules/imp/mode/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/native-tool/index.js",
+      "replacements": [
+        "rules/imp/native-tool/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/native_tool_test.js",
+      "replacements": [
+        "rules/imp/native_tool.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/product_test.js",
+      "replacements": [
+        "rules/imp/product.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/rules_test_coverage_test.js",
+      "replacements": [
+        "rules/imp/rules_test_coverage.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/run_fileset_test.js",
+      "replacements": [
+        "rules/imp/run_fileset.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/self-tool/index.js",
+      "replacements": [
+        "rules/imp/self-tool/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/target_schema_test.js",
+      "exclusion": "Luau has no target schema inheritance API; imp rules schema was removed by decision.",
+      "evidence": [
+        "docs/design/luau-authoring-contract.md"
+      ]
+    },
+    {
+      "source": "rules/imp/test/BUILD.js",
+      "exclusion": "QuickJS test harness implementation; Luau uses core.test_root and scoped host fakes.",
+      "evidence": [
+        "docs/design/luau-workspace-integration.md"
+      ]
+    },
+    {
+      "source": "rules/imp/test/index.js",
+      "exclusion": "QuickJS test harness implementation; Luau uses core.test_root and scoped host fakes.",
+      "evidence": [
+        "docs/design/luau-workspace-integration.md"
+      ]
+    },
+    {
+      "source": "rules/imp/toolchain/index.js",
+      "replacements": [
+        "rules/imp/toolchain/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/toolchain_test.js",
+      "replacements": [
+        "rules/imp/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/imp/tracked_apis_test.js",
+      "replacements": [
+        "rules/imp/tracked_apis.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/BUILD.js",
+      "replacements": [
+        "rules/js/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/BUILD.js",
+      "replacements": [
+        "rules/js/biome/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/fmt.js",
+      "replacements": [
+        "rules/js/biome/fmt.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/fmt_test.js",
+      "replacements": [
+        "rules/js/biome/fmt.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/graph.js",
+      "replacements": [
+        "rules/js/biome/graph.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/index.js",
+      "replacements": [
+        "rules/js/biome/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/lint.js",
+      "replacements": [
+        "rules/js/biome/lint.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/lint_test.js",
+      "replacements": [
+        "rules/js/biome/graph.test.luau",
+        "rules/js/biome/fmt.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ],
+      "coverage_gap": {
+        "description": "Lint execution and immutable source roots are covered. An immutable lint root on js_app remains unverified.",
+        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
+      }
+    },
+    {
+      "source": "rules/js/biome/toolchain.js",
+      "replacements": [
+        "rules/js/biome/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/biome/toolchain_test.js",
+      "replacements": [
+        "rules/js/biome/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/example/BUILD.js",
+      "replacements": [
+        "rules/js/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/graph.js",
+      "replacements": [
+        "rules/js/graph.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/graph_test.js",
+      "replacements": [
+        "rules/js/graph.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/index.js",
+      "replacements": [
+        "rules/js/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/index_test.js",
+      "replacements": [
+        "rules/js/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/node/BUILD.js",
+      "replacements": [
+        "rules/js/node/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/node/index.js",
+      "replacements": [
+        "rules/js/node/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/node/toolchain.js",
+      "replacements": [
+        "rules/js/node/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/node/toolchain_test.js",
+      "replacements": [
+        "rules/js/node/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/pnpm/BUILD.js",
+      "replacements": [
+        "rules/js/pnpm/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/pnpm/index.js",
+      "replacements": [
+        "rules/js/pnpm/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/pnpm/toolchain.js",
+      "replacements": [
+        "rules/js/pnpm/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/js/pnpm/toolchain_test.js",
+      "replacements": [
+        "rules/js/pnpm/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/oci/BUILD.js",
+      "replacements": [
+        "rules/oci/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/oci/index.js",
+      "replacements": [
+        "rules/oci/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/oci/index_test.js",
+      "replacements": [
+        "rules/oci/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/oci/toolchain/index.js",
+      "replacements": [
+        "rules/oci/toolchain/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/oci/toolchain_test.js",
+      "replacements": [
+        "rules/oci/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/BUILD.js",
+      "replacements": [
+        "rules/odin/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/BUILD.js",
+      "replacements": [
+        "rules/odin/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/collection/BUILD.js",
+      "replacements": [
+        "rules/odin/example/collection/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/generated/BUILD.js",
+      "replacements": [
+        "rules/odin/example/generated/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/native/BUILD.js",
+      "replacements": [
+        "rules/odin/example/native/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/shared/BUILD.js",
+      "replacements": [
+        "rules/odin/example/shared/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/shared/consumer/BUILD.js",
+      "replacements": [
+        "rules/odin/example/shared/consumer/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/example/split/BUILD.js",
+      "replacements": [
+        "rules/odin/example/split/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/index.js",
+      "replacements": [
+        "rules/odin/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/index_test.js",
+      "replacements": [
+        "rules/odin/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/odinfmt/BUILD.js",
+      "replacements": [
+        "rules/odin/odinfmt/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/odinfmt/index.js",
+      "replacements": [
+        "rules/odin/odinfmt/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/odinfmt/index_test.js",
+      "replacements": [
+        "rules/odin/odinfmt/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/odinfmt/toolchain.js",
+      "replacements": [
+        "rules/odin/odinfmt/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/odinfmt/toolchain_test.js",
+      "replacements": [
+        "rules/odin/odinfmt/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/toolchain.js",
+      "replacements": [
+        "rules/odin/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/toolchain_test.js",
+      "replacements": [
+        "rules/odin/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/vscode/BUILD.js",
+      "replacements": [
+        "rules/odin/vscode/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/vscode/index.js",
+      "replacements": [
+        "rules/odin/vscode/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/odin/vscode/index_test.js",
+      "replacements": [
+        "rules/odin/vscode/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/BUILD.js",
+      "replacements": [
+        "rules/python/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/doc_test.js",
+      "replacements": [
+        "rules/python/doc.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/example/BUILD.js",
+      "replacements": [
+        "rules/python/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/graph.js",
+      "replacements": [
+        "rules/python/graph.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/graph_test.js",
+      "replacements": [
+        "rules/python/graph.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/index.js",
+      "replacements": [
+        "rules/python/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/lock.js",
+      "replacements": [
+        "rules/python/lock.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/pex_toolchain.js",
+      "replacements": [
+        "rules/python/pex_toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/pex_toolchain_test.js",
+      "replacements": [
+        "rules/python/pex_toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/project.js",
+      "replacements": [
+        "rules/python/project.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/project_test.js",
+      "replacements": [
+        "rules/python/project.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff/BUILD.js",
+      "replacements": [
+        "rules/python/ruff/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff/fmt.js",
+      "replacements": [
+        "rules/python/ruff/fmt.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff/lint.js",
+      "replacements": [
+        "rules/python/ruff/lint.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff_graph.js",
+      "replacements": [
+        "rules/python/ruff_graph.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff_toolchain.js",
+      "replacements": [
+        "rules/python/ruff_toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/ruff_toolchain_test.js",
+      "replacements": [
+        "rules/python/ruff_toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/runtime.js",
+      "replacements": [
+        "rules/python/runtime.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/source.js",
+      "replacements": [
+        "rules/python/source.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/source_test.js",
+      "replacements": [
+        "rules/python/source.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/test.js",
+      "replacements": [
+        "rules/python/test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/testdata/native_wheel/BUILD.js",
+      "replacements": [
+        "rules/python/testdata/native_wheel/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/uv_toolchain.js",
+      "replacements": [
+        "rules/python/uv_toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/uv_toolchain_test.js",
+      "replacements": [
+        "rules/python/uv_toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/python/workspace.js",
+      "replacements": [
+        "rules/python/workspace.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/BUILD.js",
+      "replacements": [
+        "rules/rust/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/cargo_task_inputs.js",
+      "replacements": [
+        "rules/rust/cargo_task_inputs.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/cargo_task_inputs_test.js",
+      "replacements": [
+        "rules/rust/cargo_task_inputs.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/example/BUILD.js",
+      "replacements": [
+        "rules/rust/example/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/generate_build/index.js",
+      "replacements": [
+        "rules/rust/generate_build/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/generate_build_test.js",
+      "replacements": [
+        "rules/rust/generate_build.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/index.js",
+      "replacements": [
+        "rules/rust/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/index_test.js",
+      "replacements": [
+        "rules/rust/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/kache/BUILD.js",
+      "replacements": [
+        "rules/rust/kache/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/kache/index.js",
+      "replacements": [
+        "rules/rust/kache/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/kache/toolchain.js",
+      "replacements": [
+        "rules/rust/kache/toolchain.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/kache/toolchain_test.js",
+      "replacements": [
+        "rules/rust/kache/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/toolchain/index.js",
+      "replacements": [
+        "rules/rust/toolchain/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/toolchain_test.js",
+      "replacements": [
+        "rules/rust/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/workspace_expansion.js",
+      "replacements": [
+        "rules/rust/workspace_expansion.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/rust/workspace_expansion_test.js",
+      "replacements": [
+        "rules/rust/workspace_expansion.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/treesitter/BUILD.js",
+      "replacements": [
+        "rules/treesitter/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/treesitter/index.js",
+      "replacements": [
+        "rules/treesitter/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/treesitter/index_test.js",
+      "replacements": [
+        "rules/treesitter/index.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/BUILD.js",
+      "replacements": [
+        "rules/workflows/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/build/BUILD.js",
+      "exclusion": "QuickJS workflow test declaration; Luau test declarations belong to rules/workflows/BUILD.luau.",
+      "evidence": [
+        "docs/design/luau-workspace-integration.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/build/graph_build_test.js",
+      "replacements": [
+        "rules/workflows/build/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ],
+      "coverage_gap": {
+        "description": "The Luau build goal is cache-only, but has no equivalent focused no-workspace-write test.",
+        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
+      }
+    },
+    {
+      "source": "rules/workflows/build/index.js",
+      "replacements": [
+        "rules/workflows/build/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/builtin_lockfiles/index.js",
+      "replacements": [
+        "rules/workflows/builtin_lockfiles/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/codegen/BUILD.js",
+      "replacements": [
+        "rules/workflows/codegen/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/codegen/graph_codegen_test.js",
+      "replacements": [
+        "rules/workflows/codegen/codegen.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/codegen/index.js",
+      "replacements": [
+        "rules/workflows/codegen/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/fmt/BUILD.js",
+      "replacements": [
+        "rules/workflows/fmt/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/fmt/graph_fmt_test.js",
+      "replacements": [
+        "rules/workflows/fmt/graph_fmt.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/fmt/index.js",
+      "replacements": [
+        "rules/workflows/fmt/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/generate/index.js",
+      "replacements": [
+        "rules/workflows/generate/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/generate_build/BUILD.js",
+      "replacements": [
+        "rules/workflows/generate_build/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/generate_build/generate_build_test.js",
+      "replacements": [
+        "rules/workflows/generate_build/generate_build.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/generate_build/index.js",
+      "replacements": [
+        "rules/workflows/generate_build/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/lint/index.js",
+      "replacements": [
+        "rules/workflows/lint/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/lockfiles/BUILD.js",
+      "replacements": [
+        "rules/workflows/lockfiles/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/lockfiles/index.js",
+      "replacements": [
+        "rules/workflows/lockfiles/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/lockfiles/lockfiles_test.js",
+      "replacements": [
+        "rules/workflows/lockfiles/lockfiles.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/no_handler_test.js",
+      "replacements": [
+        "crates/imp/tests/empty_quality_goals.rs"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/package/BUILD.js",
+      "replacements": [
+        "rules/workflows/package/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/package/graph_package_test.js",
+      "replacements": [
+        "rules/workflows/package/package.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/package/index.js",
+      "replacements": [
+        "rules/workflows/package/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/publish/BUILD.js",
+      "replacements": [
+        "rules/workflows/publish/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/publish/index.js",
+      "replacements": [
+        "rules/workflows/publish/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/report.js",
+      "replacements": [
+        "rules/workflows/report.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/report_test.js",
+      "replacements": [
+        "rules/workflows/report.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/run/index.js",
+      "replacements": [
+        "rules/workflows/run/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/test/BUILD.js",
+      "replacements": [
+        "rules/workflows/test/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/test/graph_test_test.js",
+      "replacements": [
+        "rules/workflows/test/graph_test.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/test/index.js",
+      "replacements": [
+        "rules/workflows/test/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/vs/BUILD.js",
+      "replacements": [
+        "rules/workflows/vs/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/vs/index.js",
+      "replacements": [
+        "rules/workflows/vs/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/workflows/vs/vs_test.js",
+      "replacements": [
+        "rules/workflows/vs/vs.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/zola/BUILD.js",
+      "replacements": [
+        "rules/zola/BUILD.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/zola/index.js",
+      "replacements": [
+        "rules/zola/index.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    },
+    {
+      "source": "rules/zola/toolchain_test.js",
+      "replacements": [
+        "rules/zola/toolchain.test.luau"
+      ],
+      "evidence": [
+        "docs/design/luau-catalog-cutover-plan.md"
+      ]
+    }
+  ]
+}

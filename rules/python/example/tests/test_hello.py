@@ -6,6 +6,6 @@ def test_typing_extensions_resolves():
     assert importlib.metadata.version("typing_extensions")
 
 
-# The pythonRuntime() default in rules/python/runtime.js.
+# The python_runtime() default in rules/python/runtime.luau.
 def test_runs_on_pinned_interpreter():
     assert sys.version_info[:3] == (3, 13, 0)

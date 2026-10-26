@@ -10,12 +10,11 @@ import tempfile
 
 
 def check_core(binary, rules):
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     with tempfile.TemporaryDirectory(prefix="imp-python-core-consumer-") as directory:
         root = Path(directory)
         shutil.copytree(rules / "python/example", root, dirs_exist_ok=True)
         # The temporary workspace owns these declarations; retain the fixture locks.
-        (root / "BUILD.js").unlink()
         shutil.copytree(rules / "python/testdata/native_wheel", root / "native")
         shutil.copytree(rules / "python/testdata/workspace", root / "members")
         # A separate workspace is required to exercise a script without a pyproject.
@@ -98,15 +97,15 @@ def main():
     commands = [
         shlex.split(block.strip())
         for block in re.findall(r"^```sh\n(.*?)^```$", section, re.MULTILINE | re.DOTALL)
-        if block.strip().startswith("IMP_RUNTIME=luau imp goal gen-lockfiles")
+        if block.strip().startswith("imp goal gen-lockfiles")
     ]
     if len(commands) != 1:
         raise AssertionError("Expected one Luau lockfile generation command in the guide")
     command = commands[0]
-    assert command[:4] == ["IMP_RUNTIME=luau", "imp", "goal", "gen-lockfiles"], command
-    selectors = command[4:]
+    assert command[:3] == ["imp", "goal", "gen-lockfiles"], command
+    selectors = command[3:]
     assert selectors == ["//:pex", "//:uv"], selectors
-    env = {**os.environ, "IMP_RUNTIME": "luau", "IMP_RULES_DIR": str(rules)}
+    env = {**os.environ, "IMP_RULES_DIR": str(rules)}
     with tempfile.TemporaryDirectory(prefix="imp-python-doc-consumer-") as directory:
         root = Path(directory)
         (root / "imp.workspace.luau").write_text(blocks[0], encoding="utf-8")

@@ -7,4 +7,9 @@
 /generated/
 /test/
 /Stage-B.md
-/probes/
+/probes/*
+!/probes/js-luau-conversion/
+/probes/js-luau-conversion/*
+!/probes/js-luau-conversion/inventory.py
+!/probes/js-luau-conversion/inventory_test.py
+!/probes/js-luau-conversion/removal-manifest.json
