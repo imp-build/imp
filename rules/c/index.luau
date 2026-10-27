@@ -353,6 +353,7 @@ local function cc_task(spec, is_library)
 			-- One action for each source.
 			local object_paths = {}
 			local objects = {}
+			local compile_requests = {}
 			for _, source in ipairs(source_paths) do
 				local obj_path = object_path_for(spec.output_name, source)
 				local tokens = commands.compile_command({
@@ -366,7 +367,7 @@ local function cc_task(spec, is_library)
 				})
 				-- The executor creates the parent directory of each declared
 				-- file output, so the script has no mkdir.
-				local result = exec.action({
+				table.insert(compile_requests, {
 					argv = { "sh", "-c", `set -e; {table.concat(tokens, " ")}`, "cc-compile" },
 					env = commands.env,
 					inputs = compile_inputs,
@@ -374,6 +375,8 @@ local function cc_task(spec, is_library)
 					display = `cc compile {obj_path}`,
 				})
 				table.insert(object_paths, obj_path)
+			end
+			for _, result in ipairs(exec.actions(compile_requests)) do
 				table.insert(objects, result.outputs.object)
 			end
 

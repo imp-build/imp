@@ -2628,6 +2628,7 @@ fn create_task_exec(
     let action_lua = lua.clone();
     let action_inputs = inputs.clone();
     let action_captures = Rc::clone(&captures);
+    let returns_outputs = exec_options.returns_outputs;
     let exec_options = exec_options.clone();
     exec.set(
         "action",
@@ -2661,8 +2662,7 @@ fn create_task_exec(
                 )
                 .await
                 {
-                    Ok(result) if exec_options.returns_outputs => Ok(LuaValue::Table(result)),
-                    Ok(_) => Ok(LuaValue::Nil),
+                    Ok(result) => Ok(LuaValue::Table(result)),
                     Err(error) => {
                         action_host.borrow_mut().task_failure = Some(format!("{error:#}"));
                         Err(LuaError::external(format!("{error:#}")))
@@ -2671,6 +2671,64 @@ fn create_task_exec(
             }
         })?,
     )?;
+    let batch_host = Rc::clone(host);
+    let batch_action = exec.get::<LuaFunction>("action")?;
+    exec.set(
+        "actions",
+        lua.create_async_function(move |lua, requests: LuaTable| {
+            let action = batch_action.clone();
+            let host = Rc::clone(&batch_host);
+            async move {
+                let count = requests.raw_len();
+                let mut seen = 0;
+                for pair in requests.clone().pairs::<LuaValue, LuaValue>() {
+                    let (key, value) = pair?;
+                    if !matches!(key, LuaValue::Integer(i) if i >= 1 && (i as usize) <= count)
+                        || !matches!(value, LuaValue::Table(_))
+                    {
+                        return Err(LuaError::external(
+                            "exec.actions requires a dense list of action requests",
+                        ));
+                    }
+                    seen += 1;
+                }
+                if seen != count {
+                    return Err(LuaError::external(
+                        "exec.actions requires a dense list of action requests",
+                    ));
+                }
+                let mut calls = Vec::new();
+                for request in requests.sequence_values::<LuaTable>() {
+                    calls.push(action.call_async::<LuaValue>(request?));
+                }
+                let outcomes = futures::future::join_all(calls).await;
+                let results = lua.create_table()?;
+                for (index, outcome) in outcomes.into_iter().enumerate() {
+                    match outcome {
+                        Ok(value) => results.set(index + 1, value)?,
+                        Err(error) => {
+                            host.borrow_mut().task_failure = Some(error.to_string());
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(results)
+            }
+        })?,
+    )?;
+    if !returns_outputs {
+        let action = exec.get::<LuaFunction>("action")?;
+        exec.set(
+            "action",
+            lua.create_async_function(move |_, request: LuaTable| {
+                let action = action.clone();
+                async move {
+                    action.call_async::<LuaValue>(request).await?;
+                    Ok(LuaValue::Nil)
+                }
+            })?,
+        )?;
+    }
     install_worker_start(lua, host, inputs, &exec)?;
     Ok(exec)
 }
@@ -2945,6 +3003,7 @@ async fn describe_program_scoped(
     )?;
     exec.set("file", LuaValue::Nil)?;
     exec.set("action", LuaValue::Nil)?;
+    exec.set("actions", LuaValue::Nil)?;
     exec.set("worker_start", LuaValue::Nil)?;
     let previous = program.loader.stack.replace(program.stack);
     host.borrow_mut().program_describing = true;
@@ -8365,7 +8424,7 @@ return { core.test.case("program description", function()
     local tool = core.native_tool("sh")
     local other = core.native_tool("cat")
     local program = core.program({ inputs = { sh = tool }, describe = function(exec, input)
-        assert(exec.file == nil and exec.action == nil and exec.worker_start == nil)
+        assert(exec.file == nil and exec.action == nil and exec.actions == nil and exec.worker_start == nil)
         fails(function() core.task({ run = function() end }) end, "cannot declare graph nodes")
         fails(function() core.files({ include = { "*" } }) end, "cannot declare graph nodes")
         fails(function() core.run_program({ argv = { "false" } }) end, "cannot launch a program")
@@ -12431,6 +12490,271 @@ return core.task({
             panic!("test module must return a task handle");
         };
         runtime.execute_task(&handle).await.unwrap();
+    }
+
+    // This executor blocks after scheduler admission until the test releases it.
+    // It uses no process sleeps or persistent action cache to prove overlap.
+    struct BatchProbeService {
+        started: tokio::sync::mpsc::UnboundedSender<usize>,
+        released: std::sync::Mutex<[bool; 3]>,
+        wake: std::sync::Condvar,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionService for BatchProbeService {
+        fn execute(
+            &self,
+            _: &str,
+            _: ExecAction,
+            _: Option<&AtomicBool>,
+        ) -> Result<imp_exec_api::ExecOutcome> {
+            unreachable!()
+        }
+        fn execute_with_start(
+            &self,
+            _: &str,
+            action: ExecAction,
+            cancellation: Option<&AtomicBool>,
+            gate: &dyn imp_exec_api::JobGate,
+        ) -> Result<imp_exec_api::ExecOutcome> {
+            gate.reserve();
+            if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                bail!("probe canceled");
+            }
+            gate.started();
+            let index: usize = action.argv[0].parse()?;
+            self.started.send(index).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut released = self.released.lock().unwrap();
+            while !released[index] {
+                if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    bail!("probe canceled");
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!("probe release timed out");
+                }
+                released = self
+                    .wake
+                    .wait_timeout(released, std::time::Duration::from_millis(10))
+                    .unwrap()
+                    .0;
+            }
+            Ok(imp_exec_api::ExecOutcome {
+                stdout: index.to_string(),
+                stderr: String::new(),
+                exit_code: action.argv[1].parse()?,
+                output_digest: String::new(),
+                outputs: Vec::new(),
+                cache_outcome: CacheOutcome::Fresh,
+            })
+        }
+        fn cache_dir_get(&self, _: &str, _: &str, _: &str) -> Result<Option<PathBuf>> {
+            unreachable!()
+        }
+        fn cache_dir_has(&self, _: &str, _: &str, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn cache_dir_put(&self, _: &str, _: &str, _: &str, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+        fn fetch_url(&self, _: &str) -> Result<PathBuf> {
+            unreachable!()
+        }
+        fn extract_archive(&self, _: &Path, _: &Path, _: &str, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn file_sha256(&self, _: &Path) -> Result<String> {
+            unreachable!()
+        }
+        fn file_size(&self, _: &Path) -> Result<u64> {
+            unreachable!()
+        }
+        fn register_native_tool(&self, _: &str, _: &Path) -> Result<PathBuf> {
+            unreachable!()
+        }
+        fn worker_get(&self, _: &str) -> Result<Option<imp_exec_api::WorkerHandle>> {
+            unreachable!()
+        }
+        fn capabilities(&self) -> Result<imp_exec_api::Capabilities> {
+            unreachable!()
+        }
+        async fn worker_start(
+            &self,
+            _: &str,
+            _: &str,
+            _: imp_exec_api::WorkerSpec,
+        ) -> Result<imp_exec_api::WorkerHandle> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn action_batches_overlap_obey_cores_drain_and_cancel() {
+        use std::time::Duration;
+        for mode in ["overlap", "wide", "failure", "cancel", "cancel_queued"] {
+            let workspace = tempfile::tempdir().unwrap();
+            let rules = rules_tempdir();
+            let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+            let service = Arc::new(BatchProbeService {
+                started,
+                released: std::sync::Mutex::new([false; 3]),
+                wake: std::sync::Condvar::new(),
+            });
+            let cores = if mode == "wide" || mode == "cancel_queued" {
+                2
+            } else {
+                1
+            };
+            let first_exit = if mode == "failure" { 3 } else { 0 };
+            let second_exit = if mode == "failure" { 7 } else { 0 };
+            fs::write(
+                workspace.path().join("batch.luau"),
+                format!(
+                    r#"
+local core = require("@imp/core")
+return core.task({{ run = function(exec)
+    local results = exec.actions({{
+        {{ argv = {{ "0", "{first_exit}" }}, display = "first", cores = {cores}, cache = false }},
+        {{ argv = {{ "1", "{second_exit}" }}, display = "second", cores = {cores}, cache = false }},
+    }})
+    assert(results[1].stdout == "0" and results[2].stdout == "1")
+end }})
+"#
+                ),
+            )
+            .unwrap();
+            let mut runtime =
+                LuauWorkspace::new_with_service(workspace.path(), rules.path(), service.clone())
+                    .unwrap();
+            let LuaValue::UserData(task) = runtime.evaluate("@workspace/batch").await.unwrap()
+            else {
+                panic!("expected task")
+            };
+            let cancellation = Arc::new(AtomicBool::new(false));
+            runtime.host.borrow_mut().cancellation = cancellation.clone();
+            let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = imp_scheduler::Scheduler::new(2, cancellation.clone(), events);
+            let _guard = runtime.scheduler_scope(Some(scheduler.clone()));
+            let execution = runtime.execute_task(&task);
+            tokio::pin!(execution);
+            let release = |index| {
+                service.released.lock().unwrap()[index] = true;
+                service.wake.notify_all();
+            };
+            let result = tokio::time::timeout(Duration::from_secs(90), async {
+                let first = tokio::select! {
+                    result = &mut execution => panic!("batch returned before release: {result:?}"),
+                    index = starts.recv() => index.unwrap(),
+                };
+                if mode == "cancel_queued" {
+                    cancellation.store(true, Ordering::SeqCst);
+                    return execution.await;
+                }
+                if mode == "wide" {
+                    // The first action holds both lanes. The second must wait.
+                    tokio::select! {
+                        result = &mut execution => panic!("batch returned before release: {result:?}"),
+                        index = starts.recv() => panic!("wide actions overlapped: {index:?}"),
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                    }
+                    release(first);
+                }
+                let second = tokio::select! {
+                    result = &mut execution => panic!("batch returned before sibling: {result:?}"),
+                    index = starts.recv() => index.unwrap(),
+                };
+                assert_ne!(first, second);
+                if mode == "cancel" {
+                    cancellation.store(true, Ordering::SeqCst);
+                } else if mode == "failure" {
+                    // Finish request 2 first; the batch must still wait for 1.
+                    release(1);
+                    let mut second_id = None;
+                    loop {
+                        let event = tokio::select! {
+                            result = &mut execution => panic!("batch did not drain: {result:?}"),
+                            event = receiver.recv() => event.unwrap(),
+                        };
+                        match event {
+                            imp_scheduler::TaskEvent::Pending { id, display, .. } if display == "second" => second_id = Some(id),
+                            imp_scheduler::TaskEvent::Done { id, .. } if Some(id) == second_id => break,
+                            _ => {},
+                        }
+                    }
+                    tokio::select! {
+                        result = &mut execution => panic!("batch did not drain: {result:?}"),
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                    }
+                    release(0);
+                } else {
+                    release(0); release(1);
+                }
+                execution.await
+            }).await.unwrap_or_else(|_| panic!("batch probe timed out: {mode}"));
+            if mode == "failure" {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("first") && error.contains("3"), "{error}");
+            } else if mode.starts_with("cancel") {
+                assert!(format!("{:#}", result.unwrap_err()).contains("cancel"));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(scheduler.outstanding(), 0, "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn action_batches_return_dense_results_and_ordered_artifacts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(
+            workspace.path().join("batch.luau"),
+            r#"
+local core = require("@imp/core")
+        local producer = core.task({
+            inputs = { sh = core.native_tool("sh") },
+            outputs = { files = core.output.value() },
+            run = function(exec)
+                local results = exec.actions({
+                    { argv = { "sh", "-c", "printf first > one.txt" }, outputs = { file = core.output.file("one.txt") }, cache = false },
+                    { argv = { "sh", "-c", "printf second > two.txt" }, outputs = { file = core.output.file("two.txt") }, cache = false },
+                })
+                assert(exec.path(results[1].outputs.file) == "one.txt")
+                assert(exec.path(results[2].outputs.file) == "two.txt")
+                assert(core.read_file_in_digest(exec.digest(results[1].outputs.file), "one.txt") == "first")
+                assert(core.read_file_in_digest(exec.digest(results[2].outputs.file), "two.txt") == "second")
+                return { files = true }
+            end,
+        })
+
+return core.task({
+    inputs = { sh = core.native_tool("sh"), producer = producer },
+    run = function(exec)
+        assert(#exec.actions({}) == 0)
+
+        local results = exec.actions({
+            { argv = { "sh", "-c", "true" }, cache = false },
+            { argv = { "sh", "-c", "exit 7" }, cache = false, allow_failure = true },
+        })
+        assert(#results == 2 and results[1].exit_code == 0 and results[2].exit_code == 7)
+        assert(type(results[1].outputs) == "table")
+        assert(not pcall(exec.actions, { [2] = {} }))
+        local ok = pcall(exec.actions, {
+            { argv = { "sh", "-c", "exit 3" }, cache = false },
+            { argv = { "sh", "-c", "true" }, cache = false },
+        })
+        assert(not ok)
+        assert(exec.action({ argv = { "sh", "-c", "true" }, cache = false }) == nil)
+    end,
+})
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let LuaValue::UserData(task) = runtime.evaluate("@workspace/batch").await.unwrap() else {
+            panic!("expected task");
+        };
+        runtime.execute_task(&task).await.unwrap();
     }
 
     #[tokio::test]

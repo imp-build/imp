@@ -407,6 +407,26 @@ return {
 			end)
 		end),
 
+		core.test.case("C rules finish compiles before linking ordered object inputs", function()
+			for _, declare in ipairs({ c.cc_library, c.cc_binary, c.cc_test }) do
+				with_cc_host(function(host)
+					core.test.resolve(declare({ path = MIXED, toolchain = fake_gcc() })[BUILD])
+					local compiles = runs_with(host, "cc compile ")
+					assert(#compiles == 2)
+					local final = host.runs[#host.runs]
+					assert(starts_with(final.display, "cc archive ") or starts_with(final.display, "cc link "))
+					assert(final.input_count == #compiles)
+					for index, compile in ipairs(compiles) do
+						assert(host.runs[index] == compile, "link must follow every compile")
+						assert(
+							final.inputs[index].path == compile.outputs.object,
+							"object inputs must keep source order"
+						)
+					end
+				end)
+			end
+		end),
+
 		core.test.case("C rules select mode flags and share axis-blind generated sources", function()
 			for _, declare in ipairs({ c.cc_library, c.cc_binary, c.cc_test }) do
 				with_cc_host(function(host)

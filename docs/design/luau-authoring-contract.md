@@ -395,6 +395,16 @@ modules:
 | `core.write_workspace(path, digest, { from?, merge? }?)` | Publishes a CAS artifact to the workspace. `merge = true` overlays files under the destination prefix and preserves unrelated files. With `merge`, `from` must select a directory; case aliases in the source tree, existing destination symlinks, and file/directory conflicts fail before publication. The default replaces the destination. Requires an active goal callback; otherwise fails with `core.write_workspace() can only run in a goal callback`. A `core.test.with_fake_write_workspace` scope records calls outside goal callbacks without writing files. | `writeWorkspace` |
 | `core.run_program({ argv, display?, env?, inputs?, tools? })` | Runs one interactive program and returns `{ exit_code, stdout, stderr }`. `inputs` holds digests or artifact tables to stage, and `tools` holds tool handles. The host sets the `run` policy: the program is impure and sandboxed, starts in the real workspace, streams its output, and receives `core.run_args()` after `argv`. A nonzero exit fails the call. Outside a goal function, the call fails with `core.run_program() can only run in a goal callback`, except in a `core.test.with_fake_run` scope. | `runFromTemplate(runTemplate(opts), { args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true })` |
 
+`exec.actions(requests)` runs a dense list of independent action requests
+concurrently within the scheduler limits. Each request accepts the same options
+as `exec.action`. An empty list returns an empty list. The call waits for all
+requests, then returns result tables in request order. Each table contains
+`outputs`, `exit_code`, `stdout`, and `stderr`, even for a task without outputs.
+If requests fail, the call waits for all results and raises the first error
+in request order. `allow_failure` applies to each request. A task can catch
+the batch error with `pcall`. Program descriptions cannot call this method.
+Concurrent identical requests do not have an execution-sharing guarantee.
+
 `exec.action({ cores = n })` requests a core budget for one action. The default
 is 1. The value must be a whole number from 1 through 4294967295. Other values
 fail with `exec.action().cores must be an integer of 1 or more within the u32 range`.
