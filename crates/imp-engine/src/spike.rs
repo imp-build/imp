@@ -320,6 +320,42 @@ pub fn unmatched_selector_error(
     context: &SelectorContext,
     fallback: anyhow::Error,
 ) -> Option<anyhow::Error> {
+    if let Ok((base, Some(facet))) = crate::graph::split_facet(selector) {
+        if let Ok(roots) = workspace.graph.select_catalog(&[base.to_owned()], context) {
+            if !roots.is_empty() {
+                if let Some(goal) = goal {
+                    if !roots.iter().any(|root| root.workflow == goal) {
+                        let workflows = roots
+                            .iter()
+                            .map(|root| root.workflow.as_str())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Some(anyhow::anyhow!(
+                            "{base} has no '{goal}' workflow; it exports: {workflows}"
+                        ));
+                    }
+                }
+                let available: BTreeSet<_> = roots
+                    .iter()
+                    .filter(|root| goal.is_none_or(|goal| root.workflow == goal))
+                    .filter_map(|root| root.facet.as_deref())
+                    .collect();
+                if !available.contains(facet) {
+                    let available = if available.is_empty() {
+                        "(none)".to_owned()
+                    } else {
+                        available.into_iter().collect::<Vec<_>>().join(", ")
+                    };
+                    return Some(anyhow::anyhow!(
+                        "{base} has no facet '{facet}'{}; available facets: {available}",
+                        goal.map_or(String::new(), |goal| format!(" for '{goal}'"))
+                    ));
+                }
+            }
+        }
+    }
     let single = [selector.to_owned()];
     // Unscoped by workflow: the question here is only whether the address
     // exists at all, not whether it does anything for this goal.
@@ -476,6 +512,21 @@ pub async fn resolve_graph_with_expansion(
             None => catalog.select_catalog(selectors, context),
         }
     };
+    // Validate explicit static facets before resolving any expansion inputs.
+    for selector in selectors {
+        let (address, facet) = crate::graph::split_facet(selector)?;
+        if facet.is_some()
+            && !address.contains('#')
+            && select_static(std::slice::from_ref(selector))?.is_empty()
+        {
+            let fallback = anyhow::anyhow!("no target matches selector '{selector}'");
+            if let Some(error) =
+                unmatched_selector_error(&live.workspace, workflow, selector, context, fallback)
+            {
+                return Err(error);
+            }
+        }
+    }
     // Resolve expansion projections in the Luau VM that owns the handles.
     {
         let luau = &live.luau;
@@ -2104,6 +2155,35 @@ pub async fn execute_goal_live_selection(
             if goal_def.selectorless {
                 Vec::new()
             } else {
+                for selector in *selectors {
+                    let (base, facet) = crate::graph::split_facet(selector)?;
+                    if let Some(facet) = facet {
+                        let target = base.split_once('#').map_or(base, |(target, _)| target);
+                        let facet_selector = format!("{target}@{facet}");
+                        if live
+                            .workspace
+                            .graph
+                            .select(
+                                goal,
+                                std::slice::from_ref(&facet_selector),
+                                selector_context,
+                            )?
+                            .is_empty()
+                        {
+                            let fallback =
+                                anyhow::anyhow!("no target matches selector '{selector}'");
+                            if let Some(error) = unmatched_selector_error(
+                                &live.workspace,
+                                Some(goal),
+                                &facet_selector,
+                                selector_context,
+                                fallback,
+                            ) {
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
                 let selected = filter_changed_addresses_in(
                     &live.workspace,
                     addresses,
@@ -2114,7 +2194,42 @@ pub async fn execute_goal_live_selection(
                     eprintln!("no changed target or label can run goal '{goal}'; nothing to do");
                     return Ok(None);
                 }
-                selected.into_iter().collect()
+                if selectors.iter().any(|selector| selector.contains('@')) {
+                    let mut selected_facets = BTreeSet::new();
+                    for selector in *selectors {
+                        let (_, facet) = crate::graph::split_facet(selector)?;
+                        let selected = filter_changed_addresses_in(
+                            &live.workspace,
+                            addresses,
+                            std::slice::from_ref(selector),
+                            selector_context,
+                        )?;
+                        for address in selected {
+                            let selector = match facet {
+                                Some(facet) => {
+                                    let parent = address
+                                        .split_once('#')
+                                        .map_or(address.as_str(), |(parent, _)| parent);
+                                    let parent_selector = format!("{parent}@{facet}");
+                                    if live
+                                        .workspace
+                                        .graph
+                                        .select(goal, &[parent_selector], selector_context)?
+                                        .is_empty()
+                                    {
+                                        continue;
+                                    }
+                                    format!("{address}@{facet}")
+                                }
+                                None => address,
+                            };
+                            selected_facets.insert(selector);
+                        }
+                    }
+                    selected_facets.into_iter().collect()
+                } else {
+                    selected.into_iter().collect()
+                }
             }
         }
     };

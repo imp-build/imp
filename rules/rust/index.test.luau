@@ -31,7 +31,8 @@ return {
 	core.test.case("Cargo libraries have test format and lint handles without binary roots", function()
 		local pkg = rust.cargo_package({ path = "rules/rust/testdata/cargo" })
 		assert(
-			type(pkg[test.TEST]) == "userdata"
+			type(pkg[test.TEST].unit) == "userdata"
+				and type(pkg[test.TEST].doctests) == "userdata"
 				and type(pkg[fmt.FMT]) == "userdata"
 				and type(pkg[lint.LINT]) == "userdata"
 		)
@@ -45,9 +46,19 @@ return {
 				release = true,
 				cargo_args = { "--offline" },
 			})
-			resolve(pkg[build.BUILD], function(result, exec)
-				assert(type(result.hello) == "userdata" and type(result.other) == "userdata")
-			end)
+			core.test.resolve(core.task({
+				inputs = { server = pkg[build.BUILD].hello, worker = pkg[build.BUILD].other },
+				run = function(_exec, input)
+					assert(type(input.server) == "userdata" and type(input.worker) == "userdata")
+				end,
+			}))
+			local builds = 0
+			for _, action in ipairs(host.runs) do
+				if action.display == "cargo build rules/rust/example" then
+					builds += 1
+				end
+			end
+			assert(builds == 1)
 			local action = host.runs[#host.runs]
 			assert(action.outputs.hello == "build/rust/rules_rust_example/release/hello")
 			assert(action.env.CC and contains(action.env.CC, "/cache/gcc-toolchains/"))
@@ -80,7 +91,7 @@ return {
 				kache = kache.kache_toolchain("0.22.0", { cache_size = "8GiB" }),
 			})
 			local pkg = rust.cargo_package({ path = "rules/rust/example", bin = "hello", toolchain = declared })
-			resolve(pkg[build.BUILD], function() end)
+			resolve(pkg[build.BUILD].hello, function() end)
 			local action = host.runs[#host.runs]
 			assert(action.env.KACHE_MAX_SIZE == "8GiB" and action.env.KACHE_LOCAL_ONLY == "1")
 			assert(
@@ -109,14 +120,14 @@ return {
 		core.test.with_fake_toolchain_host(function(host)
 			local result = generated("rules/rust/example/src/generated.rs")
 			local pkg = rust.cargo_package({ path = "rules/rust/example", bin = "hello", generated_srcs = { result } })
-			resolve(pkg[build.BUILD], function() end)
+			resolve(pkg[build.BUILD].hello, function() end)
 			assert(host.runs[#host.runs].input_count == 2)
 			local bad = rust.cargo_package({
 				path = "rules/rust/example",
 				bin = "hello",
 				generated_srcs = { { artifact = result.files[result.paths[1]], path = "src/wrong.rs" } },
 			})
-			assert(not pcall(resolve, bad[build.BUILD], function() end))
+			assert(not pcall(resolve, bad[build.BUILD].hello, function() end))
 		end)
 	end),
 	core.test.case("Cargo sibling generated inputs are collected after declarations", function()
@@ -127,7 +138,7 @@ return {
 				workspace_member = true,
 				generated_srcs = { generated("crates/b/src/generated.rs") },
 			})
-			resolve(a[build.BUILD], function() end)
+			resolve(a[build.BUILD].a, function() end)
 			assert(host.runs[#host.runs].input_count == 2)
 		end)
 	end),
@@ -135,8 +146,8 @@ return {
 		core.test.with_fake_toolchain_host({ os = "windows", arch = "x86_64" }, function(host)
 			toolchain.rust_toolchain("1.98.1", { default = true })
 			local pkg = rust.cargo_package({ path = "rules/rust/example", bin = "hello" })
-			resolve(pkg[build.BUILD], function(result)
-				assert(type(result.hello) == "userdata")
+			resolve(pkg[build.BUILD].hello, function(result)
+				assert(type(result) == "userdata")
 			end)
 			assert(string.sub(host.runs[#host.runs].outputs.hello, -9) == "hello.exe")
 			assert(host.runs[#host.runs].env.CC == nil)

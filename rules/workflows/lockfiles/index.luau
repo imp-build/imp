@@ -348,16 +348,16 @@ local function graph_gen_lockfiles_goal(roots)
 		local write = lockfile_write(root.result)
 		if write == nil then
 			core.goal_error(
-				`{root.address}: gen-lockfiles graph root must resolve to a graph_generate_tool_lockfile() or Python project lock result`
+				`{tostring(root.address)}: gen-lockfiles graph root must resolve to a graph_generate_tool_lockfile() or Python project lock result`
 			)
 		end
 		local owner = owners[write.path]
 		if owner ~= nil then
 			core.goal_error(
-				`{owner} and {root.address} both write {write.path}; select one of them for each gen-lockfiles run`
+				`{owner} and {tostring(root.address)} both write {write.path}; select one of them for each gen-lockfiles run`
 			)
 		end
-		owners[write.path] = root.address
+		owners[write.path] = tostring(root.address)
 		table.insert(writes, write)
 	end
 	local names = {}

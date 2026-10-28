@@ -105,7 +105,7 @@ return {
 	--- @host core.glob
 	--- @category target
 	["glob"] = function(options) end,
-	--- Register a goal callback. Return its workflow slot key. Options declare flags and target-selection policy.
+	--- Register a goal callback. Each root has a result and an immutable address with target, child_key, facet, and spec fields. tostring(address) returns spec. Return the workflow slot key. Options declare flags and target-selection policy.
 	--- @host core.goal
 	--- @category target
 	["goal"] = function(name, run, options) end,

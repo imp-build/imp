@@ -407,16 +407,43 @@ pub fn filter_changed_addresses_in(
 
     let mut selected = std::collections::BTreeSet::new();
     for selector in selectors {
-        let parsed = context.parse(selector)?;
+        let (base, facet) = crate::graph::split_facet(selector)?;
+        let mut facet_addresses = None;
+        if let Some(facet) = facet {
+            let target = base.split_once('#').map_or(base, |(target, _)| target);
+            let facet_selector = format!("{target}@{facet}");
+            let roots = workspace
+                .graph
+                .select_catalog(std::slice::from_ref(&facet_selector), context)?;
+            facet_addresses = Some(
+                roots
+                    .iter()
+                    .map(|root| root.address.as_str())
+                    .collect::<std::collections::BTreeSet<_>>(),
+            );
+            if roots.is_empty() {
+                let fallback = anyhow::anyhow!("no target or label matches selector '{selector}'");
+                if let Some(error) = crate::spike::unmatched_selector_error(
+                    workspace,
+                    None,
+                    &facet_selector,
+                    context,
+                    fallback,
+                ) {
+                    return Err(error);
+                }
+            }
+        }
+        let parsed = context.parse(base)?;
         let target_matches: Vec<_> = workspace
             .targets
             .values()
-            .filter(|target| parsed.matches(target))
+            .filter(|target| facet.is_none() && parsed.matches(target))
             .collect();
         let label_matches: Vec<_> = workspace
             .label_addresses
             .iter()
-            .filter(|(address, _)| parsed.matches_address(address))
+            .filter(|(address, _)| facet.is_none() && parsed.matches_address(address))
             .collect();
         // Graph-native addresses (#7) have no `Target`/label entry in
         // `workspace` at all — they only exist in `addresses` itself (the
@@ -427,6 +454,14 @@ pub fn filter_changed_addresses_in(
         let graph_matches: Vec<&String> = addresses
             .iter()
             .filter(|address| parsed.matches_address(address))
+            .filter(|address| {
+                facet_addresses.as_ref().is_none_or(|roots| {
+                    roots.contains(address.as_str())
+                        || address
+                            .split_once('#')
+                            .is_some_and(|(parent, _)| roots.contains(parent))
+                })
+            })
             .collect();
         // A graph root that exists but did not change is absent from
         // `addresses`, which would make the three match sets above empty and

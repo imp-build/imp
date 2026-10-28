@@ -11,7 +11,7 @@ local function graph_publish_goal(roots)
 	end
 	local lines = {}
 	for _, root in ipairs(roots) do
-		table.insert(lines, `\n  {root.address}`)
+		table.insert(lines, `\n  {tostring(root.address)}`)
 	end
 	local noun = if #roots == 1 then "target" else "targets"
 	return `Published {#roots} {noun}:{table.concat(lines)}`

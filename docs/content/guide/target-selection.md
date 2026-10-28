@@ -38,6 +38,9 @@ imp test //crates/imp-store:imp_store@doctests
 imp run //rules/python/example:scripts#rules/python/example/scripts/demo.py
 ```
 
+Without `@facet`, a target selector selects all facets for the requested goal.
+A missing facet reports the available facets.
+
 An expansion key is minted by the ruleset, so it is not always a bare name —
 an expansion keyed by source file uses that file's workspace-relative path, as
 above.
@@ -90,7 +93,9 @@ dependency closure.
 
 ## Scope changed targets
 
-Path selectors and `--changed-since` can be combined. The selector narrows the
+Path selectors, including `@facet` selectors, and `--changed-since` can be combined.
+Change detection selects base targets; an explicit facet still limits which
+workflow roots run. A missing facet is an error even when the target is unchanged. The selector narrows the
 changed target set, which is useful when CI runs separate jobs for different
 parts of a workspace.
 

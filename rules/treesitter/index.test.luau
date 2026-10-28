@@ -19,8 +19,13 @@ return {
 			assert(type(fixture.sources) == "userdata" and type(fixture.archive) == "userdata")
 			assert(type(fixture[build.BUILD]) == "userdata" and table.isfrozen(fixture))
 		end
-		for _, executable in ipairs({ treesitter.imp_treesitter, treesitter.odin_analyzer }) do
-			assert(type(executable[build.BUILD]) == "userdata" and type(executable[package.PACKAGE]) == "userdata")
+		for name, executable in pairs({
+			["treesitter-roundtrip"] = treesitter.imp_treesitter,
+			["imp-treesitter-parse"] = treesitter.odin_analyzer,
+		}) do
+			assert(
+				type(executable[build.BUILD][name]) == "userdata" and type(executable[package.PACKAGE]) == "userdata"
+			)
 		end
 	end),
 	core.test.case("compiles only C sources and stages grammar headers", function()

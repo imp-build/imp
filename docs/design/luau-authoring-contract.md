@@ -343,11 +343,33 @@ return {
 ```
 
 A BUILD module exposes a root under a slot key in a target table, or as a bare
-handle for `BUILD`. A slot holds a task, task output, or expansion handle. A
-slot does not discover a table of named handles. Use one handle per slot;
-a task may return named outputs, and a TEST task may combine unit and
-doctest result lists. Named workflow-facet selection is tracked by
-`2026-10-17-add-luau-named-workflow-facets`.
+handle for `BUILD`. A slot holds a task, task output, expansion, or an allowed
+workflow-specific handle. It can also hold a non-empty table of named handles:
+
+```luau
+return {
+    app = { TEST = { unit = unit_handle, doctests = doctest_handle } },
+}
+```
+
+This illustrative fragment assumes the handles and test workflow are declared.
+Select one facet with `imp test //:app@unit`. Selecting `//:app` runs both
+facets. Existing direct-handle slots keep their behavior. Facet keys must be
+non-empty strings without `/`, `:`, `#`, or `@`. Nested tables and non-root
+values fail during module loading.
+
+Each goal callback receives `{ address, result }` entries. `address` is an
+immutable object with `target`, optional `child_key`, optional `facet`, and
+`spec` fields. For `//apps:app#server@unit`, these fields are `//apps:app`,
+`server`, `unit`, and `//apps:app#server@unit`. `tostring(address)` returns
+`address.spec`. Reports use `spec`; base target identity uses `target`.
+Previously, callback addresses were strings. Replace string operations on
+`root.address` with operations on `root.address.spec`. Goal root providers
+still return string identities; the host preserves each identity verbatim in
+`target` and `spec`, with `child_key` and `facet` absent. Provider identities
+are not parsed as target selectors, so module paths such as
+`@imp/rules/tool.lock` remain valid.
+
 
 A loaded `core.test_root()` owns all files below its package directory for
 `core.all_unowned` discovery. This includes nested test data and follows the

@@ -30,9 +30,9 @@ local function graph_lint_goal(roots)
 			result = result.result
 		end
 		if type(result) ~= "table" then
-			core.goal_error(`{root.address}: a LINT root must resolve to a table with an 'ok' field`)
+			core.goal_error(`{tostring(root.address)}: a LINT root must resolve to a table with an 'ok' field`)
 		end
-		table.insert(results, { address = root.address, result = result })
+		table.insert(results, { address = tostring(root.address), result = result })
 	end
 	if fix then
 		for _, entry in ipairs(results) do

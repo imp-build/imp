@@ -116,11 +116,19 @@ imp lint //path/to/package:server
 imp package //path/to/package:server
 ```
 
-Each workflow slot holds one graph handle. BUILD resolves to named binary
-outputs. PACKAGE resolves to one binary artifact, or a directory that contains
-all named binaries. The package goal publishes that artifact below `dist/`.
-TEST combines unit-test and doctest results. Named workflow-facet selection
-is deferred to `2026-10-17-add-luau-named-workflow-facets`.
+BUILD contains a table of binary handles keyed by each explicit `bin` name.
+TEST contains `unit` and `doctests` handles. Select one with
+`imp build //path/to/package:server@server` or
+`imp test //path/to/package:server@doctests`. A selector without a facet runs
+all facets. Selecting one binary chooses its artifact; the shared Cargo build
+still compiles all declared binaries.
+
+PACKAGE keeps one handle. It resolves to one binary artifact, or a directory
+that contains all named binaries. The package goal publishes it below `dist/`.
+
+For Luau consumers, replace an aggregate `pkg[BUILD]` task input with a named
+input such as `pkg[BUILD].server`. Replace `pkg[TEST]` inputs with
+`pkg[TEST].unit` and `pkg[TEST].doctests` as needed.
 
 Test programs and doctests run without a successful-action cache; compilation
 can use the normal cache. Formatting without `--check` writes the formatted

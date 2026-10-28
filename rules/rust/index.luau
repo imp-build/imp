@@ -211,6 +211,7 @@ end
 --- Declare a Cargo package. Options use snake_case. `bin` is explicit; omit
 --- it for a library. `workspace_member` assumes a workspace at "." and a
 --- package name equal to the directory name. `release` selects Cargo release.
+--- @returns Target with BUILD handles keyed by binary name, TEST unit and doctests handles, and one PACKAGE handle for binaries.
 local function cargo_package(options)
 	options = options or {}
 	local path = normalize_path(options.path or core.package_path())
@@ -244,23 +245,15 @@ local function cargo_package(options)
 	table.insert(specs, spec)
 	local expansion = if spec.workspace_member then expansions.workspace(".", spec) else expansions.standalone(spec)
 	local key = if spec.workspace_member then string.match(path, "[^/]+$") or "." else path
-	local tests = core.task({
-		display = `cargo tests {path}`,
-		inputs = { unit = expansion:get(key, test.TEST, "unit"), doctests = expansion:get(key, test.TEST, "doctests") },
-		outputs = { units = output.value() },
-		run = function(_exec, input)
-			local units = table.clone(input.unit)
-			for _, unit in ipairs(input.doctests) do
-				table.insert(units, unit)
-			end
-			return { units = units }
-		end,
-	})
+
 	local value = {
 		spec = spec,
 		[lint.LINT] = expansion:get(key, lint.LINT),
 		[fmt.FMT] = expansion:get(key, fmt.FMT),
-		[test.TEST] = tests.outputs.units,
+		[test.TEST] = table.freeze({
+			unit = expansion:get(key, test.TEST, "unit"),
+			doctests = expansion:get(key, test.TEST, "doctests"),
+		}),
 	}
 	if #bins > 0 then
 		local deferred = core.expand({
@@ -300,10 +293,18 @@ local function cargo_package(options)
 						end,
 					}).outputs.directory
 				end
-				return { build = { [build.BUILD] = compiled, [package.PACKAGE] = published } }
+				local facets = {}
+				for _, name in ipairs(bins) do
+					facets[name] = compiled.outputs[name]
+				end
+				return { build = { [build.BUILD] = facets, [package.PACKAGE] = published } }
 			end,
 		})
-		value[build.BUILD] = deferred:get("build", build.BUILD)
+		local facets = {}
+		for _, name in ipairs(bins) do
+			facets[name] = deferred:get("build", build.BUILD, name)
+		end
+		value[build.BUILD] = table.freeze(facets)
 		value[package.PACKAGE] = deferred:get("build", package.PACKAGE)
 	end
 	return table.freeze(value)

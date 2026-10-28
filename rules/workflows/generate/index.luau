@@ -19,7 +19,7 @@ local function graph_generate_goal(roots)
 	local stale = {}
 	local checked = 0
 	for _, root in ipairs(roots) do
-		local address = root.address
+		local address = tostring(root.address)
 		local result = root.result
 		local files = generate.generated_root_files(result)
 		if files == nil or type(result.before) ~= "string" then

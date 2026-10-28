@@ -1029,7 +1029,7 @@ impl LuauWorkspace {
         exports: LuaTable,
         package: &str,
         workspace: bool,
-        slot_roots: &mut Vec<(String, String, u64)>,
+        slot_roots: &mut Vec<(String, String, Option<String>, u64)>,
     ) -> Result<()> {
         for pair in exports.pairs::<String, LuaValue>() {
             let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1045,30 +1045,57 @@ impl LuauWorkspace {
             match value {
                 LuaValue::UserData(userdata) => {
                     if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                        handles.push((handle.id, "BUILD".to_owned()));
+                        handles.push((handle.id, "BUILD".to_owned(), None));
                     }
                 }
                 LuaValue::Table(table) => {
                     for pair in table.pairs::<LuaValue, LuaValue>() {
                         let (key, value) =
                             pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                        let (LuaValue::String(key), LuaValue::UserData(userdata)) = (key, value)
-                        else {
+                        let LuaValue::String(key) = key else {
                             continue;
                         };
                         let key = key.to_string_lossy().to_string();
                         if !is_slot_key(&key) {
                             continue;
                         }
-                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                            handles.push((handle.id, key));
+                        match value {
+                            LuaValue::UserData(userdata) => {
+                                if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                                    handles.push((handle.id, key, None));
+                                }
+                            }
+                            LuaValue::Table(facets) => {
+                                if facets.is_empty() {
+                                    bail!("{address} exports empty facet table for {key}");
+                                }
+                                for pair in facets.pairs::<LuaValue, LuaValue>() {
+                                    let (name, value) = pair.map_err(lua_err)?;
+                                    let LuaValue::String(name) = name else {
+                                        bail!("{address} {key} facet names must be strings");
+                                    };
+                                    let name = name.to_str().map_err(lua_err)?.to_owned();
+                                    if name.is_empty() || name.contains(['/', ':', '#', '@']) {
+                                        bail!("{address} {key} has invalid graph facet selector name '{name}'");
+                                    }
+                                    let LuaValue::UserData(userdata) = value else {
+                                        bail!(
+                                            "{address} {key} facet '{name}' must be a graph handle"
+                                        );
+                                    };
+                                    let handle =
+                                        userdata.borrow::<GraphHandle>().map_err(|error| anyhow::anyhow!("{address} {key} facet '{name}' must be a graph handle: {error}"))?;
+                                    handles.push((handle.id, key.clone(), Some(name)));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
                 _ => {}
             }
-            handles.sort_by(|left, right| left.1.cmp(&right.1));
-            for (handle_id, slot) in handles {
+            handles.sort_by(|left, right| (&left.1, &left.2).cmp(&(&right.1, &right.2)));
+            for (handle_id, slot, facet) in handles {
                 let state = self.host.borrow();
                 // Other values, such as tool or file handles, are not roots.
                 let valid = match unconfigured_node(&state, handle_id).1 {
@@ -1088,7 +1115,9 @@ impl LuauWorkspace {
                     _ => false,
                 };
                 if valid {
-                    slot_roots.push((address.clone(), slot, handle_id));
+                    slot_roots.push((address.clone(), slot, facet, handle_id));
+                } else if facet.is_some() {
+                    bail!("{address} {slot} facet must be a workflow root handle");
                 }
             }
         }
@@ -1165,7 +1194,7 @@ impl LuauWorkspace {
         // Resolve slots after every module has loaded, so that the result does
         // not depend on which module required a workflow first.
         let state = self.host.borrow();
-        for (address, slot, handle_id) in slot_roots {
+        for (address, slot, facet, handle_id) in slot_roots {
             let workflow = state
                 .goals
                 .keys()
@@ -1180,7 +1209,7 @@ impl LuauWorkspace {
             roots.push(GraphRoot {
                 address,
                 workflow,
-                facet: None,
+                facet,
                 handle_id: handle_id as u32,
                 is_default: false,
             });
@@ -1291,6 +1320,7 @@ impl LuauWorkspace {
             return Ok(None);
         }
         let lua = self.lua()?;
+        let provider_addresses = provider.is_some();
         let provided;
         let roots = if let Some(provider) = provider {
             let value = provider
@@ -1384,7 +1414,12 @@ impl LuauWorkspace {
                     .map_err(lua_err)?;
                 plain_goal_value(&lua, &self.host, value, 0).map_err(lua_err)?
             };
-            push_goal_entry(&lua, &entries, &root.address, result).map_err(lua_err)?;
+            let address = if provider_addresses {
+                WorkflowAddress::opaque(&root.address)
+            } else {
+                WorkflowAddress::new(&root.address, root.facet.as_deref())
+            };
+            push_goal_entry(&lua, &entries, address, result).map_err(lua_err)?;
         }
         if test_roots > 0 && test_units == 0 && (case_filter.is_some() || suite_filter.is_some()) {
             let filter = case_filter
@@ -2974,10 +3009,56 @@ fn test_units_value(lua: &Lua, units: Vec<TestUnit>) -> LuaResult<LuaValue> {
     Ok(LuaValue::Table(list))
 }
 
+#[derive(Clone)]
+struct WorkflowAddress {
+    target: String,
+    child_key: Option<String>,
+    facet: Option<String>,
+    spec: String,
+}
+
+impl WorkflowAddress {
+    fn opaque(address: &str) -> Self {
+        Self {
+            target: address.to_owned(),
+            child_key: None,
+            facet: None,
+            spec: address.to_owned(),
+        }
+    }
+
+    fn new(address: &str, facet: Option<&str>) -> Self {
+        let (target, child_key) = address
+            .split_once('#')
+            .map_or((address, None), |(target, child)| {
+                (target, Some(child.to_owned()))
+            });
+        Self {
+            target: target.to_owned(),
+            child_key,
+            facet: facet.map(str::to_owned),
+            spec: facet.map_or_else(|| address.to_owned(), |facet| format!("{address}@{facet}")),
+        }
+    }
+}
+
+impl LuaUserData for WorkflowAddress {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("target", |_, this| Ok(this.target.clone()));
+        fields.add_field_method_get("child_key", |_, this| Ok(this.child_key.clone()));
+        fields.add_field_method_get("facet", |_, this| Ok(this.facet.clone()));
+        fields.add_field_method_get("spec", |_, this| Ok(this.spec.clone()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(this.spec.clone()));
+    }
+}
+
 fn push_goal_entry(
     lua: &Lua,
     entries: &LuaTable,
-    address: &str,
+    address: WorkflowAddress,
     result: LuaValue,
 ) -> LuaResult<()> {
     let entry = lua.create_table()?;
@@ -10247,6 +10328,200 @@ return {
         assert!(report.contains("unit(s) passed"), "{report}");
     }
 
+    #[test]
+    fn workflow_addresses_are_structured_and_immutable() {
+        let lua = Lua::new();
+        lua.globals()
+            .set(
+                "address",
+                WorkflowAddress::new("//apps:app#server", Some("unit")),
+            )
+            .unwrap();
+        lua.load(
+            r#"
+assert(address.target == "//apps:app")
+assert(address.child_key == "server" and address.facet == "unit")
+assert(address.spec == "//apps:app#server@unit")
+assert(tostring(address) == address.spec)
+assert(not pcall(function() address.facet = "other" end))
+"#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn named_workflow_facets_are_discovered_selected_and_executed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+local output = core.output
+local CHECK = core.goal("check", function(roots)
+    local names = {}
+    for _, root in ipairs(roots) do
+        assert(root.address.target == "//:app")
+        assert(root.address.child_key == nil)
+        assert(root.address.spec == "//:app@" .. root.address.facet)
+        table.insert(names, tostring(root.address) .. "=" .. root.result)
+    end
+    return table.concat(names, ",")
+end)
+local function task(name)
+    return core.task({ outputs = { value = output.value() }, run = function() return { value = name } end }).outputs.value
+end
+return { app = { [CHECK] = { unit = task("unit"), doctests = task("doctests") } }, direct = { [CHECK] = task("direct") } }
+"#).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let catalog = crate::graph::GraphCatalog {
+            roots: runtime.load_modules().await.unwrap(),
+        };
+        let context = crate::selector::SelectorContext::root();
+        for (selectors, expected) in [
+            (vec!["//:app@unit".to_owned()], "//:app@unit=unit"),
+            (
+                vec!["//:app".to_owned(), "//:app@unit".to_owned()],
+                "//:app@doctests=doctests,//:app@unit=unit",
+            ),
+        ] {
+            let roots: Vec<_> = catalog
+                .select("check", &selectors, &context)
+                .unwrap()
+                .into_iter()
+                .cloned()
+                .collect();
+            let report = runtime
+                .execute_graph(
+                    "check",
+                    &roots,
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(report, expected);
+        }
+        assert_eq!(
+            catalog
+                .select("check", &["//:direct".to_owned()], &context)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn named_workflow_facets_reject_invalid_tables() {
+        for (value, expected) in [
+            ("{}", "empty facet table"),
+            ("{ [1] = task }", "facet names must be strings"),
+            ("{ ['bad/name'] = task }", "invalid graph facet selector"),
+            ("{ unit = {} }", "must be a graph handle"),
+            (
+                "{ unit = core.native_tool('sh') }",
+                "must be a workflow root handle",
+            ),
+        ] {
+            let workspace = tempfile::tempdir().unwrap();
+            let rules = rules_tempdir();
+            fs::write(
+                workspace.path().join("BUILD.luau"),
+                format!(
+                    r#"
+local core = require("@imp/core")
+local BUILD = core.goal("build", function() end)
+local task = core.task({{ run = function() end }})
+return {{ app = {{ [BUILD] = {value} }} }}
+"#
+                ),
+            )
+            .unwrap();
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let error = runtime.load_modules().await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn named_workflow_facets_include_workspace_ci_configured_and_expanded_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        fs::write(workspace.path().join("imp.workspace.luau"), r#"
+local core = require("@imp/core")
+local BUILD = core.goal("build", function(roots)
+    local names = {}
+    for _, root in ipairs(roots) do
+        table.insert(names, tostring(root.address) .. "=" .. root.result)
+    end
+    return table.concat(names, ",")
+end)
+core.define_mode_axis("opt", { kind = "rebuild", default = "debug", values = { "debug", "release" } })
+local task = core.task({ inputs = { opt = core.semantic.mode("opt") }, outputs = { value = core.output.value() }, run = function(_, input) return { value = input.opt } end })
+return { bootstrap = { [BUILD] = { release = core.configured(task.outputs.value, { opt = "release" }) } } }
+"#).unwrap();
+        fs::write(
+            workspace.path().join("imp.workspace.ci.luau"),
+            r#"
+local core = require("@imp/core")
+return { ci = { BUILD = { check = core.task({ run = function() end }) } } }
+"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("BUILD.luau"), r#"
+local core = require("@imp/core")
+local child = core.task({ outputs = { value = core.output.value() }, run = function() return { value = "child" } end }).outputs.value
+local expansion = core.expand({ create = function() return { kid = { BUILD = child } } end })
+return { app = { BUILD = { unit = expansion:all("BUILD") } } }
+"#).unwrap();
+        for ci in [false, true] {
+            let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+            let roots = runtime.load_modules_with_ci_overlay(ci).await.unwrap();
+            assert_eq!(
+                roots
+                    .iter()
+                    .any(|root| root.address == "//:ci" && root.facet.as_deref() == Some("check")),
+                ci
+            );
+            let configured = roots
+                .iter()
+                .find(|root| root.address == "//:bootstrap")
+                .unwrap()
+                .clone();
+            let report = runtime
+                .execute_graph(
+                    "build",
+                    &[configured],
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(report, "//:bootstrap@release=release");
+            let expanded = runtime
+                .resolve_expansion_root(roots.iter().find(|root| root.address == "//:app").unwrap())
+                .await
+                .unwrap();
+            assert_eq!(expanded[0].address, "//:app#kid");
+            assert_eq!(expanded[0].facet.as_deref(), Some("unit"));
+            let report = runtime
+                .execute_graph(
+                    "build",
+                    &expanded,
+                    Arc::new(AtomicBool::new(false)),
+                    &serde_json::json!({}),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(report, "//:app#kid@unit=child");
+        }
+    }
+
     #[tokio::test]
     async fn root_slots_require_a_registered_goal() {
         let workspace_root = tempfile::tempdir().unwrap();
@@ -13065,8 +13340,8 @@ end
 local first, second = task("first"), task("second")
 core.goal("probe", function(roots)
     assert(calls == 1)
-    assert(roots[1].address == "first" and roots[1].result == "first")
-    assert(roots[2].address == "second" and roots[2].result == "second")
+    assert(roots[1].address.spec == "first" and roots[1].result == "first")
+    assert(roots[2].address.spec == "second" and roots[2].result == "second")
     core.write_workspace("published", core.digest_from_text({ file = "ok" }))
     return "published"
 end, { selection = "none", roots = function()

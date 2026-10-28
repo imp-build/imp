@@ -63,7 +63,7 @@ local function graph_run_goal(roots)
 	if #roots ~= 1 then
 		local addresses = {}
 		for _, root in ipairs(roots) do
-			table.insert(addresses, root.address)
+			table.insert(addresses, tostring(root.address))
 		end
 		core.goal_error(`run requires a single target, got {#roots}: {table.concat(addresses, ", ")}`)
 	end
@@ -73,7 +73,7 @@ local function graph_run_goal(roots)
 	if root.result == nil or (type(root.result) == "table" and next(root.result) == nil) then
 		return nil
 	end
-	core.run_program(program_for(root.address, root.result))
+	core.run_program(program_for(tostring(root.address), root.result))
 	return nil
 end
 

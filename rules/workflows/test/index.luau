@@ -53,14 +53,16 @@ local function graph_test_goal(roots)
 	local failed = false
 	for _, root in ipairs(roots) do
 		if root.result ~= nil and not is_unit_list(root.result) then
-			core.goal_error(`{root.address}: a TEST root must resolve to a list of \{ name, ok, output \} units`)
+			core.goal_error(
+				`{tostring(root.address)}: a TEST root must resolve to a list of \{ name, ok, output \} units`
+			)
 		end
 		for _, unit in ipairs(root.result or {}) do
 			if not unit.ok then
 				failed = true
 			end
 			table.insert(units, {
-				key = root.address .. " " .. unit.name,
+				key = tostring(root.address) .. " " .. unit.name,
 				status = if unit.ok then "pass" else "fail",
 				output = unit.output,
 			})

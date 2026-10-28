@@ -64,7 +64,7 @@ local function graph_fmt_goal(roots)
 	for _, root in ipairs(roots) do
 		local result = root.result
 		if type(result) == "table" and type(result.paths) == "table" then
-			table.insert(units, { address = root.address, status = unit_status(result), result = result })
+			table.insert(units, { address = tostring(root.address), status = unit_status(result), result = result })
 		end
 	end
 	if not check then

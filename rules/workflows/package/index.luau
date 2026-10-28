@@ -134,12 +134,12 @@ local function graph_package_goal(roots)
 	for _, root in ipairs(roots) do
 		local result = root.result
 		if type(result) ~= "table" or result.type ~= "artifact" or type(result.digest) ~= "string" then
-			core.goal_error(`{root.address}: package graph root must resolve to an artifact handle`)
+			core.goal_error(`{tostring(root.address)}: package graph root must resolve to an artifact handle`)
 		end
-		local address = string.gsub(root.address, "^//", "")
+		local address = string.gsub(tostring(root.address), "^//", "")
 		local directory, target = string.match(address, "^(.*):([^:]+)$")
 		if target == nil then
-			core.goal_error(`invalid package graph root address '{root.address}'`)
+			core.goal_error(`invalid package graph root address '{tostring(root.address)}'`)
 		end
 		-- `result.path` is the declared output path of the artifact, so its
 		-- basename is the filename that the target built. A root that
@@ -158,7 +158,7 @@ local function graph_package_goal(roots)
 		end
 		destination ..= filename
 		core.write_workspace(destination, result.digest, { from = result.path })
-		table.insert(published, `\n  {root.address} -> {destination}`)
+		table.insert(published, `\n  {tostring(root.address)} -> {destination}`)
 	end
 	if #published == 0 then
 		return nil

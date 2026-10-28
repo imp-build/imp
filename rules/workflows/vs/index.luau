@@ -6,13 +6,13 @@ end
 local function documents(roots)
 	roots = table.clone(roots)
 	table.sort(roots, function(a, b)
-		return a.address < b.address
+		return tostring(a.address) < tostring(b.address)
 	end)
 	local launch_vsc = { version = "0.2.0", configurations = array() }
 	local tasks_vsc = { version = "2.0.0", tasks = array() }
 	local is_windows = core.platform_info().os == "windows"
 	for _, root in ipairs(roots) do
-		local address, info = root.address, root.result
+		local address, info = tostring(root.address), root.result
 		local directory, target = string.match(address, "^//(.*):([^:]+)$")
 		assert(target ~= nil, `invalid Odin target address '{address}'`)
 		local published = "dist/" .. (if directory == "" then "" else directory .. "/") .. target

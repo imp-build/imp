@@ -103,7 +103,7 @@ impl From<GraphFormatArg> for GraphFormat {
 enum Cmd {
     /// List selectable targets and exported labels in the workspace
     Targets {
-        /// Target, label, or package selectors, e.g. :app, dir, dir/..., or //...
+        /// Target, label, or package selectors, e.g. :app, :app@unit, dir, dir/..., or //...
         selectors: Vec<String>,
         /// List only roots owning files changed since this git ref
         /// (merge-base against the working tree, like `git diff <ref>`)
@@ -112,7 +112,7 @@ enum Cmd {
     },
     /// List declared target dependencies or observed label-handler memo calls
     Dependencies {
-        /// Target, label, or package selectors, e.g. :app, dir, dir/..., or //...
+        /// Target, label, or package selectors, e.g. :app, :app@unit, dir, dir/..., or //...
         selectors: Vec<String>,
         /// Goal whose observed handler trace should be shown for labels
         #[arg(long, value_name = "NAME")]
@@ -222,7 +222,7 @@ enum DaemonCmd {
 
 #[derive(clap::Args)]
 struct GoalArgs {
-    /// Target or package selectors, e.g. :app, dir, dir/..., //..., or //:app#build
+    /// Target or package selectors. Append @facet to select one named workflow facet; omit it to select all facets. Examples: :app, :app@unit, dir, dir/..., //...
     selectors: Vec<String>,
     /// Select the targets owning files changed since this git ref
     /// (merge-base against the working tree, like `git diff <ref>`)
@@ -2088,9 +2088,6 @@ async fn cmd_graph(
     *workspace.scheduler.lock().unwrap() = None;
     let graph_walk = graph.walk;
     let graph_roots_owned = graph.roots;
-    if graph_roots_owned.is_empty() {
-        anyhow::bail!("no exported graph roots matched {selectors:?}");
-    }
     // This command is graph-only — it has no target or label side to fall
     // back on, so any selector that found no root is a mistake, even when
     // its neighbours resolved. A wildcard that merely covers no work for
@@ -2106,6 +2103,9 @@ async fn cmd_graph(
             return Err(error);
         }
     }
+    if graph_roots_owned.is_empty() {
+        anyhow::bail!("no exported graph roots matched {selectors:?}");
+    }
     // `resolve_graph_with_expansion` always adds synthetic `parent#childKey`
     // roots for an expansion's discovered children (so `imp targets`/`imp
     // dependencies` can address them individually) regardless of what the
@@ -2116,7 +2116,13 @@ async fn cmd_graph(
         selectors.iter().map(String::as_str).collect();
     let graph_roots_owned: Vec<GraphRoot> = graph_roots_owned
         .into_iter()
-        .filter(|root| !root.address.contains('#') || requested.contains(root.address.as_str()))
+        .filter(|root| {
+            !root.address.contains('#')
+                || requested.contains(root.address.as_str())
+                || root.facet.as_ref().is_some_and(|facet| {
+                    requested.contains(format!("{}@{facet}", root.address).as_str())
+                })
+        })
         .collect();
     let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
     let mut out = String::new();

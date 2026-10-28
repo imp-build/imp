@@ -51,7 +51,7 @@ local function graph_codegen_goal(roots)
 	local outputs = {}
 	local owners = {}
 	for _, root in ipairs(roots) do
-		local address = root.address
+		local address = tostring(root.address)
 		local files = generate.generated_root_files(root.result)
 		if files == nil then
 			core.goal_error(`{address}: codegen root must resolve to a codegen() result`)

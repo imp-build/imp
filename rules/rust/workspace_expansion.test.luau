@@ -93,13 +93,13 @@ return {
 			host.set_run_stdout("test a_test", "a failed")
 			host.set_run_stderr("cargo doctest .", "   Doc-tests a_lib\n   Doc-tests b_lib\n")
 			local a, b = members()
-			select_value(a[test.TEST], function(units)
-				assert(#units == 2 and not units[1].ok and contains(units[1].output, "a failed") and units[2].ok)
+			select_value(a[test.TEST].unit, function(units)
+				assert(#units == 1 and not units[1].ok and contains(units[1].output, "a failed"))
 			end)
-			select_value(b[test.TEST], function(units)
-				assert(#units == 2 and units[1].ok and units[2].ok)
+			select_value(b[test.TEST].unit, function(units)
+				assert(#units == 1 and units[1].ok)
 			end)
-			assert(count(host, "cargo test-build .") == 1 and count(host, "cargo doctest .") == 1)
+			assert(count(host, "cargo test-build .") == 1 and count(host, "cargo doctest .") == 0)
 			for _, run in ipairs(host.runs) do
 				if run.display == "test a_test" or run.display == "cargo doctest ." then
 					assert(run.cache == false)
@@ -116,10 +116,11 @@ return {
 			host.set_run_exit_code("cargo doctest .", 1)
 			local a, b = members()
 			for _, pkg in ipairs({ a, b }) do
-				select_value(pkg[test.TEST], function(units)
+				select_value(pkg[test.TEST].doctests, function(units)
 					assert(#units == 1 and not units[1].ok)
 				end)
 			end
+			assert(count(host, "cargo test-build .") == 0 and count(host, "cargo doctest .") == 1)
 		end)
 	end),
 	core.test.case("Cargo workspace format check shares the action and attributes paths", function()
