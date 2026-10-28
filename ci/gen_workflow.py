@@ -111,17 +111,25 @@ BUILD_STEPS = [
 # inputs only, not the run() closure's own script text, so a change to a
 # toolchain installer's wrapper set (like #98's added ranlib wrapper) is
 # invisible to an already-populated cache; only a key bump forces reinstall.
-TOOLCHAIN_SCOPE_PATH = "~/.cache/imp/named/shared"
+# Imp uses the platform user-cache directory (crates/imp-store/src/cache.rs).
+LINUX_CACHE_ROOT = "~/.cache/imp"
+MACOS_CACHE_ROOT = "~/Library/Caches/imp"
+
+
+def toolchain_scope_path(cache_root):
+    return f"{cache_root}/named/shared"
+
+
 TOOLCHAIN_PINS_HASH = "${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}"
 
 
-def cache_toolchains_step(job):
+def cache_toolchains_step(job, cache_root=LINUX_CACHE_ROOT):
     prefix = f"imp-toolchains-v2-{job}-${{{{ runner.os }}}}"
     return {
         "name": "Cache imp toolchains",
         "uses": "actions/cache@v4",
         "with": {
-            "path": TOOLCHAIN_SCOPE_PATH,
+            "path": toolchain_scope_path(cache_root),
             "key": f"{prefix}-{TOOLCHAIN_PINS_HASH}",
             "restore-keys": f"{prefix}-",
         },
@@ -145,14 +153,14 @@ def cache_toolchains_step(job):
 # restore lands second gets an exact primary-key hit on the first job's
 # already-saved cache — and actions/cache skips saving on an exact hit, so
 # that job's additions would silently never persist.
-def cache_imp_step(job):
+def cache_imp_step(job, cache_root=LINUX_CACHE_ROOT):
     prefix = f"imp-store-v6-{job}-${{{{ runner.os }}}}"
     pins = "${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}"
     return {
         "name": "Cache imp store",
         "uses": "actions/cache@v4",
         "with": {
-            "path": f"~/.cache/imp\n!{TOOLCHAIN_SCOPE_PATH}",
+            "path": f"{cache_root}\n!{toolchain_scope_path(cache_root)}",
             "key": f"{prefix}-{pins}-${{{{ github.run_id }}}}",
             "restore-keys": "\n".join([f"{prefix}-{pins}-", f"{prefix}-"]),
         },
@@ -387,8 +395,8 @@ MACOS_STEPS = [
         "if": IMP_BINARY_CACHE_MISS,
         "run": "cargo build --release --locked --manifest-path crates/imp/Cargo.toml",
     },
-    cache_toolchains_step("macos"),
-    cache_imp_step("macos"),
+    cache_toolchains_step("macos", MACOS_CACHE_ROOT),
+    cache_imp_step("macos", MACOS_CACHE_ROOT),
     *macos_check_steps(),
     *macos_package_smoke_steps(),
     {
