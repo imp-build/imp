@@ -89,7 +89,7 @@ jobs:
       - name: Cache imp toolchains
         uses: actions/cache@v4
         with:
-          path: ~/.cache/imp/named/shared
+          path: ~/.cache/imp/named/__/shared
           key: imp-toolchains-v2-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
           restore-keys: imp-toolchains-v2-check-${{ runner.os }}-
 
@@ -98,7 +98,7 @@ jobs:
         with:
           path: |
             ~/.cache/imp
-            !~/.cache/imp/named/shared
+            !~/.cache/imp/named/__/shared
           key: imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
             imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
@@ -177,7 +177,7 @@ jobs:
       - name: Cache imp toolchains
         uses: actions/cache@v4
         with:
-          path: ~/Library/Caches/imp/named/shared
+          path: ~/Library/Caches/imp/named/__/shared
           key: imp-toolchains-v2-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
           restore-keys: imp-toolchains-v2-macos-${{ runner.os }}-
 
@@ -186,7 +186,7 @@ jobs:
         with:
           path: |
             ~/Library/Caches/imp
-            !~/Library/Caches/imp/named/shared
+            !~/Library/Caches/imp/named/__/shared
           key: imp-store-v6-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
             imp-store-v6-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
@@ -253,7 +253,7 @@ jobs:
       - name: Cache imp toolchains
         uses: actions/cache@v4
         with:
-          path: ~/.cache/imp/named/shared
+          path: ~/.cache/imp/named/__/shared
           key: imp-toolchains-v2-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
           restore-keys: imp-toolchains-v2-package-${{ runner.os }}-
 
@@ -262,7 +262,7 @@ jobs:
         with:
           path: |
             ~/.cache/imp
-            !~/.cache/imp/named/shared
+            !~/.cache/imp/named/__/shared
           key: imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
             imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-

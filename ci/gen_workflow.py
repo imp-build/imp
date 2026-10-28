@@ -116,8 +116,11 @@ LINUX_CACHE_ROOT = "~/.cache/imp"
 MACOS_CACHE_ROOT = "~/Library/Caches/imp"
 
 
+# The named cache shards each scope by the first two hex characters of its
+# name; `shared` is not hex, so it goes in the `__` bucket (shard_bucket in
+# crates/imp-store/src/cache.rs).
 def toolchain_scope_path(cache_root):
-    return f"{cache_root}/named/shared"
+    return f"{cache_root}/named/__/shared"
 
 
 TOOLCHAIN_PINS_HASH = "${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}"
