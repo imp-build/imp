@@ -291,7 +291,8 @@ MACOS_CHECKS = [
     ("fmt", f"{MACOS_IMP} fmt --check //..."),
     ("lint", f"{MACOS_IMP} lint //..."),
     ("test", f"{MACOS_IMP} test //..."),
-    ("cargo-test", "cargo test --workspace --locked"),
+    # --no-fail-fast: one failing suite must not hide the results of the others.
+    ("cargo-test", "cargo test --workspace --locked --no-fail-fast"),
     ("luau-workspace", f"python3 ci/check_luau_workspace.py --imp {MACOS_IMP}"),
     ("docs-lint", f"{MACOS_IMP} lint //docs"),
     ("docs-test", f"{MACOS_IMP} test //docs"),

@@ -7317,6 +7317,18 @@ fn render_luau_value(value: &serde_json::Value, depth: usize) -> Result<String> 
     }
 }
 
+/// True when `path` is a file and its file name has the same case on disk.
+/// On a case-insensitive file system (macOS, Windows), `build.luau` also
+/// finds `BUILD.luau`. The resolver must not select that different module.
+fn is_exact_file(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    path.is_file()
+        && fs::read_dir(parent)
+            .is_ok_and(|entries| entries.flatten().any(|entry| entry.file_name() == name))
+}
+
 fn resolve_address(
     loader: &ModuleLoader,
     requested: &str,
@@ -7382,7 +7394,7 @@ fn resolve_address(
     };
     let candidate = candidates
         .into_iter()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_exact_file(candidate))
         .ok_or_else(|| {
             LuaError::external(format!(
                 "module '{requested}' was not found under {}",
@@ -13779,6 +13791,43 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
         assert_eq!(generated_name.0, workspace.path().join("pkg/BUILD.luau"));
         assert_eq!(generated_name, explicit_build);
         assert_eq!(generated_name.1, "@workspace/pkg/BUILD");
+    }
+
+    #[test]
+    fn resolver_selects_index_module_beside_a_build_file_of_other_case() {
+        // On a case-insensitive file system, `workflows/build.luau` also
+        // finds `workflows/BUILD.luau`. The macOS and Windows CI runs this
+        // case natively.
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        fs::create_dir_all(rules.path().join("workflows/build")).unwrap();
+        fs::write(rules.path().join("workflows/BUILD.luau"), "return {}\n").unwrap();
+        fs::write(
+            rules.path().join("workflows/build/index.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        let loader = ModuleLoader {
+            workspace_root: workspace.path().to_path_buf(),
+            rules_root: rules.path().to_path_buf(),
+            stack: Rc::new(RefCell::new(Vec::new())),
+            cache: Rc::new(RefCell::new(HashMap::new())),
+            failure: Rc::new(RefCell::new(None)),
+            import_graph: Rc::new(RefCell::new(crate::changed::ImportGraph::default())),
+        };
+
+        let (path, canonical) =
+            resolve_address(&loader, "@imp/rules/workflows/build", None).unwrap();
+        let (build_path, build_canonical) =
+            resolve_address(&loader, "@imp/rules/workflows", None).unwrap();
+
+        assert_eq!(canonical, "@imp/rules/workflows/build/index");
+        assert!(path.ends_with("workflows/build/index.luau"), "{path:?}");
+        assert_eq!(build_canonical, "@imp/rules/workflows/BUILD");
+        assert!(
+            build_path.ends_with("workflows/BUILD.luau"),
+            "{build_path:?}"
+        );
     }
 
     #[test]

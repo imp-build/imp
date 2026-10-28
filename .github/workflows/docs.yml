@@ -214,7 +214,7 @@ jobs:
 
       - name: cargo-test
         continue-on-error: true
-        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked
+        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast
 
       - name: luau-workspace
         continue-on-error: true
