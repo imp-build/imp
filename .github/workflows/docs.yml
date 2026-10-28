@@ -7,7 +7,7 @@ env:
 
 on:
   push:
-    branches: [main]
+    branches: [main, luau-runtime-migration]
   pull_request:
 
 permissions:
@@ -154,6 +154,139 @@ jobs:
 
       - name: Smoke test packaged tree
         run: ci/smoke_package.sh stage
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache imp binary
+        id: imp-binary
+        uses: actions/cache@v4
+        with:
+          path: target/release/imp
+          key: imp-binary-v1-${{ runner.os }}-${{ hashFiles('crates/**/*.rs', '**/Cargo.toml', 'Cargo.lock') }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build imp
+        if: steps.imp-binary.outputs.cache-hit != 'true'
+        run: cargo build --release --locked --manifest-path crates/imp/Cargo.toml
+
+      - name: Cache imp toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/imp/named/shared
+          key: imp-toolchains-v2-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock', 'Cargo.lock') }}
+          restore-keys: imp-toolchains-v2-macos-${{ runner.os }}-
+
+      - name: Cache imp store
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/imp
+            !~/.cache/imp/named/shared
+          key: imp-store-v6-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            imp-store-v6-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
+            imp-store-v6-macos-${{ runner.os }}-
+
+      - name: lockfiles
+        continue-on-error: true
+        run: python3 ci/run_check.py lockfiles -- python3 -B rules/workflows/lockfiles/testdata/consumer_check.py --imp target/release/imp --real-lockfile
+
+      - name: generate-check
+        continue-on-error: true
+        run: python3 ci/run_check.py generate-check -- target/release/imp generate //ci:docs_workflow --check
+
+      - name: fmt
+        continue-on-error: true
+        run: python3 ci/run_check.py fmt -- target/release/imp fmt --check //...
+
+      - name: lint
+        continue-on-error: true
+        run: python3 ci/run_check.py lint -- target/release/imp lint //...
+
+      - name: test
+        continue-on-error: true
+        run: python3 ci/run_check.py test -- target/release/imp test //...
+
+      - name: cargo-test
+        continue-on-error: true
+        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked
+
+      - name: luau-workspace
+        continue-on-error: true
+        run: python3 ci/run_check.py luau-workspace -- python3 ci/check_luau_workspace.py --imp target/release/imp
+
+      - name: docs-lint
+        continue-on-error: true
+        run: python3 ci/run_check.py docs-lint -- target/release/imp lint //docs
+
+      - name: docs-test
+        continue-on-error: true
+        run: python3 ci/run_check.py docs-test -- target/release/imp test //docs
+
+      - name: consumer-imp-generate
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-imp-generate -- python3 -B rules/imp/testdata/generate_consumer_check.py --imp target/release/imp
+
+      - name: consumer-js
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-js -- python3 -B rules/js/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-js-biome
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-js-biome -- python3 -B rules/js/biome/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-oci
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-oci -- python3 -B rules/oci/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-odin
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-odin -- python3 -B rules/odin/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-odin-vscode
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-odin-vscode -- python3 -B rules/odin/vscode/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-python
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-python -- python3 -B rules/python/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-python-ruff
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-python-ruff -- python3 -B rules/python/ruff/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-treesitter
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-treesitter -- python3 -B rules/treesitter/testdata/consumer_check.py --imp target/release/imp
+
+      - name: consumer-zola
+        continue-on-error: true
+        run: python3 ci/run_check.py consumer-zola -- python3 -B rules/zola/testdata/consumer_check.py --imp target/release/imp
+
+      - name: Stage release tree
+        if: always()
+        run: |
+          mkdir -p stage/bin stage/share/imp
+          cp target/release/imp stage/bin/imp
+          cp -r rules stage/share/imp/rules
+
+      - name: package-smoke
+        continue-on-error: true
+        run: python3 ci/run_check.py package-smoke -- ci/smoke_package.sh stage
+
+      - name: Upload macOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-evidence
+          path: ci-evidence
+          if-no-files-found: error
+          retention-days: 30
 
   package:
     needs: build

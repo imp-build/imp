@@ -10,6 +10,10 @@ Jobs chain: `build` compiles the imp binary once and uploads it as an
 artifact; `check`, `package`, and `deploy` download that artifact and run it
 "installed" instead of each doing their own cargo build/run.
 
+The `macos` job builds imp natively on a macOS runner and runs the checks of
+MACOS_CHECKS. It keeps each command, exit code, and output as the
+`macos-evidence` artifact (see ci/run_check.py).
+
 The release workflow builds packaged Linux and Windows binaries for main pushes
 and version tags. Main pushes update one rolling draft release, while version
 tags create a separate versioned draft release from the same artifacts.
@@ -52,10 +56,7 @@ FULL_HISTORY_CHECKOUT = {
 # kache already makes the *compile* mostly incremental, but a 99% cache hit
 # still costs ~3.5min of rustc replay plus linking. Most pushes touch no Rust
 # at all, so cache the linked artifact itself and skip the job's work outright.
-IMP_BINARY_HASH = (
-    "${{ hashFiles('crates/**/*.rs', "
-    "'**/Cargo.toml', 'Cargo.lock') }}"
-)
+IMP_BINARY_HASH = "${{ hashFiles('crates/**/*.rs', '**/Cargo.toml', 'Cargo.lock') }}"
 IMP_BINARY_CACHE_MISS = "steps.imp-binary.outputs.cache-hit != 'true'"
 
 BUILD_STEPS = [
@@ -264,6 +265,104 @@ PACKAGE_SMOKE_STEPS = [
     {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
 ]
 
+# Temporary: the first macOS runs discover which checks pass natively. Each
+# check continues after a failure, and pushes to the migration branch start the
+# workflow. Set to False after the discovery, before the branch merges.
+MACOS_DISCOVERY = True
+PUSH_BRANCHES = ["main", "luau-runtime-migration"] if MACOS_DISCOVERY else ["main"]
+MACOS_IMP = "target/release/imp"
+MACOS_EVIDENCE_ARTIFACT = "macos-evidence"
+
+# The native macOS checks. Each runs through ci/run_check.py, which keeps the
+# command, exit code, and output under ci-evidence/ for the evidence artifact.
+# The checks run on the full workspace, not on --changed-since: platform
+# defects do not follow the changed files.
+MACOS_CHECKS = [
+    # The lockfile check is the short native-tool check (curl and
+    # `shasum -a 256`), so it runs before the long checks.
+    (
+        "lockfiles",
+        (
+            "python3 -B rules/workflows/lockfiles/testdata/consumer_check.py "
+            f"--imp {MACOS_IMP} --real-lockfile"
+        ),
+    ),
+    ("generate-check", f"{MACOS_IMP} generate {SITE_CHECK_TARGET} --check"),
+    ("fmt", f"{MACOS_IMP} fmt --check //..."),
+    ("lint", f"{MACOS_IMP} lint //..."),
+    ("test", f"{MACOS_IMP} test //..."),
+    ("cargo-test", "cargo test --workspace --locked"),
+    ("luau-workspace", f"python3 ci/check_luau_workspace.py --imp {MACOS_IMP}"),
+    ("docs-lint", f"{MACOS_IMP} lint //docs"),
+    ("docs-test", f"{MACOS_IMP} test //docs"),
+    *(
+        (f"consumer-{name}", f"python3 -B {path} --imp {MACOS_IMP}")
+        for name, path in [
+            ("imp-generate", "rules/imp/testdata/generate_consumer_check.py"),
+            ("js", "rules/js/testdata/consumer_check.py"),
+            ("js-biome", "rules/js/biome/testdata/consumer_check.py"),
+            ("oci", "rules/oci/testdata/consumer_check.py"),
+            ("odin", "rules/odin/testdata/consumer_check.py"),
+            ("odin-vscode", "rules/odin/vscode/testdata/consumer_check.py"),
+            ("python", "rules/python/testdata/consumer_check.py"),
+            ("python-ruff", "rules/python/ruff/testdata/consumer_check.py"),
+            ("treesitter", "rules/treesitter/testdata/consumer_check.py"),
+            ("zola", "rules/zola/testdata/consumer_check.py"),
+        ]
+    ),
+]
+
+
+def macos_check_step(name, command):
+    step = {"name": name, "run": f"python3 ci/run_check.py {name} -- {command}"}
+    if MACOS_DISCOVERY:
+        step["continue-on-error"] = True
+    return step
+
+
+MACOS_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    {
+        "name": "Cache imp binary",
+        "id": "imp-binary",
+        "uses": "actions/cache@v4",
+        "with": {
+            "path": MACOS_IMP,
+            "key": f"imp-binary-v1-${{{{ runner.os }}}}-{IMP_BINARY_HASH}",
+        },
+    },
+    {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
+    {
+        "name": "Build imp",
+        "if": IMP_BINARY_CACHE_MISS,
+        "run": "cargo build --release --locked --manifest-path crates/imp/Cargo.toml",
+    },
+    cache_toolchains_step("macos"),
+    cache_imp_step("macos"),
+    *(macos_check_step(name, command) for name, command in MACOS_CHECKS),
+    {
+        "name": "Stage release tree",
+        "if": "always()",
+        "run": (
+            "mkdir -p stage/bin stage/share/imp\n"
+            f"cp {MACOS_IMP} stage/bin/imp\n"
+            "cp -r rules stage/share/imp/rules"
+        ),
+    },
+    macos_check_step("package-smoke", "ci/smoke_package.sh stage"),
+    {
+        "name": "Upload macOS evidence",
+        "if": "always()",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+            "name": MACOS_EVIDENCE_ARTIFACT,
+            "path": "ci-evidence",
+            "if-no-files-found": "error",
+            "retention-days": 30,
+        },
+    },
+]
+
 JOBS = [
     {"id": "build", "runs_on": "ubuntu-latest", "steps": BUILD_STEPS},
     {
@@ -294,6 +393,15 @@ JOBS = [
         "needs": "build",
         "runs_on": "ubuntu-latest",
         "steps": PACKAGE_SMOKE_STEPS,
+    },
+    {
+        # Native macOS evidence. The runner is arm64, so Imp resolves the
+        # macos/aarch64 toolchain entries. The job builds its own binary:
+        # the `build` artifact is a Linux executable.
+        "id": "macos",
+        "runs_on": "macos-latest",
+        "timeout_minutes": 120,
+        "steps": MACOS_STEPS,
     },
     {
         "id": "package",
@@ -562,7 +670,7 @@ def render_step(step, indent):
             lines.append(f"{prefix}{key}: {render_value(value)}")
         first = False
 
-    for key in ("name", "id", "if", "uses", "run"):
+    for key in ("name", "id", "if", "continue-on-error", "uses", "run"):
         if key in step:
             emit(key, step[key])
     if "with" in step:
@@ -591,6 +699,8 @@ def render_job(job):
     if "if" in job:
         lines.append(f"    if: {job['if']}")
     lines.append(f"    runs-on: {job['runs_on']}")
+    if "timeout_minutes" in job:
+        lines.append(f"    timeout-minutes: {job['timeout_minutes']}")
     if "permissions" in job:
         lines.append("    permissions:")
         for k, v in job["permissions"].items():
@@ -628,7 +738,7 @@ def render_workflow():
         "",
         "on:",
         "  push:",
-        "    branches: [main]",
+        f"    branches: [{', '.join(PUSH_BRANCHES)}]",
         "  pull_request:",
         "",
         "permissions:",
