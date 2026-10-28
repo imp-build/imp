@@ -2063,7 +2063,10 @@ mod tests {
     #[test]
     fn exec_run_workspace_cwd_keeps_the_sandboxed_environment() {
         let root = tempfile::tempdir().unwrap();
-        let p = root.path();
+        // `sh` reports the physical `$PWD`. On macOS the temporary directory
+        // is under the `/var` -> `/private/var` symlink.
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let p = canonical.as_path();
         let mut opts = run_opts(
             &[
                 "sh",

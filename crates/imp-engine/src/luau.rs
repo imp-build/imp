@@ -13776,8 +13776,11 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
         let rules = tempfile::tempdir().unwrap();
         fs::create_dir_all(workspace.path().join("pkg")).unwrap();
         fs::write(workspace.path().join("pkg/BUILD.luau"), "return {}\n").unwrap();
+        // Production canonicalizes both roots. On macOS the temporary
+        // directory is under the `/var` -> `/private/var` symlink.
+        let workspace_root = dunce::canonicalize(workspace.path()).unwrap();
         let loader = ModuleLoader {
-            workspace_root: workspace.path().to_path_buf(),
+            workspace_root: workspace_root.clone(),
             rules_root: rules.path().to_path_buf(),
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
@@ -13788,7 +13791,7 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
         let generated_name = resolve_address(&loader, "@workspace/pkg", None).unwrap();
         let explicit_build = resolve_address(&loader, "@workspace/pkg/BUILD.luau", None).unwrap();
 
-        assert_eq!(generated_name.0, workspace.path().join("pkg/BUILD.luau"));
+        assert_eq!(generated_name.0, workspace_root.join("pkg/BUILD.luau"));
         assert_eq!(generated_name, explicit_build);
         assert_eq!(generated_name.1, "@workspace/pkg/BUILD");
     }
@@ -13807,9 +13810,12 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
             "return {}\n",
         )
         .unwrap();
+        // Production canonicalizes both roots. On macOS the temporary
+        // directory is under the `/var` -> `/private/var` symlink.
+        let rules_root = dunce::canonicalize(rules.path()).unwrap();
         let loader = ModuleLoader {
-            workspace_root: workspace.path().to_path_buf(),
-            rules_root: rules.path().to_path_buf(),
+            workspace_root: dunce::canonicalize(workspace.path()).unwrap(),
+            rules_root: rules_root.clone(),
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
@@ -13865,9 +13871,12 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
     #[test]
     fn generated_build_paths_must_stay_in_the_workspace() {
         let workspace = tempfile::tempdir().unwrap();
-        assert!(generated_build_destination(workspace.path(), "pkg/BUILD.luau").is_ok());
-        assert!(generated_build_destination(workspace.path(), "../outside/BUILD.luau").is_err());
-        assert!(generated_build_destination(workspace.path(), "pkg/not-a-build.luau").is_err());
+        // Production canonicalizes the workspace root. On macOS the temporary
+        // directory is under the `/var` -> `/private/var` symlink.
+        let root = dunce::canonicalize(workspace.path()).unwrap();
+        assert!(generated_build_destination(&root, "pkg/BUILD.luau").is_ok());
+        assert!(generated_build_destination(&root, "../outside/BUILD.luau").is_err());
+        assert!(generated_build_destination(&root, "pkg/not-a-build.luau").is_err());
     }
 
     #[test]
@@ -13885,9 +13894,12 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
         fs::create_dir_all(rules.path().join("native-tool")).unwrap();
         fs::write(rules.path().join("asset/index.luau"), "return {}\n").unwrap();
         fs::write(rules.path().join("native-tool/index.luau"), "return {}\n").unwrap();
+        // Production canonicalizes both roots. On macOS the temporary
+        // directory is under the `/var` -> `/private/var` symlink.
+        let rules_root = dunce::canonicalize(rules.path()).unwrap();
         let loader = ModuleLoader {
-            workspace_root: workspace.path().to_path_buf(),
-            rules_root: rules.path().to_path_buf(),
+            workspace_root: dunce::canonicalize(workspace.path()).unwrap(),
+            rules_root: rules_root.clone(),
             stack: Rc::new(RefCell::new(Vec::new())),
             cache: Rc::new(RefCell::new(HashMap::new())),
             failure: Rc::new(RefCell::new(None)),
@@ -13897,7 +13909,7 @@ return { default = probe("default", nil, 1), narrow = probe("narrow", 2, 2), wid
         let (path, address) =
             resolve_address(&loader, "../native-tool", Some("@imp/rules/asset/index")).unwrap();
 
-        assert_eq!(path, rules.path().join("native-tool/index.luau"));
+        assert_eq!(path, rules_root.join("native-tool/index.luau"));
         assert_eq!(address, "@imp/rules/native-tool/index");
     }
 

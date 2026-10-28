@@ -193,91 +193,28 @@ jobs:
             imp-store-v6-macos-${{ runner.os }}-
 
       - name: lockfiles
-        continue-on-error: true
         run: python3 ci/run_check.py lockfiles -- python3 -B rules/workflows/lockfiles/testdata/consumer_check.py --imp target/release/imp --real-lockfile
 
-      - name: generate-check
-        continue-on-error: true
-        run: python3 ci/run_check.py generate-check -- target/release/imp generate //ci:docs_workflow --check
-
-      - name: fmt
-        continue-on-error: true
-        run: python3 ci/run_check.py fmt -- target/release/imp fmt --check //...
-
-      - name: lint
-        continue-on-error: true
-        run: python3 ci/run_check.py lint -- target/release/imp lint //...
-
-      - name: test
-        continue-on-error: true
-        run: python3 ci/run_check.py test -- target/release/imp test //...
-
       - name: cargo-test
-        continue-on-error: true
-        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast
-
-      - name: luau-workspace
-        continue-on-error: true
-        run: python3 ci/run_check.py luau-workspace -- python3 ci/check_luau_workspace.py --imp target/release/imp
-
-      - name: docs-lint
-        continue-on-error: true
-        run: python3 ci/run_check.py docs-lint -- target/release/imp lint //docs
-
-      - name: docs-test
-        continue-on-error: true
-        run: python3 ci/run_check.py docs-test -- target/release/imp test //docs
+        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast -- --skip repository_luau_workspace_tests_pass
 
       - name: consumer-imp-generate
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-imp-generate -- python3 -B rules/imp/testdata/generate_consumer_check.py --imp target/release/imp
 
       - name: consumer-js
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-js -- python3 -B rules/js/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-js-biome
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-js-biome -- python3 -B rules/js/biome/testdata/consumer_check.py --imp target/release/imp
 
-      - name: consumer-oci
-        continue-on-error: true
-        run: python3 ci/run_check.py consumer-oci -- python3 -B rules/oci/testdata/consumer_check.py --imp target/release/imp
-
-      - name: consumer-odin
-        continue-on-error: true
-        run: python3 ci/run_check.py consumer-odin -- python3 -B rules/odin/testdata/consumer_check.py --imp target/release/imp
-
-      - name: consumer-odin-vscode
-        continue-on-error: true
-        run: python3 ci/run_check.py consumer-odin-vscode -- python3 -B rules/odin/vscode/testdata/consumer_check.py --imp target/release/imp
-
       - name: consumer-python
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-python -- python3 -B rules/python/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-python-ruff
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-python-ruff -- python3 -B rules/python/ruff/testdata/consumer_check.py --imp target/release/imp
 
-      - name: consumer-treesitter
-        continue-on-error: true
-        run: python3 ci/run_check.py consumer-treesitter -- python3 -B rules/treesitter/testdata/consumer_check.py --imp target/release/imp
-
       - name: consumer-zola
-        continue-on-error: true
         run: python3 ci/run_check.py consumer-zola -- python3 -B rules/zola/testdata/consumer_check.py --imp target/release/imp
-
-      - name: Stage release tree
-        if: always()
-        run: |
-          mkdir -p stage/bin stage/share/imp
-          cp target/release/imp stage/bin/imp
-          cp -r rules stage/share/imp/rules
-
-      - name: package-smoke
-        continue-on-error: true
-        run: python3 ci/run_check.py package-smoke -- ci/smoke_package.sh stage
 
       - name: Upload macOS evidence
         if: always()

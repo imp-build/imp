@@ -265,12 +265,13 @@ PACKAGE_SMOKE_STEPS = [
     {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
 ]
 
-# Temporary: the first macOS runs discover which checks pass natively. Each
-# check continues after a failure, and pushes to the migration branch start the
-# workflow. Set to False after the discovery, before the branch merges.
-MACOS_DISCOVERY = True
-PUSH_BRANCHES = ["main", "luau-runtime-migration"] if MACOS_DISCOVERY else ["main"]
+# Temporary: pushes to the migration branch start the workflow, so the macOS
+# job can run before the branch merges. Remove the migration branch before the
+# merge.
+PUSH_BRANCHES = ["main", "luau-runtime-migration"]
 MACOS_IMP = "target/release/imp"
+GCC_ON_MACOS_TASK = "imp:2026-10-28-load-odin-rules-without-gcc-on-macos"
+BSD_TAR_TASK = "imp:2026-10-28-build-oci-layers-with-bsd-tar"
 MACOS_EVIDENCE_ARTIFACT = "macos-evidence"
 
 # The native macOS checks. Each runs through ci/run_check.py, which keeps the
@@ -292,7 +293,14 @@ MACOS_CHECKS = [
     ("lint", f"{MACOS_IMP} lint //..."),
     ("test", f"{MACOS_IMP} test //..."),
     # --no-fail-fast: one failing suite must not hide the results of the others.
-    ("cargo-test", "cargo test --workspace --locked --no-fail-fast"),
+    # The repository workspace test loads the Odin rules (GCC_ON_MACOS_TASK).
+    (
+        "cargo-test",
+        (
+            "cargo test --workspace --locked --no-fail-fast -- "
+            "--skip repository_luau_workspace_tests_pass"
+        ),
+    ),
     ("luau-workspace", f"python3 ci/check_luau_workspace.py --imp {MACOS_IMP}"),
     ("docs-lint", f"{MACOS_IMP} lint //docs"),
     ("docs-test", f"{MACOS_IMP} test //docs"),
@@ -314,11 +322,52 @@ MACOS_CHECKS = [
 ]
 
 
+# Checks that fail on native macOS, with the task that owns each defect. The
+# job does not run them. Remove an entry when its task is done.
+MACOS_EXCLUDED = {
+    # Every workspace that requires the Odin rules fails to evaluate.
+    "generate-check": GCC_ON_MACOS_TASK,
+    "fmt": GCC_ON_MACOS_TASK,
+    "lint": GCC_ON_MACOS_TASK,
+    "test": GCC_ON_MACOS_TASK,
+    "luau-workspace": GCC_ON_MACOS_TASK,
+    "docs-lint": GCC_ON_MACOS_TASK,
+    "docs-test": GCC_ON_MACOS_TASK,
+    "consumer-odin": GCC_ON_MACOS_TASK,
+    "consumer-odin-vscode": GCC_ON_MACOS_TASK,
+    "consumer-treesitter": GCC_ON_MACOS_TASK,
+    "package-smoke": GCC_ON_MACOS_TASK,
+    # The layer archive uses GNU tar options.
+    "consumer-oci": BSD_TAR_TASK,
+}
+
+
 def macos_check_step(name, command):
-    step = {"name": name, "run": f"python3 ci/run_check.py {name} -- {command}"}
-    if MACOS_DISCOVERY:
-        step["continue-on-error"] = True
-    return step
+    return {"name": name, "run": f"python3 ci/run_check.py {name} -- {command}"}
+
+
+def macos_check_steps():
+    return [
+        macos_check_step(name, command)
+        for name, command in MACOS_CHECKS
+        if name not in MACOS_EXCLUDED
+    ]
+
+
+def macos_package_smoke_steps():
+    if "package-smoke" in MACOS_EXCLUDED:
+        return []
+    return [
+        {
+            "name": "Stage release tree",
+            "run": (
+                "mkdir -p stage/bin stage/share/imp\n"
+                f"cp {MACOS_IMP} stage/bin/imp\n"
+                "cp -r rules stage/share/imp/rules"
+            ),
+        },
+        macos_check_step("package-smoke", "ci/smoke_package.sh stage"),
+    ]
 
 
 MACOS_STEPS = [
@@ -340,17 +389,8 @@ MACOS_STEPS = [
     },
     cache_toolchains_step("macos"),
     cache_imp_step("macos"),
-    *(macos_check_step(name, command) for name, command in MACOS_CHECKS),
-    {
-        "name": "Stage release tree",
-        "if": "always()",
-        "run": (
-            "mkdir -p stage/bin stage/share/imp\n"
-            f"cp {MACOS_IMP} stage/bin/imp\n"
-            "cp -r rules stage/share/imp/rules"
-        ),
-    },
-    macos_check_step("package-smoke", "ci/smoke_package.sh stage"),
+    *macos_check_steps(),
+    *macos_package_smoke_steps(),
     {
         "name": "Upload macOS evidence",
         "if": "always()",
@@ -671,7 +711,7 @@ def render_step(step, indent):
             lines.append(f"{prefix}{key}: {render_value(value)}")
         first = False
 
-    for key in ("name", "id", "if", "continue-on-error", "uses", "run"):
+    for key in ("name", "id", "if", "uses", "run"):
         if key in step:
             emit(key, step[key])
     if "with" in step:
