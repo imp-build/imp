@@ -276,10 +276,7 @@ PACKAGE_SMOKE_STEPS = [
     {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
 ]
 
-# Temporary: pushes to the migration branch start the workflow, so the macOS
-# job can run before the branch merges. Remove the migration branch before the
-# merge.
-PUSH_BRANCHES = ["main", "luau-runtime-migration"]
+PUSH_BRANCHES = ["main"]
 MACOS_IMP = "target/release/imp"
 GCC_ON_MACOS_TASK = "imp:2026-10-28-load-odin-rules-without-gcc-on-macos"
 BSD_TAR_TASK = "imp:2026-10-28-build-oci-layers-with-bsd-tar"

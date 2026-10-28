@@ -7,7 +7,7 @@ env:
 
 on:
   push:
-    branches: [main, luau-runtime-migration]
+    branches: [main]
   pull_request:
 
 permissions:
