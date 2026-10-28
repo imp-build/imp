@@ -344,7 +344,33 @@ enum GraphNode {
     Artifact(imp_store::cache::CachedArtifact),
 }
 
+struct SharedProcessFailure(imp_exec_api::ExecOutcome);
+
+impl std::fmt::Debug for SharedProcessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "process exited with {}", self.0.exit_code)
+    }
+}
+impl std::fmt::Display for SharedProcessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "process failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+            self.0.exit_code, self.0.stdout, self.0.stderr
+        )
+    }
+}
+impl std::error::Error for SharedProcessFailure {}
+
+type SharedAction = futures::future::Shared<
+    futures::future::LocalBoxFuture<
+        'static,
+        Result<std::sync::Arc<imp_exec_api::ExecOutcome>, std::sync::Arc<String>>,
+    >,
+>;
+
 struct HostState {
+    shared_actions: HashMap<String, SharedAction>,
     cache_details: BTreeMap<String, LuaTable>,
     cached_tool_bindings: Option<HashMap<u64, imp_store::cache::OutputNamedCache>>,
     next_id: u64,
@@ -458,6 +484,7 @@ impl LuauWorkspace {
             expansions: HashMap::new(),
             expansion_results: HashMap::new(),
             graph_run_active: false,
+            shared_actions: HashMap::new(),
             task_results: HashMap::new(),
             invocation_mode: ModeScope::new(),
             resolved_inputs: HashMap::new(),
@@ -868,6 +895,7 @@ impl LuauWorkspace {
                 })
                 .collect();
         }
+        host.shared_actions.clear();
         host.task_results.clear();
         host.resolved_inputs.clear();
         host.expansion_results.clear();
@@ -1230,6 +1258,7 @@ impl LuauWorkspace {
         });
         let result = self.execute_graph_inner(goal, roots, flags).await;
         let mut host = self.host.borrow_mut();
+        host.shared_actions.clear();
         host.graph_run_active = false;
         host.goal_invocation = None;
         host.goal_callback_active = false;
@@ -1436,6 +1465,7 @@ impl LuauWorkspace {
             Ok(path)
         }
         .await;
+        self.host.borrow_mut().shared_actions.clear();
         self.host.borrow_mut().graph_run_active = false;
         self.host.borrow_mut().task_failure = None;
         self.clear_invocation_mode();
@@ -1697,7 +1727,10 @@ impl LuauWorkspace {
             bail!("expected a graph task handle, got {}", handle.kind);
         }
         let script = format!("return __imp_execute_task({})", handle.id);
-        self.run_script("@imp/pilot-execute", &script).await
+        self.host.borrow_mut().shared_actions.clear();
+        let result = self.run_script("@imp/pilot-execute", &script).await;
+        self.host.borrow_mut().shared_actions.clear();
+        result
     }
 
     async fn run_script(&mut self, name: &str, source: &str) -> Result<()> {
@@ -4817,6 +4850,7 @@ async fn with_test_fake(
             FakeKind::GoalFlags => state.fakes.goal_flags = Some(recorder.clone()),
             FakeKind::Diff => state.fakes.diff = Some(recorder.clone()),
         }
+        state.shared_actions.clear();
         state.task_results.clear();
         state.resolved_inputs.clear();
         state.expansion_results.clear();
@@ -4835,6 +4869,7 @@ async fn with_test_fake(
             FakeKind::GoalFlags => state.fakes.goal_flags = None,
             FakeKind::Diff => state.fakes.diff = None,
         }
+        state.shared_actions.clear();
         state.task_results.clear();
         state.resolved_inputs.clear();
         state.expansion_results.clear();
@@ -6519,48 +6554,88 @@ async fn run_action(
         force_cache: false,
         no_cache: !cache,
         sandbox_retention: SandboxRetention::OnFailure,
-        allow_failure,
+        allow_failure: true,
     };
-    let outcome = if let Some(scheduler) = scheduler {
-        scheduler
-            .run(
-                None,
-                display.clone(),
-                imp_scheduler::TaskKind::Sandbox,
-                cores as usize,
-                move |context| {
-                    let outcome = service.execute_with_start(
-                        &workspace_id,
-                        action,
-                        Some(cancellation.as_ref()),
-                        &crate::spike::SchedulerGate(&context),
-                    )?;
-                    crate::spike::report_cache_telemetry(&context, outcome.cache_outcome);
-                    Ok(outcome)
-                },
-            )
-            .await?
+    use futures::FutureExt;
+    let sharing_key = imp_execution::exec::prepared_action_key(&workspace_id, &action)?;
+    let existing = if cache {
+        host.borrow().shared_actions.get(&sharing_key).cloned()
     } else {
-        tokio::task::spawn_blocking(move || {
-            service.execute(&workspace_id, action, Some(cancellation.as_ref()))
-        })
-        .await
-        .context("join hermetic graph action")??
+        None
     };
+    let leader = existing.is_none();
+    let shared = if let Some(existing) = existing {
+        existing
+    } else {
+        let display = display.clone();
+        let future = async move {
+            let outcome = if let Some(scheduler) = scheduler {
+                scheduler
+                    .run(
+                        None,
+                        display.clone(),
+                        imp_scheduler::TaskKind::Sandbox,
+                        cores as usize,
+                        move |context| {
+                            let outcome = service.execute_with_start(
+                                &workspace_id,
+                                action,
+                                Some(cancellation.as_ref()),
+                                &crate::spike::SchedulerGate(&context),
+                            )?;
+                            crate::spike::report_cache_telemetry(&context, outcome.cache_outcome);
+                            if outcome.exit_code != 0 {
+                                return Err(anyhow::Error::new(SharedProcessFailure(outcome)));
+                            }
+                            Ok(outcome)
+                        },
+                    )
+                    .await
+                    .or_else(|error| match error.downcast::<SharedProcessFailure>() {
+                        Ok(failure) => Ok(failure.0),
+                        Err(error) => Err(error),
+                    })?
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    service.execute(&workspace_id, action, Some(cancellation.as_ref()))
+                })
+                .await
+                .context("join hermetic graph action")??
+            };
+            Ok::<_, anyhow::Error>(outcome)
+        }
+        .map(|result| {
+            result
+                .map(std::sync::Arc::new)
+                .map_err(|error| std::sync::Arc::new(format!("{error:#}")))
+        })
+        .boxed_local()
+        .shared();
+        if cache {
+            host.borrow_mut()
+                .shared_actions
+                .insert(sharing_key, future.clone());
+        }
+        future
+    };
+    let outcome = shared.await.map_err(|error| anyhow::anyhow!("{error}"))?;
     if outcome.exit_code != 0 && !allow_failure {
         bail!(
-            "graph action '{display}' exited with {}: {}",
+            "{display} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
             outcome.exit_code,
+            outcome.stdout,
             outcome.stderr
         );
     }
     {
         let mut host = host.borrow_mut();
-        host.action_count += 1;
-        if matches!(
-            outcome.cache_outcome,
-            CacheOutcome::HitLocal | CacheOutcome::HitRemote
-        ) {
+        host.action_count += usize::from(leader);
+        if leader
+            && matches!(
+                outcome.cache_outcome,
+                CacheOutcome::HitLocal | CacheOutcome::HitRemote
+            )
+        {
             host.cache_hit_count += 1;
         }
     }
@@ -6594,8 +6669,13 @@ async fn run_action(
     result
         .set("outputs", artifacts)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    set_action_status(&result, outcome.exit_code, outcome.stdout, outcome.stderr)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    set_action_status(
+        &result,
+        outcome.exit_code,
+        outcome.stdout.clone(),
+        outcome.stderr.clone(),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(result)
 }
 
@@ -6911,8 +6991,13 @@ async fn run_program(
     .with_context(|| format!("run program '{display}'"))?;
     host.borrow_mut().action_count += 1;
     let result = lua.create_table().map_err(lua_error)?;
-    set_action_status(&result, outcome.exit_code, outcome.stdout, outcome.stderr)
-        .map_err(lua_error)?;
+    set_action_status(
+        &result,
+        outcome.exit_code,
+        outcome.stdout.clone(),
+        outcome.stderr.clone(),
+    )
+    .map_err(lua_error)?;
     Ok(result)
 }
 
@@ -9869,8 +9954,7 @@ return consumer
             panic!("content module must return a task");
         };
         runtime.execute_task(&task).await.unwrap();
-        assert_eq!(runtime.action_count(), 3);
-        assert!(runtime.cache_hit_count() >= 1);
+        assert_eq!(runtime.action_count(), 2);
         assert!(!workspace_root.path().join("copied").exists());
         assert!(!workspace_root.path().join("source/data").exists());
     }
@@ -12701,6 +12785,127 @@ end }})
             }
             assert_eq!(scheduler.outstanding(), 0, "{mode}");
         }
+    }
+
+    #[tokio::test]
+    async fn shared_actions_admit_one_job_and_deliver_failure_or_cancellation() {
+        use std::time::Duration;
+        for cancel in [false, true] {
+            let workspace = tempfile::tempdir().unwrap();
+            let rules = rules_tempdir();
+            let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+            let service = Arc::new(BatchProbeService {
+                started,
+                released: std::sync::Mutex::new([false; 3]),
+                wake: std::sync::Condvar::new(),
+            });
+            fs::write(
+                workspace.path().join("shared.luau"),
+                r#"
+local core = require("@imp/core")
+return core.task({run=function(exec)
+ local requests = {}
+ for i=1,8 do requests[i] = {argv={"0","7"}, display=tostring(i), allow_failure=true} end
+ local results=exec.actions(requests)
+ for i=1,8 do assert(results[i].exit_code==7 and results[i].stdout=="0") end
+ local ok, message=pcall(exec.action, {argv={"0","7"}})
+ assert(not ok and string.find(tostring(message), "stdout:\n0", 1, true))
+end})
+"#,
+            )
+            .unwrap();
+            let mut runtime =
+                LuauWorkspace::new_with_service(workspace.path(), rules.path(), service.clone())
+                    .unwrap();
+            let LuaValue::UserData(task) = runtime.evaluate("@workspace/shared").await.unwrap()
+            else {
+                panic!("task")
+            };
+            let cancellation = Arc::new(AtomicBool::new(false));
+            runtime.host.borrow_mut().cancellation = cancellation.clone();
+            let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = imp_scheduler::Scheduler::new(2, cancellation.clone(), events);
+            let _guard = runtime.scheduler_scope(Some(scheduler.clone()));
+            let execution = runtime.execute_task(&task);
+            tokio::pin!(execution);
+            let result = tokio::time::timeout(Duration::from_secs(90), async {
+                tokio::select! {
+                    result=&mut execution => panic!("completed before release: {result:?}"),
+                    start=starts.recv()=>assert_eq!(start,Some(0)),
+                }
+                if cancel {
+                    cancellation.store(true, Ordering::SeqCst);
+                } else {
+                    service.released.lock().unwrap()[0] = true;
+                }
+                service.wake.notify_all();
+                execution.await
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.is_err(), cancel, "{result:?}");
+            assert!(starts.try_recv().is_err(), "duplicate execution");
+            assert_eq!(scheduler.outstanding(), 0);
+            let mut done = 0;
+            while let Ok(event) = receiver.try_recv() {
+                if let imp_scheduler::TaskEvent::Done { outcome, .. } = event {
+                    done += 1;
+                    assert!(!matches!(outcome, imp_scheduler::TaskOutcome::Ok));
+                }
+            }
+            assert_eq!(done, 1, "one scheduler job for all consumers");
+        }
+    }
+
+    #[tokio::test]
+    async fn equivalent_actions_share_active_completed_and_failed_outcomes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        let source = format!(
+            r#"
+local core = require("@imp/core")
+local last_failure = nil
+return core.task({{
+ inputs = {{ sh = core.native_tool("sh"), sleep = core.native_tool("sleep") }},
+ run = function(exec)
+  local argv = {{ "sh", "-c", "sleep 0.1; printf '%s' $$ > pid.txt; printf second > second.txt; printf '%s' $$; # {token}" }}
+  local results = exec.actions({{
+   {{argv=argv, display="first", outputs={{pid=core.output.file("pid.txt"), z=core.output.file("second.txt")}}}},
+   {{argv=argv, display="second", outputs={{a=core.output.file("second.txt"), other=core.output.file("pid.txt")}}}},
+  }})
+  assert(results[1].stdout == results[2].stdout)
+  assert(exec.digest(results[1].outputs.pid) == exec.digest(results[2].outputs.other))
+  local later = exec.actions({{{{argv=argv, display="later", outputs={{pid=core.output.file("pid.txt"), z=core.output.file("second.txt")}}}}}})[1]
+  assert(later.stdout == results[1].stdout)
+  local fresh = exec.actions({{
+   {{argv=argv, cache=false, outputs={{}}}},
+   {{argv=argv, cache=false, outputs={{}}}},
+  }})
+  assert(fresh[1].stdout ~= fresh[2].stdout)
+  local fail = {{ "sh", "-c", "printf '%s' $$; exit 7; # {token}" }}
+  local failed = exec.actions({{
+   {{argv=fail, allow_failure=true, outputs={{}}}},
+   {{argv=fail, allow_failure=true, outputs={{}}}},
+  }})
+  assert(failed[1].exit_code == 7 and failed[1].stdout == failed[2].stdout)
+  assert(last_failure == nil or last_failure ~= failed[1].stdout)
+  last_failure = failed[1].stdout
+  local ok, message = pcall(exec.action, {{argv=fail}})
+  assert(not ok and string.find(tostring(message), failed[1].stdout, 1, true))
+  assert(exec.actions({{{{argv=fail, allow_failure=true, outputs={{}}}}}})[1].stdout == failed[1].stdout)
+ end,
+}})
+"#,
+            token = workspace.path().display()
+        );
+        std::fs::write(workspace.path().join("sharing.luau"), source).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
+        let LuaValue::UserData(task) = runtime.evaluate("@workspace/sharing").await.unwrap() else {
+            panic!("expected task")
+        };
+        runtime.execute_task(&task).await.unwrap();
+        runtime.begin_graph_run(Arc::new(AtomicBool::new(false)));
+        runtime.execute_task(&task).await.unwrap();
     }
 
     #[tokio::test]

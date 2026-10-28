@@ -84,7 +84,7 @@ pub struct ExecRunOpts {
     /// Deliberately outside the action cache key: two machines with different
     /// `--jobs` budgets run the same command and must share cache entries. See
     /// `imp-execution`'s `live_action_digest`, which folds in `argv`, `env`,
-    /// `config_digest`, `display`, `tools` and `workspace_cwd` — and not this.
+    /// `config_digest`, `tools` and `workspace_cwd` — and not this.
     /// The executor passes the value to the child as `IMP_CORES`, injected
     /// into the derived command environment rather than the digested one.
     pub cores: u32,
@@ -141,7 +141,7 @@ pub struct ExecAction {
     /// Deliberately outside the action cache key: two machines with different
     /// `--jobs` budgets run the same command and must share cache entries. See
     /// `imp-execution`'s `live_action_digest`, which folds in `argv`, `env`,
-    /// `config_digest`, `display`, `tools` and `workspace_cwd` — and not this.
+    /// `config_digest`, `tools` and `workspace_cwd` — and not this.
     /// The executor passes the value to the child as `IMP_CORES`, injected
     /// into the derived command environment rather than the digested one.
     pub cores: u32,

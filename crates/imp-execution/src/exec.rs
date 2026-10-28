@@ -66,7 +66,7 @@ pub fn exec_run_hermetic_with_start(
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    let output_key: Vec<serde_json::Value> = action.outputs.iter().map(output_key_spec).collect();
+    let output_key: Vec<serde_json::Value> = canonical_output_specs(&action.outputs);
     let legacy = ExecRunOpts {
         argv: action.argv.clone(),
         display: action.display.clone(),
@@ -1013,20 +1013,56 @@ fn output_key_spec(o: &ExecIoSpec) -> serde_json::Value {
     })
 }
 
+/// Canonical output identity, independent of caller table traversal order.
+fn canonical_output_specs(outputs: &[ExecIoSpec]) -> Vec<serde_json::Value> {
+    let mut specs: Vec<_> = outputs.iter().map(output_key_spec).collect();
+    specs.sort_by_cached_key(|spec| spec.to_string());
+    specs
+}
+
 /// Digest of everything about a `run()` action other than its staged inputs
 /// and declared outputs: argv, the merged env it will execute with, the
-/// workspace configuration digest, display, and tool specs.
+/// workspace configuration digest and tool specs. Display text is excluded.
 pub fn live_action_digest(
     opts: &ExecRunOpts,
     base_env: &BTreeMap<String, String>,
 ) -> Result<String> {
+    action_identity_digest(
+        &opts.argv,
+        base_env,
+        &opts.config_digest,
+        &opts.tools,
+        opts.workspace_cwd,
+    )
+}
+
+fn action_identity_digest(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    config: &str,
+    tools: &[ExecToolSpec],
+    workspace_cwd: bool,
+) -> Result<String> {
     digest_json(&serde_json::json!({
-        "argv": opts.argv,
-        "env": base_env,
-        "config_digest": opts.config_digest,
-        "display": opts.display,
-        "tools": opts.tools,
-        "workspace_cwd": opts.workspace_cwd,
+        "argv": argv, "env": env, "config_digest": config,
+        "identity_version": 2, "tools": tools, "workspace_cwd": workspace_cwd,
+    }))
+}
+
+/// Identity of a prepared hermetic action within one workspace invocation.
+/// Uses the executor's identity definition; display and failure policy are consumer metadata.
+pub fn prepared_action_key(workspace_id: &str, action: &ExecAction) -> Result<String> {
+    let action_digest = action_identity_digest(
+        &action.argv,
+        &action.env,
+        &action.config_digest,
+        &action.tools,
+        false,
+    )?;
+    digest_json(&serde_json::json!({
+        "workspace": workspace_id, "action_digest": action_digest,
+        "input_digest": action.input_digest,
+        "outputs": canonical_output_specs(&action.outputs),
     }))
 }
 
@@ -1185,7 +1221,7 @@ fn exec_run_inner_with_start(
     // record materializes the binding captured at execution time, so a binding
     // change (name, key, or scope) must force a re-run rather than replaying
     // into the old slot.
-    let out_specs: Vec<serde_json::Value> = opts.outputs.iter().map(output_key_spec).collect();
+    let out_specs: Vec<serde_json::Value> = canonical_output_specs(&opts.outputs);
     let task_key = digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
         "action_digest": action_digest,
@@ -1508,7 +1544,7 @@ fn exec_run_inner_with_start(
         match output.kind.as_str() {
             "file" | "manifest" => {
                 if !sandbox_path.is_file() {
-                    bail!("run() output {path} was not created as a file in sandbox");
+                    bail!("run() output {path} was not created as a file in sandbox (process failed with exit code {exit_code})\nstdout:\n{stdout}\nstderr:\n{stderr}");
                 }
                 let (digest, bytes) = store_file_blob(&sandbox_path, &output.kind)?;
                 let mode = file_mode(&sandbox_path)?;
@@ -1527,7 +1563,7 @@ fn exec_run_inner_with_start(
             }
             "directory" => {
                 if !sandbox_path.is_dir() {
-                    bail!("run() output {path} was not created as a directory in sandbox");
+                    bail!("run() output {path} was not created as a directory in sandbox (process failed with exit code {exit_code})\nstdout:\n{stdout}\nstderr:\n{stderr}");
                 }
                 let captured = capture_directory(&sandbox_path)?;
                 output_trees.push(nest_directory(path, &captured)?);
@@ -1586,8 +1622,10 @@ fn exec_run_inner_with_start(
         }
     }
 
-    // Command and output ingestion succeeded — let the guard delete the sandbox.
-    sandbox_guard.succeed();
+    // A nonzero process exit retains its sandbox even when callers permit failure.
+    if status.success() {
+        sandbox_guard.succeed();
+    }
 
     Ok(ExecRunResult {
         stdout,
@@ -2132,6 +2170,93 @@ mod tests {
             2,
             "the subsequent successful result should still be cached"
         );
+    }
+
+    #[test]
+    fn prepared_identity_canonicalizes_outputs_and_separates_execution_inputs() {
+        let make = || ExecAction {
+            argv: vec!["tool".into()],
+            display: "label".into(),
+            env: BTreeMap::new(),
+            config_digest: "config".into(),
+            input_digest: "input".into(),
+            outputs: vec![
+                ExecIoSpec {
+                    path: Some("a".into()),
+                    kind: "file".into(),
+                    digest: None,
+                    named_cache: None,
+                },
+                ExecIoSpec {
+                    path: Some("b".into()),
+                    kind: "file".into(),
+                    digest: None,
+                    named_cache: None,
+                },
+            ],
+            tools: vec![],
+            cores: 1,
+            impure: false,
+            force_cache: false,
+            no_cache: false,
+            sandbox_retention: SandboxRetention::OnFailure,
+            allow_failure: true,
+        };
+        let base = prepared_action_key("workspace", &make()).unwrap();
+        let mut reordered = make();
+        reordered.outputs.reverse();
+        reordered.display = "different".into();
+        reordered.allow_failure = false;
+        assert_eq!(base, prepared_action_key("workspace", &reordered).unwrap());
+        assert_ne!(base, prepared_action_key("other", &make()).unwrap());
+        for variant in 0..7 {
+            let mut action = make();
+            match variant {
+                0 => action.argv.push("changed".into()),
+                1 => {
+                    action.env.insert("KEY".into(), "value".into());
+                }
+                2 => action.config_digest = "other".into(),
+                3 => action.input_digest = "other".into(),
+                4 => action.outputs[0].path = Some("other".into()),
+                5 => {
+                    action.outputs[0].named_cache = Some(imp_store::cache::OutputNamedCache {
+                        name: "tools".into(),
+                        key: "v1".into(),
+                        shared: true,
+                    })
+                }
+                _ => action.tools.push(ExecToolSpec {
+                    name: "tool".into(),
+                    cache: "native".into(),
+                    key: "digest".into(),
+                    path: PathBuf::from("tool"),
+                    bin_dirs: vec![],
+                }),
+            }
+            assert_ne!(
+                base,
+                prepared_action_key("workspace", &action).unwrap(),
+                "variant {variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_identity_ignores_display_but_tracks_command_environment_and_configuration() {
+        let mut first = run_opts(&["sh", "-c", "true"], &[], &["out"]);
+        let env = BTreeMap::new();
+        let original = live_action_digest(&first, &env).unwrap();
+        first.display = "another label".into();
+        assert_eq!(original, live_action_digest(&first, &env).unwrap());
+        first.argv.push("changed".into());
+        assert_ne!(original, live_action_digest(&first, &env).unwrap());
+        first.argv.pop();
+        let mut changed_env = env.clone();
+        changed_env.insert("MODE".into(), "changed".into());
+        assert_ne!(original, live_action_digest(&first, &changed_env).unwrap());
+        first.config_digest = "different".into();
+        assert_ne!(original, live_action_digest(&first, &env).unwrap());
     }
 
     #[test]

@@ -2501,8 +2501,8 @@ return {
             .unwrap();
         assert_eq!(
             live.luau.borrow().action_count(),
-            2,
-            "named selection must run its producer and selected child only"
+            1,
+            "equivalent producer and child actions share execution"
         );
 
         run_goal_live(
@@ -2515,8 +2515,8 @@ return {
         .unwrap();
         assert_eq!(
             live.luau.borrow().action_count(),
-            5,
-            "the two selected children must share one producer execution"
+            2,
+            "equivalent child and producer actions share execution"
         );
 
         run_goal_live(&live, workspace, "package", &["//:targets".to_owned()])

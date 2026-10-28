@@ -403,7 +403,20 @@ requests, then returns result tables in request order. Each table contains
 If requests fail, the call waits for all results and raises the first error
 in request order. `allow_failure` applies to each request. A task can catch
 the batch error with `pcall`. Program descriptions cannot call this method.
-Concurrent identical requests do not have an execution-sharing guarantee.
+Within one graph invocation, equivalent cache-enabled actions share one
+execution and its completed outcome. This includes requests from separate task
+handles. Identity includes arguments, effective environment, configuration,
+tools, input contents, output specifications, named-cache bindings, and workspace
+ownership. Display text and caller failure policy do not change identity.
+The first request supplies the scheduler label and core budget. Each caller
+applies its own `allow_failure` policy and receives its own result table.
+Failures remain shared until the invocation ends; a later invocation can retry.
+Uncached actions run independently. Invocation cancellation applies to all waiters.
+
+Action sharing differs from task result reuse, which uses the declared task
+handle and its relevant configuration. Persistent cache reuse can avoid execution
+across invocations. Shared consumers do not count as additional cache hits.
+Test fakes record requests and do not simulate execution sharing.
 
 `exec.action({ cores = n })` requests a core budget for one action. The default
 is 1. The value must be a whole number from 1 through 4294967295. Other values
