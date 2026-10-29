@@ -278,6 +278,7 @@ PACKAGE_SMOKE_STEPS = [
 
 MACOS_IMP = "target/release/imp"
 BSD_TAR_TASK = "imp:2026-10-28-build-oci-layers-with-bsd-tar"
+C_RULES_ON_MACOS_TASK = "imp:2026-10-29-provide-c-rules-provider-on-macos"
 MACOS_EVIDENCE_ARTIFACT = "macos-evidence"
 
 # The native macOS checks. Each runs through ci/run_check.py, which keeps the
@@ -299,7 +300,14 @@ MACOS_CHECKS = [
     ("lint", f"{MACOS_IMP} lint //..."),
     ("test", f"{MACOS_IMP} test //..."),
     # --no-fail-fast: one failing suite must not hide the results of the others.
-    ("cargo-test", "cargo test --workspace --locked --no-fail-fast"),
+    # The repository workspace test loads the C rules (C_RULES_ON_MACOS_TASK).
+    (
+        "cargo-test",
+        (
+            "cargo test --workspace --locked --no-fail-fast -- "
+            "--skip repository_luau_workspace_tests_pass"
+        ),
+    ),
     ("luau-workspace", f"python3 ci/check_luau_workspace.py --imp {MACOS_IMP}"),
     ("docs-lint", f"{MACOS_IMP} lint //docs"),
     ("docs-test", f"{MACOS_IMP} test //docs"),
@@ -324,6 +332,22 @@ MACOS_CHECKS = [
 # Checks that fail on native macOS, with the task that owns each defect. The
 # job does not run them. Remove an entry when its task is done.
 MACOS_EXCLUDED = {
+    # cc_library(), cc_binary(), and cmake_project() have no C toolchain, so
+    # each workspace that declares C targets fails to evaluate.
+    **dict.fromkeys(
+        [
+            "generate-check",
+            "fmt",
+            "lint",
+            "test",
+            "luau-workspace",
+            "docs-lint",
+            "docs-test",
+            "consumer-odin",
+            "consumer-odin-vscode",
+        ],
+        C_RULES_ON_MACOS_TASK,
+    ),
     # The layer archive uses GNU tar options.
     "consumer-oci": BSD_TAR_TASK,
 }

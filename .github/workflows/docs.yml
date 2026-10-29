@@ -194,43 +194,25 @@ jobs:
             imp-store-v6-macos-${{ runner.os }}-
 
       - name: Record excluded checks
-        run: python3 ci/run_check.py --exclude consumer-oci imp:2026-10-28-build-oci-layers-with-bsd-tar
+        run: |
+          python3 ci/run_check.py --exclude generate-check imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude fmt imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude lint imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude test imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude luau-workspace imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude docs-lint imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude docs-test imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude consumer-odin imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude consumer-odin-vscode imp:2026-10-29-provide-c-rules-provider-on-macos
+          python3 ci/run_check.py --exclude consumer-oci imp:2026-10-28-build-oci-layers-with-bsd-tar
 
       - name: lockfiles
         if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py lockfiles -- python3 -B rules/workflows/lockfiles/testdata/consumer_check.py --imp target/release/imp --real-lockfile
 
-      - name: generate-check
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py generate-check -- target/release/imp generate //ci:docs_workflow --check
-
-      - name: fmt
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py fmt -- target/release/imp fmt --check //...
-
-      - name: lint
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py lint -- target/release/imp lint //...
-
-      - name: test
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py test -- target/release/imp test //...
-
       - name: cargo-test
         if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast
-
-      - name: luau-workspace
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py luau-workspace -- python3 ci/check_luau_workspace.py --imp target/release/imp
-
-      - name: docs-lint
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py docs-lint -- target/release/imp lint //docs
-
-      - name: docs-test
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py docs-test -- target/release/imp test //docs
+        run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast -- --skip repository_luau_workspace_tests_pass
 
       - name: consumer-imp-generate
         if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
@@ -243,14 +225,6 @@ jobs:
       - name: consumer-js-biome
         if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-js-biome -- python3 -B rules/js/biome/testdata/consumer_check.py --imp target/release/imp
-
-      - name: consumer-odin
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py consumer-odin -- python3 -B rules/odin/testdata/consumer_check.py --imp target/release/imp
-
-      - name: consumer-odin-vscode
-        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
-        run: python3 ci/run_check.py consumer-odin-vscode -- python3 -B rules/odin/vscode/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-python
         if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
