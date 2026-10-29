@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,24 @@ def inventory(root):
     return builds
 
 
+def converter_tests(root):
+    # The converter tests need uv to fetch their Tree-sitter dependencies.
+    if shutil.which("uv"):
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "--quiet",
+                "--script",
+                str(root / "probes/js-luau-conversion/convert_test.py"),
+            ],
+            cwd=root,
+            check=True,
+        )
+    else:
+        print("Skipped the JavaScript-to-Luau converter tests: uv is not on PATH.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--imp", type=Path, required=True)
@@ -51,6 +70,7 @@ def main():
     binary = args.imp.resolve()
     root = Path.cwd()
     builds = inventory(root)
+    converter_tests(root)
     env = os.environ.copy()
 
     def run(*arguments):
