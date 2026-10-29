@@ -369,10 +369,10 @@ pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBu
                 return Ok(root);
             }
         }
-        let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&resolved, &link)
-            .with_context(|| format!("symlink {} -> {}", link.display(), resolved.display()))?;
+        replace_symlink(&resolved, &link)?;
+        #[cfg(not(unix))]
+        let _ = std::fs::remove_file(&link);
         #[cfg(windows)]
         {
             // A real symlink, not a hard link: Windows resolves it at the
@@ -393,6 +393,28 @@ pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBu
         }
     }
     Ok(root)
+}
+
+/// Point `link` at `target`, replacing any existing entry in one step.
+///
+/// Many imp processes can share one cache root and register the same tool at
+/// the same time. Remove-then-create lets a second process create the link
+/// between the two steps, and the first process then fails with `EEXIST`.
+/// A rename of a new link over `link` is atomic, so each process sees either
+/// the old entry or the new one.
+#[cfg(unix)]
+fn replace_symlink(target: &Path, link: &Path) -> Result<()> {
+    static LINK_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let temp = temp_sibling_path(
+        link,
+        &format!("link{}", LINK_COUNTER.fetch_add(1, Ordering::Relaxed)),
+    );
+    std::os::unix::fs::symlink(target, &temp)
+        .with_context(|| format!("symlink {} -> {}", temp.display(), target.display()))?;
+    std::fs::rename(&temp, link).map_err(|err| {
+        let _ = std::fs::remove_file(&temp);
+        anyhow::Error::new(err).context(format!("rename {} -> {}", temp.display(), link.display()))
+    })
 }
 
 #[cfg(windows)]
@@ -1539,6 +1561,44 @@ mod tests {
     fn artifact_relative_path_rejects_parent_components() {
         assert!(artifact_relative_path("../escape").is_err());
         assert!(artifact_relative_path("a/../b").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replace_symlink_survives_concurrent_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("tool");
+        std::fs::write(&target, b"").unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(root.path().join("stale"), &link).unwrap();
+
+        for _ in 0..20 {
+            let _ = std::fs::remove_file(&link);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let (barrier, target, link) = (barrier.clone(), target.clone(), link.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        replace_symlink(&target, &link)
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+            assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        }
+
+        std::os::unix::fs::symlink(root.path().join("stale"), root.path().join("old")).unwrap();
+        replace_symlink(&target, &root.path().join("old")).unwrap();
+        assert_eq!(std::fs::read_link(root.path().join("old")).unwrap(), target);
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "temp links left: {leftovers:?}");
     }
 
     // `ensure_structural_children` is exercised directly against a throwaway
