@@ -276,7 +276,6 @@ PACKAGE_SMOKE_STEPS = [
     {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
 ]
 
-PUSH_BRANCHES = ["main"]
 MACOS_IMP = "target/release/imp"
 GCC_ON_MACOS_TASK = "imp:2026-10-28-load-odin-rules-without-gcc-on-macos"
 BSD_TAR_TASK = "imp:2026-10-28-build-oci-layers-with-bsd-tar"
@@ -350,8 +349,28 @@ MACOS_EXCLUDED = {
 }
 
 
+# Each check runs even when an earlier check fails, so that the evidence has a
+# result for every check. The gate step then fails the job. The checks do not
+# run when the build of imp fails.
+MACOS_CHECK_IF = "${{ !cancelled() && steps.build-imp.outcome != 'failure' }}"
+
+
 def macos_check_step(name, command):
-    return {"name": name, "run": f"python3 ci/run_check.py {name} -- {command}"}
+    return {
+        "name": name,
+        "if": MACOS_CHECK_IF,
+        "run": f"python3 ci/run_check.py {name} -- {command}",
+    }
+
+
+def macos_exclusion_step():
+    return {
+        "name": "Record excluded checks",
+        "run": "\n".join(
+            f"python3 ci/run_check.py --exclude {name} {task}"
+            for name, task in MACOS_EXCLUDED.items()
+        ),
+    }
 
 
 def macos_check_steps():
@@ -368,6 +387,7 @@ def macos_package_smoke_steps():
     return [
         {
             "name": "Stage release tree",
+            "if": MACOS_CHECK_IF,
             "run": (
                 "mkdir -p stage/bin stage/share/imp\n"
                 f"cp {MACOS_IMP} stage/bin/imp\n"
@@ -392,13 +412,20 @@ MACOS_STEPS = [
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
     {
         "name": "Build imp",
+        "id": "build-imp",
         "if": IMP_BINARY_CACHE_MISS,
         "run": "cargo build --release --locked --manifest-path crates/imp/Cargo.toml",
     },
     cache_toolchains_step("macos", MACOS_CACHE_ROOT),
     cache_imp_step("macos", MACOS_CACHE_ROOT),
+    macos_exclusion_step(),
     *macos_check_steps(),
     *macos_package_smoke_steps(),
+    {
+        "name": "Gate on check results",
+        "if": MACOS_CHECK_IF,
+        "run": "python3 ci/run_check.py --gate",
+    },
     {
         "name": "Upload macOS evidence",
         "if": "always()",
@@ -787,7 +814,7 @@ def render_workflow():
         "",
         "on:",
         "  push:",
-        f"    branches: [{', '.join(PUSH_BRANCHES)}]",
+        "    branches: [main]",
         "  pull_request:",
         "",
         "permissions:",

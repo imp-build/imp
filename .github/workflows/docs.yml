@@ -171,6 +171,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build imp
+        id: build-imp
         if: steps.imp-binary.outputs.cache-hit != 'true'
         run: cargo build --release --locked --manifest-path crates/imp/Cargo.toml
 
@@ -192,29 +193,56 @@ jobs:
             imp-store-v6-macos-${{ runner.os }}-${{ hashFiles('imp.workspace.luau', 'imp.workspace.ci.luau', 'rules/**/*.lock') }}-
             imp-store-v6-macos-${{ runner.os }}-
 
+      - name: Record excluded checks
+        run: |
+          python3 ci/run_check.py --exclude generate-check imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude fmt imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude lint imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude test imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude luau-workspace imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude docs-lint imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude docs-test imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude consumer-odin imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude consumer-odin-vscode imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude consumer-treesitter imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude package-smoke imp:2026-10-28-load-odin-rules-without-gcc-on-macos
+          python3 ci/run_check.py --exclude consumer-oci imp:2026-10-28-build-oci-layers-with-bsd-tar
+
       - name: lockfiles
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py lockfiles -- python3 -B rules/workflows/lockfiles/testdata/consumer_check.py --imp target/release/imp --real-lockfile
 
       - name: cargo-test
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py cargo-test -- cargo test --workspace --locked --no-fail-fast -- --skip repository_luau_workspace_tests_pass
 
       - name: consumer-imp-generate
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-imp-generate -- python3 -B rules/imp/testdata/generate_consumer_check.py --imp target/release/imp
 
       - name: consumer-js
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-js -- python3 -B rules/js/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-js-biome
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-js-biome -- python3 -B rules/js/biome/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-python
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-python -- python3 -B rules/python/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-python-ruff
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-python-ruff -- python3 -B rules/python/ruff/testdata/consumer_check.py --imp target/release/imp
 
       - name: consumer-zola
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
         run: python3 ci/run_check.py consumer-zola -- python3 -B rules/zola/testdata/consumer_check.py --imp target/release/imp
+
+      - name: Gate on check results
+        if: ${{ !cancelled() && steps.build-imp.outcome != 'failure' }}
+        run: python3 ci/run_check.py --gate
 
       - name: Upload macOS evidence
         if: always()
