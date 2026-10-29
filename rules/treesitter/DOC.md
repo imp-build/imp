@@ -25,6 +25,8 @@ that handle and the grammar's `archive` handle as task inputs, then stage
 both in the action that runs the executable.
 
 The package compiles the grammar C sources with the default GCC toolchain.
+On macOS, it uses the host `cc` from `@imp/rules/c/host`. On a platform with
+neither, the module loads, but a grammar build fails with an error.
 It does not use the precompiled JSON library in the source tree. The Odin
 grammar also compiles its external scanner. The Rust sources, manifests,
 and lockfile come from the installed rules tree. Consumer workspaces do not

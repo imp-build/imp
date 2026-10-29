@@ -147,9 +147,10 @@ unverified download. `imp @odin` and `imp @odinfmt` select the current defaults
 when their modules are loaded.
 
 Odin and odinfmt releases cover Linux and macOS on x86_64 and aarch64, and
-Windows on x86_64. The package rule also requires the managed GCC linker
-provider. Its current platform limits apply; a compiler release alone does
-not establish package execution on that platform.
+Windows on x86_64. On Linux and Windows, the package rule also requires the
+managed GCC linker provider. Its current platform limits apply; a compiler
+release alone does not establish package execution on that platform. On
+macOS, the package rule links with the host `clang` from `@imp/rules/c/host`.
 
 ## Add native dependencies and generated sources
 
@@ -171,7 +172,8 @@ Windows, `lld_on_windows = true` selects bundled lld-link. Add `mingw_crt = true
 only when the native dependencies require MinGW CRT archives. Without that
 option, Odin retains its normal CRT selection. `unsafe_system_paths = true`
 on a package selects GCC aliases that bypass the host-path guard. This option
-does not propagate from dependency packages.
+does not propagate from dependency packages. It has no effect on macOS,
+because the host `clang` always uses the host paths.
 
 `generated_srcs` accepts codegen results or `{ artifact, path }` entries. An
 entry's `path` is relative to the package directory. The producing action's

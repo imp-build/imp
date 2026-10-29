@@ -100,6 +100,18 @@ return {
 			assert(contains(action.argv[3], "--remap-path-prefix") and #host.workers == 1)
 		end)
 	end),
+	core.test.case("Cargo on macOS links through the host cc", function()
+		core.test.with_fake_toolchain_host({ os = "macos", arch = "aarch64" }, function(host)
+			local cc = require("@imp/rules/c/host")
+			local declared = toolchain.rust_toolchain("1.98.1", { link_driver = cc.default_graph_toolchain() })
+			local pkg = rust.cargo_package({ path = "rules/rust/example", bin = "hello", toolchain = declared })
+			resolve(pkg[build.BUILD].hello, function() end)
+			local action = host.runs[#host.runs]
+			assert(table.find(action.tools, "cc") and table.find(action.tools, "ar"), table.concat(action.tools, " "))
+			assert(action.env.CC == "cc", action.env.CC)
+			assert(contains(table.concat(action.argv, " "), "-C linker=cc"))
+		end)
+	end),
 	core.test.case("Cargo generated paths normalize codegen and package-relative inputs", function()
 		local result = generated("rules/rust/example/src/generated.rs")
 		local pkg = rust.cargo_package({

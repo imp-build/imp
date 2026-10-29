@@ -5,19 +5,37 @@ local package = require("@imp/rules/workflows/package")
 local test = require("@imp/rules/workflows/test")
 local rust = require("@imp/rules/rust")
 local gcc = require("@imp/rules/c/gcc")
+local host = require("@imp/rules/c/host")
 local output = core.output
-local gcc_toolchain = gcc.default_graph_toolchain()
+-- gcc where it has a default, else the host compiler on macOS. Nil on other
+-- platforms: then a grammar build fails, but the module still loads.
+local cc_toolchain = gcc.default_graph_toolchain() or host.default_graph_toolchain()
+
+--- The compiler executable of a grammar compile. Call it in a task body.
+local function compiler(exec, cc)
+	if cc == nil then
+		local plat = core.platform_info()
+		error(
+			`no C compiler for Tree-sitter grammars on {plat.os}/{plat.arch}; declare a gcc default with gcc_toolchain(version, \{ default = true \})`,
+			2
+		)
+	end
+	if host.is_host_toolchain(cc_toolchain) then
+		return "cc"
+	end
+	local suffix = if core.platform_info().os == "windows" then ".exe" else ""
+	return `{gcc.graph_toolchain_dir(exec, cc)}/bin/cc{suffix}`
+end
 
 local function grammar_fixture(name, root, include)
 	local sources = core.builtin_files({ root = root, include = include })
 	local output_path = `build/treesitter/{name}.so`
 	local compile = core.task({
 		display = `compile Tree-sitter {name} grammar`,
-		inputs = { sources = sources, gcc = gcc_toolchain.tool },
+		inputs = { sources = sources, cc = cc_toolchain and cc_toolchain.tool },
 		outputs = { archive = output.artifact() },
 		run = function(exec, input)
-			local suffix = if core.platform_info().os == "windows" then ".exe" else ""
-			local argv = { `{gcc.graph_toolchain_dir(exec, input.gcc)}/bin/cc{suffix}`, "-shared", "-fPIC", `-I{root}` }
+			local argv = { compiler(exec, input.cc), "-shared", "-fPIC", `-I{root}` }
 			for _, path in ipairs(exec.paths(input.sources)) do
 				if string.match(path, "%.c$") then
 					table.insert(argv, path)
@@ -28,7 +46,7 @@ local function grammar_fixture(name, root, include)
 			local result = exec.action({
 				argv = argv,
 				inputs = { input.sources },
-				tools = { input.gcc },
+				tools = { input.cc },
 				outputs = { archive = output.file(output_path) },
 			})
 			return { archive = result.outputs.archive }

@@ -134,7 +134,9 @@ Test programs and doctests run without a successful-action cache; compilation
 can use the normal cache. Formatting without `--check` writes the formatted
 sources at the workflow boundary.
 
-On non-Windows hosts, compilation uses the declared GCC link driver. A Rust
+On non-Windows hosts, compilation uses the declared GCC link driver. On macOS,
+where gcc has no release, the default link driver is the host `cc` from
+`@imp/rules/c/host`. A Rust
 toolchain declaration can set `link_driver`, `linker`, and `kache` to Luau
 toolchain values. Kache uses stable absolute cache paths, a persistent worker,
 and local-only storage. Its declaration accepts `cache_size` (default

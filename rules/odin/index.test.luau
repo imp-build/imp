@@ -129,6 +129,17 @@ return {
 			assert(contains(flags, "-extra-linker-flags:/force:multiple") and contains(flags, "libucrt.a"))
 		end, { os = "windows", arch = "x86_64" })
 	end),
+	core.test.case("macOS actions link with the host clang instead of gcc", function()
+		fake(function(host)
+			local tools = require("@imp/rules/odin/toolchain")
+			local provider = tools.odin_toolchain("dev-2026-03")
+			local value = pkg(ROOT, { toolchain = provider, unsafe_system_paths = true })
+			resolve(value[build.BUILD])
+			local build_action = action(host, "odin build " .. ROOT)
+			assert(table.find(build_action.tools, "clang"), table.concat(build_action.tools, " "))
+			assert(build_action.env.PATH == nil, build_action.env.PATH)
+		end, { os = "macos", arch = "aarch64" })
+	end),
 	core.test.case("unsafe system paths select the explicit GCC bypass aliases", function()
 		fake(function(host)
 			local value = pkg(ROOT, { unsafe_system_paths = true })

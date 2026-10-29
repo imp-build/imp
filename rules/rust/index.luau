@@ -8,6 +8,7 @@ local lint = require("@imp/rules/workflows/lint")
 local test = require("@imp/rules/workflows/test")
 local rust = require("./toolchain")
 local gcc = require("@imp/rules/c/gcc")
+local host = require("@imp/rules/c/host")
 local mold = require("@imp/rules/c/mold")
 local kache = require("./kache")
 local codegen = require("@imp/rules/imp/codegen")
@@ -52,10 +53,17 @@ local function tool_inputs(spec, compiling)
 	if compiling then
 		if core.platform_info().os ~= "windows" then
 			if not spec.link_driver then
-				spec.link_driver = spec.declaration.link_driver or gcc.default_graph_toolchain()
+				spec.link_driver = spec.declaration.link_driver
+					or gcc.default_graph_toolchain()
+					or host.default_graph_toolchain()
 			end
 			assert(spec.link_driver, "cargo builds need a GCC default or an explicit link_driver")
-			inputs.gcc = spec.link_driver.tool
+			if host.is_host_toolchain(spec.link_driver) then
+				inputs.host_cc = spec.link_driver.tool
+				inputs.host_ar = spec.link_driver.ar_tool
+			else
+				inputs.gcc = spec.link_driver.tool
+			end
 			inputs.dirname = core.native_tool("dirname")
 			local linker = spec.declaration.linker
 			if linker then
@@ -85,15 +93,18 @@ local function tool_env(exec, input, spec)
 		).env
 	)
 	local flags, dirs = {}, {}
-	if input.gcc then
-		local result = gcc.rust_link_driver_env(exec, input.gcc, active)
-		for key, value in pairs(result.env) do
+	local driver = if input.gcc
+		then gcc.rust_link_driver_env(exec, input.gcc, active)
+		elseif input.host_cc then host.rust_link_driver_env(active)
+		else nil
+	if driver then
+		for key, value in pairs(driver.env) do
 			env[key] = value
 		end
-		for _, value in ipairs(result.rustflags) do
+		for _, value in ipairs(driver.rustflags) do
 			table.insert(flags, value)
 		end
-		for _, value in ipairs(result.path_dirs) do
+		for _, value in ipairs(driver.path_dirs) do
 			table.insert(dirs, value)
 		end
 	end

@@ -2,6 +2,7 @@
 local core = require("@imp/core")
 local tools = require("@imp/rules/odin/toolchain")
 local gcc = require("@imp/rules/c/gcc")
+local host = require("@imp/rules/c/host")
 local mold = require("@imp/rules/c/mold")
 local treesitter = require("@imp/rules/treesitter")
 local codegen = require("@imp/rules/imp/codegen")
@@ -274,11 +275,20 @@ local function test_out_args(paths, plat)
 end
 local function compile(spec, info, source_closure, native, config, kind)
 	local provider = spec.toolchain
-	local cc = gcc.graph_toolchain()
-	if spec.unsafe_system_paths then
+	-- gcc has no macOS build. Odin's darwin link step runs the host clang,
+	-- which always uses the system paths, so `unsafe_system_paths` has no
+	-- effect there.
+	local host_cc = host.default_graph_toolchain()
+	local cc = if host_cc then nil else gcc.graph_toolchain()
+	if cc and spec.unsafe_system_paths then
 		cc = gcc.toolchain_record(gcc.graph_tool(cc.version, { unsafe_system_paths = true }), cc.version)
 	end
-	local inputs = { odin = provider.tool, gcc = cc.tool }
+	local inputs = { odin = provider.tool }
+	if cc then
+		inputs.gcc = cc.tool
+	else
+		inputs.clang = host_cc.clang_tool
+	end
 	local is_lint, is_test = kind == "lint", kind == "test"
 	local linker = if not is_lint then provider.linker else nil
 	if linker then
@@ -364,9 +374,14 @@ local function compile(spec, info, source_closure, native, config, kind)
 			if is_test then
 				append(argv, test_out_args(shared_paths, plat))
 			end
-			local bin_dir = gcc.graph_toolchain_dir(exec, input.gcc)
-				.. (if spec.unsafe_system_paths then "/bin-unsafe-paths" else "/bin")
-			local path_dirs, flags = { bin_dir }, table.clone(native.linkopts)
+			local path_dirs, flags = {}, table.clone(native.linkopts)
+			if input.gcc then
+				table.insert(
+					path_dirs,
+					gcc.graph_toolchain_dir(exec, input.gcc)
+						.. (if spec.unsafe_system_paths then "/bin-unsafe-paths" else "/bin")
+				)
+			end
 			if linker then
 				local env = mold.odin_linker_env(exec, input.mold)
 				append(argv, env.flags)
@@ -383,7 +398,9 @@ local function compile(spec, info, source_closure, native, config, kind)
 				table.insert(argv, "-extra-linker-flags:" .. table.concat(flags, " "))
 			end
 			local env = library_env(shared_paths, plat)
-			env.PATH = table.concat(path_dirs, if plat.os == "windows" then ";" else ":")
+			if #path_dirs > 0 then
+				env.PATH = table.concat(path_dirs, if plat.os == "windows" then ";" else ":")
+			end
 			local result = exec.action({
 				argv = argv,
 				cores = CORES,

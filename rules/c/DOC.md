@@ -114,6 +114,23 @@ The result has a `GEN_LOCKFILES` root, so a BUILD module can export it for
 `imp goal gen-lockfiles`. A lockfile address must start with `@workspace/` or
 `@imp/rules/`.
 
+### Host C compiler on macOS
+
+gcc and Zig have no macOS lockfile entry. On macOS, the Tree-sitter grammar
+compile, the Rust link driver, and the Odin link step use the Apple clang of
+the Xcode Command Line Tools instead.
+
+`@imp/rules/c/host` gives `default_graph_toolchain()`. On macOS, it returns a
+record with the native tool handles `tool` (`cc`), `clang_tool`, and
+`ar_tool`. On other platforms, it returns nil. A task that declares a handle
+as an input finds the tool on its PATH by its bare name.
+`rust_link_driver_env(kache_active)` returns `{ rustflags, env, path_dirs }`
+with the same shape as the gcc function.
+
+This record is not a compiler provider: `cc_library()`, `cc_binary()`, and
+CMake do not accept it. The host compiler uses the host SDK, so its result
+depends on the installed Xcode Command Line Tools.
+
 ### Absolute host paths
 
 Some programs need an absolute path, for example a rustc linker or a path

@@ -277,7 +277,6 @@ PACKAGE_SMOKE_STEPS = [
 ]
 
 MACOS_IMP = "target/release/imp"
-GCC_ON_MACOS_TASK = "imp:2026-10-28-load-odin-rules-without-gcc-on-macos"
 BSD_TAR_TASK = "imp:2026-10-28-build-oci-layers-with-bsd-tar"
 MACOS_EVIDENCE_ARTIFACT = "macos-evidence"
 
@@ -300,14 +299,7 @@ MACOS_CHECKS = [
     ("lint", f"{MACOS_IMP} lint //..."),
     ("test", f"{MACOS_IMP} test //..."),
     # --no-fail-fast: one failing suite must not hide the results of the others.
-    # The repository workspace test loads the Odin rules (GCC_ON_MACOS_TASK).
-    (
-        "cargo-test",
-        (
-            "cargo test --workspace --locked --no-fail-fast -- "
-            "--skip repository_luau_workspace_tests_pass"
-        ),
-    ),
+    ("cargo-test", "cargo test --workspace --locked --no-fail-fast"),
     ("luau-workspace", f"python3 ci/check_luau_workspace.py --imp {MACOS_IMP}"),
     ("docs-lint", f"{MACOS_IMP} lint //docs"),
     ("docs-test", f"{MACOS_IMP} test //docs"),
@@ -332,18 +324,6 @@ MACOS_CHECKS = [
 # Checks that fail on native macOS, with the task that owns each defect. The
 # job does not run them. Remove an entry when its task is done.
 MACOS_EXCLUDED = {
-    # Every workspace that requires the Odin rules fails to evaluate.
-    "generate-check": GCC_ON_MACOS_TASK,
-    "fmt": GCC_ON_MACOS_TASK,
-    "lint": GCC_ON_MACOS_TASK,
-    "test": GCC_ON_MACOS_TASK,
-    "luau-workspace": GCC_ON_MACOS_TASK,
-    "docs-lint": GCC_ON_MACOS_TASK,
-    "docs-test": GCC_ON_MACOS_TASK,
-    "consumer-odin": GCC_ON_MACOS_TASK,
-    "consumer-odin-vscode": GCC_ON_MACOS_TASK,
-    "consumer-treesitter": GCC_ON_MACOS_TASK,
-    "package-smoke": GCC_ON_MACOS_TASK,
     # The layer archive uses GNU tar options.
     "consumer-oci": BSD_TAR_TASK,
 }
