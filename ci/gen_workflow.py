@@ -818,10 +818,7 @@ def render_workflow():
         "",
         "on:",
         "  push:",
-        # Temporary: pushes to the migration branch start the workflow, so
-        # the macOS job can run before the branch merges. Remove the
-        # migration branch before the merge.
-        "    branches: [main, luau-runtime-migration]",
+        "    branches: [main]",
         "  pull_request:",
         "",
         "permissions:",
