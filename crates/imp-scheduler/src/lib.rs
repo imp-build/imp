@@ -32,9 +32,8 @@ struct DispatchPoolInner {
     size: usize,
     /// How many worker threads have been created so far (monotonic).
     spawned: AtomicUsize,
-    /// How many currently-live worker threads are parked in `recv()` right
-    /// now. Read as a cheap heuristic for "does a burst need a new thread,"
-    /// not as an exact count — see `grow_if_needed`.
+    /// Free worker threads minus queued jobs: how many workers no queued job
+    /// has claimed. Exact below `size` — see `grow_if_needed`.
     idle: AtomicUsize,
 }
 
@@ -47,7 +46,7 @@ struct DispatchPoolInner {
 /// running at full pool-sized parallelism, unthrottled.
 ///
 /// Threads are grown lazily, one at a time, only when a submission finds no
-/// worker currently idle — not spawned eagerly up front. One `Scheduler` (one
+/// unclaimed worker — not spawned eagerly up front. One `Scheduler` (one
 /// pool) lives for a whole build in production, so eager-vs-lazy doesn't
 /// matter there; it matters a great deal in this crate's own test suite,
 /// which constructs a fresh `Scheduler` per test — eager spawning turned
@@ -73,13 +72,28 @@ impl DispatchPool {
         Self { sender: tx, inner }
     }
 
-    /// Spawn one more worker thread if no worker looks idle right now and
-    /// there's still headroom under `size`. A submission racing another
-    /// submission's idle-check can under- or over-grow by one thread; that's
-    /// fine — this only tunes how many threads exist, never correctness (a
-    /// job left in the channel is picked up by any worker, existing or new).
+    /// Claim one unclaimed worker for the job that is about to be queued, or
+    /// spawn a new worker for it while there is headroom under `size`.
+    ///
+    /// The claim must be exact. If a busy worker is counted as idle, a later
+    /// job stays in the channel while the pool has headroom. The later job
+    /// then waits for the busy worker, and the build loses parallelism. If the
+    /// busy job waits for the later job to start (the action batch test probe
+    /// does this), the two jobs deadlock. For this reason, a worker does not
+    /// change `idle` when it takes a job; it adds one only when it becomes
+    /// free again. A new worker starts claimed by the job that spawned it. At
+    /// `size`, a job queues with no claim and `idle` can count one too many.
+    /// The pool cannot grow then, so the count only stops a spawn that cannot
+    /// occur.
     fn grow_if_needed(&self) {
-        if self.inner.idle.load(Ordering::SeqCst) > 0 {
+        let claimed = self
+            .inner
+            .idle
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idle| {
+                idle.checked_sub(1)
+            })
+            .is_ok();
+        if claimed {
             return;
         }
         let spawned_before = self.inner.spawned.fetch_add(1, Ordering::SeqCst);
@@ -90,13 +104,10 @@ impl DispatchPool {
         let inner = Arc::clone(&self.inner);
         std::thread::Builder::new()
             .name(format!("imp-scheduler-{spawned_before}"))
-            .spawn(move || loop {
-                inner.idle.fetch_add(1, Ordering::SeqCst);
-                let job = inner.receiver.recv();
-                inner.idle.fetch_sub(1, Ordering::SeqCst);
-                match job {
-                    Ok(job) => job(),
-                    Err(_) => break,
+            .spawn(move || {
+                while let Ok(job) = inner.receiver.recv() {
+                    job();
+                    inner.idle.fetch_add(1, Ordering::SeqCst);
                 }
             })
             .expect("spawn scheduler dispatch worker thread");
@@ -1081,6 +1092,31 @@ mod tests {
             "dispatch pool must reuse a fixed set of threads, saw {seen} distinct threads for {} jobs",
             JOBS * 5
         );
+    }
+
+    /// A queued job must get a worker while an earlier job runs. Job `a`
+    /// blocks until job `b` starts. When the pool counted the worker that was
+    /// taking `a` as idle, it spawned no thread for `b`, and `b` stayed in the
+    /// channel until `a` gave up. The race window is small, so the test
+    /// repeats it. The receive timeout only stops a hang; it is not the result.
+    #[tokio::test]
+    async fn dispatch_pool_gives_a_queued_job_a_worker_while_another_blocks() {
+        use std::time::Duration;
+        for iteration in 0..2000 {
+            let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = Scheduler::new(2, Arc::new(AtomicBool::new(false)), tx);
+            let (b_started, b_started_rx) = std::sync::mpsc::channel::<()>();
+            let a = scheduler.run(None, "a", TaskKind::Sandbox, 1, move |_context| {
+                Ok(b_started_rx.recv_timeout(Duration::from_secs(10)).is_ok())
+            });
+            let b = scheduler.run(None, "b", TaskKind::Sandbox, 1, move |_context| {
+                let _ = b_started.send(());
+                Ok(())
+            });
+            let (a, b) = tokio::join!(a, b);
+            b.unwrap();
+            assert!(a.unwrap(), "job b had no worker in iteration {iteration}");
+        }
     }
 
     /// A job whose closure panics must be reported as a normal error, not

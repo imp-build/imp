@@ -12895,14 +12895,12 @@ return core.task({
             gate.started();
             let index: usize = action.argv[0].parse()?;
             self.started.send(index).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            // The timed wait only polls the cancellation flag. It does not
+            // decide the result: the probe waits until the test releases it.
             let mut released = self.released.lock().unwrap();
             while !released[index] {
                 if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                     bail!("probe canceled");
-                }
-                if std::time::Instant::now() >= deadline {
-                    bail!("probe release timed out");
                 }
                 released = self
                     .wake
@@ -13061,14 +13059,19 @@ end }})
                     release(0); release(1);
                 }
                 execution.await
-            }).await.unwrap_or_else(|_| panic!("batch probe timed out: {mode}"));
+            }).await.unwrap_or_else(|_| {
+                // Cancel to stop the blocked probe threads before the failure.
+                cancellation.store(true, Ordering::SeqCst);
+                panic!("batch probe timed out: {mode}")
+            });
             if mode == "failure" {
                 let error = format!("{:#}", result.unwrap_err());
                 assert!(error.contains("first") && error.contains("3"), "{error}");
             } else if mode.starts_with("cancel") {
-                assert!(format!("{:#}", result.unwrap_err()).contains("cancel"));
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("cancel"), "{mode}: {error}");
             } else {
-                result.unwrap();
+                result.unwrap_or_else(|error| panic!("{mode}: {error:#}"));
             }
             assert_eq!(scheduler.outstanding(), 0, "{mode}");
         }
