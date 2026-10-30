@@ -14,6 +14,14 @@ return {
 		assert(type(both[fmt.FMT]) == "userdata" and type(both[lint.LINT]) == "userdata")
 		assert(table.isfrozen(both))
 	end),
+	core.test.case("lint import adds an immutable lint root to js_app", function()
+		local js = require("@imp/rules/js")
+		local lint = require("@imp/rules/workflows/lint")
+		require("@imp/rules/js/biome/lint")
+		local app = js.js_app({ base = "rules/js/example", src = "app", entry = "src/index.js" })
+		assert(type(app[lint.LINT]) == "userdata")
+		assert(table.isfrozen(app))
+	end),
 	core.test.case("lint import does not enable formatting", function()
 		local js = require("@imp/rules/js")
 		local fmt = require("@imp/rules/workflows/fmt")

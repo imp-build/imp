@@ -11075,6 +11075,91 @@ return { assets = declared }
     }
 
     #[tokio::test]
+    async fn luau_build_goal_writes_no_workspace_files_for_selected_roots() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local asset = require("@imp/rules/asset")
+local build = require("@imp/rules/workflows/build")
+local output = core.output
+
+local generated = core.task({
+    inputs = { sh = core.native_tool("sh") },
+    outputs = { file = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "printf generated > generated.txt" },
+            outputs = { file = output.file("generated.txt") },
+        })
+        return { file = result.outputs.file }
+    end,
+})
+
+return {
+    assets = asset.asset({ srcs = { "*.txt" } }),
+    generated = { [build.BUILD] = generated.outputs.file },
+}
+"#,
+        )
+        .unwrap();
+        fs::write(workspace_root.path().join("payload.txt"), "asset input\n").unwrap();
+        let snapshot = || {
+            walkdir::WalkDir::new(workspace_root.path())
+                .sort_by_file_name()
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let path = entry.path().strip_prefix(workspace_root.path()).unwrap();
+                    let text = entry.file_type().is_file().then(|| {
+                        String::from_utf8_lossy(&fs::read(entry.path()).unwrap()).into_owned()
+                    });
+                    (path.to_path_buf(), text)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+
+        let live = crate::spike::load_workspace_with_rules(
+            workspace_root.path(),
+            crate::loader::RulesSource::discover(),
+        )
+        .await
+        .unwrap();
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(1, Arc::new(AtomicBool::new(false)), events);
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        crate::spike::execute_goal_live(
+            &live,
+            workspace_root.path(),
+            "build",
+            &["//:assets".to_owned(), "//:generated".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            live.luau.borrow().action_count(),
+            2,
+            "both selected roots must build through the Luau host"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "the build goal must not write workspace files"
+        );
+    }
+
+    #[tokio::test]
     async fn luau_configuration_schema_and_dynamic_apis_validate_values() {
         let workspace_root = tempfile::tempdir().unwrap();
         let rules_root = rules_tempdir();

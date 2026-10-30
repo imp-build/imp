@@ -185,15 +185,12 @@
     {
       "source": "rules/asset/index_test.js",
       "replacements": [
-        "crates/imp-engine/src/luau.rs"
+        "crates/imp-engine/src/luau.rs",
+        "rules/asset/index.test.luau"
       ],
       "evidence": [
         "docs/design/luau-catalog-cutover-plan.md"
-      ],
-      "coverage_gap": {
-        "description": "Resource files, explicit base, and path rejection assertions are not all covered by the Rust asset execution test. JavaScript carrier fields do not apply.",
-        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
-      }
+      ]
     },
     {
       "source": "rules/c/BUILD.js",
@@ -796,11 +793,7 @@
       ],
       "evidence": [
         "docs/design/luau-catalog-cutover-plan.md"
-      ],
-      "coverage_gap": {
-        "description": "Lint execution and immutable source roots are covered. An immutable lint root on js_app remains unverified.",
-        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
-      }
+      ]
     },
     {
       "source": "rules/js/biome/toolchain.js",
@@ -1577,15 +1570,12 @@
     {
       "source": "rules/workflows/build/graph_build_test.js",
       "replacements": [
-        "rules/workflows/build/index.luau"
+        "rules/workflows/build/index.luau",
+        "crates/imp-engine/src/luau.rs"
       ],
       "evidence": [
         "docs/design/luau-catalog-cutover-plan.md"
-      ],
-      "coverage_gap": {
-        "description": "The Luau build goal is cache-only, but has no equivalent focused no-workspace-write test.",
-        "follow_up": "imp:2026-10-26-close-retained-catalog-test-gaps"
-      }
+      ]
     },
     {
       "source": "rules/workflows/build/index.js",

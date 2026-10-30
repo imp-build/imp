@@ -90,12 +90,13 @@ def main():
     print("Retained application inputs:")
     for path in manifest["retained_inputs"]:
         print(f"- {path}")
+    gaps = [row for row in manifest["removed_authoring"] if row.get("coverage_gap")]
     print("Coverage gaps (not equivalent coverage or behavior exclusions):")
-    for row in manifest["removed_authoring"]:
-        if gap := row.get("coverage_gap"):
-            print(
-                f"- {row['source']}: {gap['description']} Follow-up: {gap['follow_up']}"
-            )
+    for row in gaps:
+        gap = row["coverage_gap"]
+        print(f"- {row['source']}: {gap['description']} Follow-up: {gap['follow_up']}")
+    if not gaps:
+        print("- none")
     return 0
 
 

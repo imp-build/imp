@@ -26,21 +26,20 @@ untracked, or an unexpected tracked JavaScript or TypeScript file exists.
 It accepts pending Git deletions without reading the removed source.
 Replacement paths establish module ownership, not proof of full test coverage.
 
-The following retained assertions have no verified focused replacement:
+The catalog cleanup left three retained assertions without a focused
+replacement. Peon task `imp:2026-10-26-close-retained-catalog-test-gaps`
+added these tests:
 
-- Asset resource files, explicit source base, and rejection of paths outside
-  the workspace. The Rust asset pilot covers module identity and execution.
+- Asset source and build handles, resource files, explicit source base, and
+  rejection of paths outside the workspace: `rules/asset/index.test.luau`.
   JavaScript carrier-field assertions do not apply to Luau.
-- An immutable lint root for JavaScript application declarations. The Luau
-  Biome formatter suite covers immutable source roots with lint facets; the
-  graph suite covers lint execution and failures.
-- The cache-only build goal makes no workspace writes for selected roots.
-  The Luau implementation returns without writing, but has no equivalent test.
+- An immutable lint root on `js_app`: `rules/js/biome/fmt.test.luau`.
+- The cache-only build goal makes no workspace writes for selected roots:
+  `luau_build_goal_writes_no_workspace_files_for_selected_roots` in
+  `crates/imp-engine/src/luau.rs`.
 
-These are coverage gaps, not approved behavior exclusions. The user chose
-follow-up work instead of new product tests during this cleanup. Peon task
-`imp:2026-10-26-close-retained-catalog-test-gaps` records the missing assertions
-and existing coverage. Preserve the approved host API exclusions below.
+The removal manifest has no open coverage gaps. Preserve the approved host
+API exclusions below.
 
 ## Catalog cleanup verification
 
@@ -91,9 +90,9 @@ replacement and evidence paths and retains three application inputs. The
 canonical identity, package ownership, graph identity, async execution,
 diagnostics, outputs, toolchains, configuration, and test discovery. Every
 Rust test name cited in its retained-group summary exists in the source.
-Workspace graph exports have CLI and engine tests. Passing checks do not
-establish equivalence for the three retained catalog test gaps listed above.
-Those gaps remain assigned to `imp:2026-10-26-close-retained-catalog-test-gaps`.
+Workspace graph exports have CLI and engine tests. On 2026-10-26, passing
+checks did not establish equivalence for the three retained catalog test gaps
+listed above. A later task closed them.
 
 Tracked Cargo manifests and the lockfile contain no QuickJS reference. The
 resolved Cargo tree contains no QuickJS package. Rust source has no QuickJS
