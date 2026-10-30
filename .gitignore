@@ -15,3 +15,5 @@
 !/probes/js-luau-conversion/removal-manifest.json
 !/probes/js-luau-conversion/convert.py
 !/probes/js-luau-conversion/convert_test.py
+!/probes/js-luau-conversion/compare.py
+!/probes/js-luau-conversion/compare_test.py

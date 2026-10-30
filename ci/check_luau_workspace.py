@@ -45,6 +45,24 @@ def inventory(root):
     return builds
 
 
+def comparison_tests(root):
+    subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            str(root / "probes/js-luau-conversion"),
+            "-p",
+            "compare_test.py",
+        ],
+        cwd=root,
+        check=True,
+    )
+
+
 def converter_tests(root):
     # The converter tests need uv to fetch their Tree-sitter dependencies.
     if shutil.which("uv"):
@@ -71,6 +89,7 @@ def main():
     root = Path.cwd()
     builds = inventory(root)
     converter_tests(root)
+    comparison_tests(root)
     env = os.environ.copy()
 
     def run(*arguments):
