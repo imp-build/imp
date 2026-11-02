@@ -83,7 +83,11 @@ App, test, and workspace declarations accept `python_version` overrides.
 App and test declarations accept `uv_version`; apps also accept `pex_version`,
 `entry_point`, and `extra_pex_args`. Tests accept `test_args`. Extra PEX and
 pytest arguments retain the existing space-separated shell argument behavior.
-`deps` contains native tool handles, declared with `core.native_tool`.
+`deps` may contain native tool handles (`core.native_tool`). Test `deps` may
+also contain artifacts and file sets (`core.files`), for example a built binary
+or test data files. The pytest sandbox stages artifacts and file sets at their
+workspace paths. Imp does not give them to the Ruff hooks, so data files in
+`deps` are not formatted or linted. Put only Python files in `sources`.
 
 App targets expose `sources`, `python_sources`, `root`, and the `BUILD`,
 `PACKAGE`, and `RUN` slots. Tests expose `root` and `TEST`. Source declarations

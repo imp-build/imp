@@ -24,16 +24,26 @@ def check_core(binary, rules):
         (standalone / "BUILD.luau").write_text('return { scripts = require("@imp/rules/python").python_sources({ root = "tools" }) }\n')
         (standalone / "tools").mkdir()
         (standalone / "tools/demo.py").write_text('import sys; print("standalone:" + "|".join(sys.argv[1:]))\n')
-        (root / "imp.workspace.luau").write_text('''require("@imp/rules/workflows/build")
+        (root / "imp.workspace.luau").write_text('''require("@imp/rules/python")
+require("@imp/rules/python/ruff/fmt")
+require("@imp/rules/python/ruff/lint")
+require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/fmt")
+require("@imp/rules/workflows/lint")
 require("@imp/rules/workflows/package")
 require("@imp/rules/workflows/run")
 require("@imp/rules/workflows/test")
 return {}
 ''')
-        (root / "BUILD.luau").write_text('''local python = require("@imp/rules/python")
+        (root / "BUILD.luau").write_text('''local core = require("@imp/core")
+local python = require("@imp/rules/python")
 return {
     app = python.python_app({ entry_point = "hello.__main__", sources = { "src/**/*.py" } }),
     tests = python.python_test({ sources = { "tests/**/*.py" } }),
+    data = python.python_test({
+        sources = { "data_tests/*.py" },
+        deps = { core.files({ include = { "data_tests/blob.bin" } }) },
+    }),
     scripts = python.python_sources({ root = "scripts" }),
     member = python.python_test({ base = "members/packages/app", sources = { "tests/**/*.py" } }),
 }
@@ -44,6 +54,14 @@ return {
     tests = python.python_test({ sources = { "tests/**/*.py" } }),
 }
 ''')
+        # A test data file in deps is staged for pytest, but not for Ruff.
+        (root / "data_tests").mkdir()
+        (root / "data_tests/blob.bin").write_bytes(bytes([0, 159, 255, 10]))
+        (root / "data_tests/test_blob.py").write_text(
+            "from pathlib import Path\n\n\n"
+            "def test_blob():\n"
+            '    assert Path(__file__).with_name("blob.bin").read_bytes() == bytes([0, 159, 255, 10])\n'
+        )
         main_file = root / "src/hello/__main__.py"
         with main_file.open("a") as stream:
             stream.write('\nimport sys\nprint("args:" + "|".join(sys.argv[1:]))\nif "fail" in sys.argv: sys.exit(9)\n')
@@ -66,6 +84,9 @@ return {
         run("run", "//:app", "--", "fail", failure=True, expected="exit code 9")
         run("run", "//native:app", expected="native wheel ok: build=3.13.0")
         run("test", "//:tests", "//native:tests")
+        run("test", "//:data", expected="1/1")
+        run("fmt", "--check", "//:data")
+        run("lint", "//:data")
         run("run", "//:scripts#scripts/demo.py", "--", "one", "two words", expected="demo script args: one two words")
         run("run", "//:scripts#tools/demo.py", "--", "one", "two words", cwd=standalone, expected="standalone:one|two words")
         with main_file.open("a") as stream:

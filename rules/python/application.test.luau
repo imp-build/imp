@@ -93,6 +93,19 @@ return {
 			assert(#core.test.resolve(python.python_test({ base = "rules/python/example" })[test.TEST]) == 0)
 		end)
 	end),
+	core.test.case("test stages file and artifact deps in the pytest action", function()
+		local function input_count(deps)
+			local count
+			core.test.with_fake_toolchain_host(function(host)
+				core.test.resolve(python.python_test({ base = "rules/python/example", deps = deps })[test.TEST])
+				count = action(host, "python test rules/python/example").input_count
+			end)
+			return count
+		end
+		local baseline = input_count({})
+		local data = core.files({ root = "rules/python/example", include = { "scripts/demo.py" } })
+		assert(input_count({ data }) == baseline + 1)
+	end),
 	core.test.case("Windows app and test use Scripts interpreter", function()
 		core.test.with_fake_toolchain_host({ os = "windows", arch = "x86_64" }, function(host)
 			core.test.resolve(python.python_app(options())[build.BUILD])

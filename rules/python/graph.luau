@@ -159,6 +159,12 @@ local function python_test(options)
 		inputs = inputs,
 		outputs = { units = core.output.value() },
 		run = function(exec, input)
+			-- Stage file and artifact deps (for example test data or a built binary).
+			-- The action ignores native tool handles in inputs; they stay tools.
+			local action_inputs = { input.workspace, input.sources }
+			for index in ipairs(spec.deps) do
+				table.insert(action_inputs, input[`dep{index}`])
+			end
 			local result = exec.action({
 				argv = {
 					"sh",
@@ -172,7 +178,7 @@ local function python_test(options)
 					spec.python_version,
 					venv_python(),
 				},
-				inputs = { input.workspace, input.sources },
+				inputs = action_inputs,
 				env = uv.cache_env(exec, input.uv_cache),
 				allow_failure = true,
 			})
