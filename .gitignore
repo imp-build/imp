@@ -17,3 +17,4 @@
 !/probes/js-luau-conversion/convert_test.py
 !/probes/js-luau-conversion/compare.py
 !/probes/js-luau-conversion/compare_test.py
+!/probes/js-luau-conversion/install-imp-luau.sh
