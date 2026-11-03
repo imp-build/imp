@@ -191,6 +191,35 @@ local function fake_spec(options)
 	return replay.cmake_project_spec(options)
 end
 
+-- A spec with the declared gcc and CMake defaults, whose tool handles a
+-- configure task body can resolve under the toolchain host fake.
+local function installable_spec(options)
+	options = options or {}
+	options.path = PROJECT
+	options.toolchain = gcc.graph_toolchain()
+	options.cmake_toolchain = cmake_tools.graph_toolchain()
+	return replay.cmake_project_spec(options)
+end
+
+-- Resolve `configure` under `mode` (nil: no axis override) and return the
+-- argv of its cmake action as one string. The faked configure directory has
+-- no build.ninja, so the task fails after that action. A failed task is not
+-- reused, so each call runs the action again.
+local function configure_argv(host, configure, mode)
+	local before = #host.runs
+	local handle = if mode == nil
+		then configure.outputs.directory
+		else core.configured(configure.outputs.directory, { opt = mode })
+	pcall(core.test.resolve, handle)
+	for index = before + 1, #host.runs do
+		local run = host.runs[index]
+		if run.display == `cmake configure {PROJECT}` then
+			return table.concat(run.argv, " ")
+		end
+	end
+	error(`no cmake configure run for mode {tostring(mode)}`)
+end
+
 -- A stand-in for the configure task: its `directory` output is a faked
 -- action placeholder.
 local function fake_configured()
@@ -684,6 +713,40 @@ return {
 			assert(type(project:get("hello_cmake", BUILD)) == "userdata")
 			assert(type(project:get("hello_cmake_main", TEST, "unit")) == "userdata")
 			assert(type(project:all(PACKAGE)) == "userdata")
+		end),
+
+		core.test.case("opt_cmake_args selects configure arguments by the opt axis", function()
+			core.test.with_fake_toolchain_host(function(host)
+				local configure = replay.configure_cmake_project(installable_spec({
+					cmake_args = { "-DSHARED=ON" },
+					opt_cmake_args = {
+						debug = { "-DCMAKE_BUILD_TYPE=Debug" },
+						release = { "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_CXX_FLAGS=-O3" },
+					},
+				}))
+				local debug = configure_argv(host, configure, "debug")
+				local release = configure_argv(host, configure, "release")
+				local unset = configure_argv(host, configure, nil)
+				assert(contains(debug, "-DSHARED=ON -DCMAKE_BUILD_TYPE=Debug"), debug)
+				assert(not contains(debug, "-O3"), debug)
+				assert(contains(release, "-DSHARED=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-O3"), release)
+				assert(unset == debug, unset)
+			end)
+		end),
+
+		core.test.case("a project without opt_cmake_args has the same configure in every mode", function()
+			core.test.with_fake_toolchain_host(function(host)
+				local configure = replay.configure_cmake_project(installable_spec({ cmake_args = { "-DSHARED=ON" } }))
+				local debug = configure_argv(host, configure, "debug")
+				local release = configure_argv(host, configure, "release")
+				assert(contains(debug, "-DSHARED=ON"), debug)
+				assert(debug == release, release)
+			end)
+		end),
+
+		core.test.case("opt_cmake_args rejects an unknown opt value", function()
+			local message = error_text(fake_spec, { opt_cmake_args = { fast = { "-O3" } } })
+			assert(contains(message, "unknown opt value 'fast'"), message)
 		end),
 
 		core.test.case("cmake_project rejects a zig toolchain", function()

@@ -129,6 +129,43 @@ local function require_cc_toolchain(toolchain)
 	return selected
 end
 
+local OPT_VALUES = { "debug", "release" }
+
+--- Validate and copy the `opt_cmake_args` option: a table of `opt` axis
+--- values ("debug", "release") to lists of extra `cmake -S -B` arguments.
+--- Returns nil when the option is absent, so that the configure task reads
+--- no axis and stays shared across modes.
+local function normalize_opt_cmake_args(value)
+	if value == nil then
+		return nil
+	end
+	if type(value) ~= "table" then
+		error("cmake_project(): opt_cmake_args must be a table of opt values to argument lists", 3)
+	end
+	for key in pairs(value) do
+		if not table.find(OPT_VALUES, key) then
+			error(
+				`cmake_project(): opt_cmake_args has unknown opt value '{tostring(key)}' (expected debug or release)`,
+				3
+			)
+		end
+	end
+	local normalized = {}
+	for _, mode in ipairs(OPT_VALUES) do
+		local args = value[mode] or {}
+		if type(args) ~= "table" then
+			error(`cmake_project(): opt_cmake_args.{mode} must be a list of strings`, 3)
+		end
+		for _, arg in ipairs(args) do
+			if type(arg) ~= "string" then
+				error(`cmake_project(): opt_cmake_args.{mode} must be a list of strings`, 3)
+			end
+		end
+		normalized[mode] = table.freeze(table.clone(args))
+	end
+	return table.freeze(normalized)
+end
+
 --- Normalize the options of `cmake_project()` into the spec that the tasks
 --- of this module take. See `cmake_project` in ./expansion for the options.
 local function cmake_project_spec(options)
@@ -147,6 +184,7 @@ local function cmake_project_spec(options)
 		path = path,
 		build_dir_path = build_dir_path,
 		cmake_args = table.clone(options.cmake_args or {}),
+		opt_cmake_args = normalize_opt_cmake_args(options.opt_cmake_args),
 		srcs_input = core.files({ root = path, include = options.srcs or DEFAULT_SRCS }),
 		extra_input = if #extra_globs > 0 then core.files({ root = path, include = extra_globs }) else nil,
 		dir_keys = dir_keys,
@@ -262,6 +300,11 @@ local function configure_cmake_project(spec)
 		cmake_tool = spec.cmake_toolchain.tool,
 		sed = core.native_tool("sed"),
 	}, spec, "dep")
+	-- Read the `opt` axis only when the project has per-mode arguments. A
+	-- project without them configures once for every mode.
+	if spec.opt_cmake_args ~= nil then
+		inputs.opt_mode = core.semantic.mode("opt")
+	end
 	return core.task({
 		inputs = inputs,
 		outputs = {
@@ -289,6 +332,12 @@ local function configure_cmake_project(spec)
 			}
 			append(argv, configure.compiler_args)
 			append(argv, spec.cmake_args)
+			if spec.opt_cmake_args ~= nil then
+				-- No axis value (an undeclared axis) behaves as debug, as in
+				-- @imp/rules/c.
+				local mode = if input.opt_mode == "release" then "release" else "debug"
+				append(argv, spec.opt_cmake_args[mode])
+			end
 			local action_inputs = { input.srcs }
 			append(action_inputs, dir_input_values(spec, input))
 			append(action_inputs, dep_input_values(spec, input, "dep"))

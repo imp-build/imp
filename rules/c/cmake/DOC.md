@@ -6,8 +6,8 @@ Declare CMake projects and consume their discovered targets through graph expans
 
 `cmake_project(options)` and `cmake_library_dep(project, name, options)`
 declare CMake configuration and replay actions. Options use `snake_case`:
-`build_dir`, `extra_globs`, `cmake_args`, `cmake_toolchain`, and
-`unsafe_system_paths`. Library dependencies accept `include_dirs` and expose
+`build_dir`, `extra_globs`, `cmake_args`, `opt_cmake_args`, `cmake_toolchain`,
+and `unsafe_system_paths`. Library dependencies accept `include_dirs` and expose
 transitive archives, shared libraries, include directories, and linker flags.
 
 The other options (`path`, `srcs`, `dirs`, `deps`, `toolchain`, `linkopts`,
@@ -53,6 +53,30 @@ return {
 # From the repository root, after `cargo build -p imp`:
 target/debug/imp test //rules/c/cmake/example:hello_cmake_main //rules/c/cmake/example:uses_cmake_lib_test
 ```
+
+### Build modes
+
+By default, `cmake_project` reads no mode axis: it configures one time, and
+its `cmake_args` apply in every mode. `opt_cmake_args` gives extra arguments
+for each value of the `opt` axis of `@imp/rules/imp/mode`. They follow
+`cmake_args`. With this option, the configure task reads the axis, so a debug
+and a release invocation configure and replay the project separately. When the
+workspace does not declare the axis, the project uses the `debug` arguments.
+
+```luau
+require("@imp/rules/imp/mode")
+
+local jolt = cmake.cmake_project({
+	cmake_args = { "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON" },
+	opt_cmake_args = {
+		debug = { "-DCMAKE_BUILD_TYPE=Debug" },
+		release = { "-DCMAKE_BUILD_TYPE=Release" },
+	},
+})
+```
+
+Then `imp build //:app --axis opt=release` (or `--profile release`) builds the
+CMake project with its release arguments.
 
 `cmake_project_specs()` returns the declared projects in declaration order.
 The C build generator uses it to find duplicate declarations.

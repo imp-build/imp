@@ -265,6 +265,12 @@ end
 ---   deps                 Artifact handles for configure and replay. The
 ---                        CMake arguments state how the project uses them.
 ---   cmake_args           Extra `cmake -S -B` arguments.
+---   opt_cmake_args       Extra `cmake -S -B` arguments for each value of
+---                        the `opt` mode axis: `{ debug = {...}, release =
+---                        {...} }`. They follow `cmake_args`. With this
+---                        option, configure reads the axis, so each mode
+---                        configures and builds separately. No axis value
+---                        selects `debug`.
 ---   toolchain            A gcc or MSVC provider, or a union. The default
 ---                        is the gcc default. zig is not supported.
 ---   cmake_toolchain      A `graph_toolchain()` of
