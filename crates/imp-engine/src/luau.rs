@@ -579,6 +579,11 @@ impl LuauWorkspace {
                 .workspace_modules
                 .insert(canonical.clone());
         }
+        // A BUILD module that another module already required must not run
+        // again: a second run declares each target and task a second time.
+        if let Some(value) = self.loader.cache.borrow().get(&canonical).cloned() {
+            return Ok(value);
+        }
         let source = fs::read_to_string(&path)
             .with_context(|| format!("read Luau module {}", path.display()))?;
         self.loader.stack.borrow_mut().push(canonical.clone());
@@ -595,7 +600,14 @@ impl LuauWorkspace {
                 result.status()
             );
         }
-        Ok(result.values.front().cloned().unwrap_or(LuaValue::Nil))
+        let value = result.values.front().cloned().unwrap_or(LuaValue::Nil);
+        // A later require of this module gets this value; it does not run
+        // the module again.
+        self.loader
+            .cache
+            .borrow_mut()
+            .insert(canonical, value.clone());
+        Ok(value)
     }
 
     /// Evaluate Luau workspace config and BUILD modules, then return their
@@ -7623,6 +7635,54 @@ return {
             assert!(result.is_err(), "{path}: {result:?}");
             assert!(result.unwrap_err().to_string().contains("files({ paths })"));
         }
+    }
+
+    #[tokio::test]
+    async fn build_module_required_by_another_build_module_runs_once() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = rules_tempdir();
+        let task = r#"
+local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+return { app = core.task({ run = function() end }) }
+"#;
+        // The walk evaluates BUILD modules in path order. `a` is evaluated
+        // before `b` requires it, and `c` requires `d` before the walk
+        // evaluates `d`.
+        for (package, source) in [
+            ("a", task.to_owned()),
+            (
+                "b",
+                r#"return { alias = require("@workspace/a/BUILD").app }"#.to_owned(),
+            ),
+            (
+                "c",
+                r#"return { alias = require("@workspace/d/BUILD").app }"#.to_owned(),
+            ),
+            ("d", task.to_owned()),
+        ] {
+            fs::create_dir(root.path().join(package)).unwrap();
+            fs::write(root.path().join(package).join("BUILD.luau"), source).unwrap();
+        }
+        let mut runtime = LuauWorkspace::new(root.path(), rules.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let handle = |address: &str| {
+            roots
+                .iter()
+                .find(|root| root.address == address)
+                .unwrap_or_else(|| panic!("missing root {address}: {roots:?}"))
+                .handle_id
+        };
+        assert_eq!(
+            handle("//a:app"),
+            handle("//b:alias"),
+            "evaluated, then required"
+        );
+        assert_eq!(
+            handle("//d:app"),
+            handle("//c:alias"),
+            "required, then evaluated"
+        );
     }
 
     #[tokio::test]

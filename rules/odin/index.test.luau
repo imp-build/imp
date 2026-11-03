@@ -21,7 +21,7 @@ local function fake(fn, platform)
 	core.test.with_fake_toolchain_host(platform or { os = "linux", arch = "x86_64" }, function(host)
 		host.set_run_stdout(
 			"tree-sitter analyze Odin sources",
-			[=[{"files": {"rules/odin/example/main.odin": {"imports": ["core:fmt"], "hasMainEntrypoint": true}, "rules/odin/example/split/split.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/split/split_test.odin": {"imports": ["core:testing"], "hasMainEntrypoint": false}, "rules/odin/example/staleness/pkg_a/pkg_a.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/staleness/pkg_b/pkg_b.odin": {"imports": ["../pkg_a"], "hasMainEntrypoint": true}, "rules/odin/example/staleness/pkg_b/scanner_fixture.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/collection/app/main.odin": {"imports": ["lib:greet"], "hasMainEntrypoint": true}, "rules/odin/example/collection/vendor/greet/greet.odin": {"imports": ["lib:util"], "hasMainEntrypoint": false}, "rules/odin/example/collection/vendor/util/util.odin": {"imports": [], "hasMainEntrypoint": false}}}]=]
+			[=[{"files": {"rules/odin/example/main.odin": {"imports": ["core:fmt"], "hasMainEntrypoint": true}, "rules/odin/example/split/split.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/split/split_test.odin": {"imports": ["core:testing"], "hasMainEntrypoint": false}, "rules/odin/example/staleness/pkg_a/pkg_a.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/staleness/pkg_b/pkg_b.odin": {"imports": ["../pkg_a"], "hasMainEntrypoint": true}, "rules/odin/example/staleness/pkg_b/scanner_fixture.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/collection/app/main.odin": {"imports": ["lib:greet"], "hasMainEntrypoint": true}, "rules/odin/example/collection/vendor/greet/greet.odin": {"imports": ["lib:util"], "hasMainEntrypoint": false}, "rules/odin/example/collection/vendor/util/util.odin": {"imports": [], "hasMainEntrypoint": false}, "rules/odin/example/cross_module/main/main.odin": {"imports": ["core:fmt", "../gen"], "hasMainEntrypoint": true}, "rules/odin/example/cross_module/gen/gen.odin": {"imports": [], "hasMainEntrypoint": false}}}]=]
 		)
 		fn(host)
 	end)
@@ -202,6 +202,14 @@ return {
 					},
 				})
 			end, "two different")
+		end)
+	end),
+	core.test.case("a relative import reaches a generated package from another BUILD module", function()
+		fake(function(host)
+			local consumer = require("@workspace/rules/odin/example/cross_module/main/BUILD").main
+			resolve(consumer[build.BUILD])
+			-- The main sources, the gen sources, and one generated source.
+			assert(action(host, "odin build " .. ROOT .. "/cross_module/main").input_count == 3)
 		end)
 	end),
 	core.test.case("runtime library paths and Windows test outputs use staged directories", function()
