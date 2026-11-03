@@ -18,6 +18,7 @@ from compare import (
     parse_report,
     parse_targets,
     snapshot,
+    split_ignored,
     written_files,
 )
 
@@ -71,6 +72,26 @@ class ParseTest(unittest.TestCase):
             ],
         )
         self.assertEqual(kinds, ["//:a: resource-package -> graph"])
+
+
+class SplitIgnoredTest(unittest.TestCase):
+    def test_only_shared_matching_paths_move(self):
+        old = {
+            "dist/bin": "a",
+            "dist/only-old": "c",
+            "dist/out.txt": "e",
+            "dist/same": "s",
+        }
+        new = {"dist/bin": "b", "dist/out.txt": "f", "dist/same": "s"}
+        globs = ["dist/b*", "dist/only-*", "dist/s*"]
+        old, new, moved = split_ignored(old, new, globs)
+        self.assertEqual(moved, {"dist/bin": ("a", "b")})
+        self.assertEqual(old, {"dist/only-old": "c", "dist/out.txt": "e"})
+        self.assertEqual(new, {"dist/out.txt": "f"})
+
+    def test_star_matches_slash(self):
+        _, _, moved = split_ignored({"a/b/c": "x"}, {"a/b/c": "y"}, ["a/*"])
+        self.assertEqual(list(moved), ["a/b/c"])
 
 
 class WrittenFilesTest(unittest.TestCase):
@@ -167,6 +188,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertIn("- `test` //:t two: only with new (FAIL)", report)
             self.assertIn("- `build` dist/out.txt:", report)
             self.assertNotIn("dist/same.txt", report)
+            self.assertNotIn("## Ignored", report)
             rows = (out / "summary.tsv").read_text().splitlines()
             self.assertEqual(rows[0], "name\texit\tseconds\tcommand")
             self.assertEqual(len(rows), 1 + 2 * 2 * 3)
@@ -184,6 +206,28 @@ class EndToEndTest(unittest.TestCase):
                 check=True,
             )
             self.assertNotIn(".imp-compare", status.stdout)
+
+    def test_ignore_marks_digest_difference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory, "repo")
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            old, new = self.fake(directory, "old"), self.fake(directory, "new")
+            argv = [str(repo), "--old", old, "--new", new, "--no-cold"]
+            argv += ["--goal", "build", "--ignore", "dist/*"]
+            self.assertEqual(main(argv), 0)
+            report = (repo / ".imp-compare" / "report.md").read_text()
+            self.assertTrue(
+                report.startswith(
+                    "repo: 0 difference(s) "
+                    "(exit 0, targets 0, units 0, outputs 0, ignored 1)"
+                ),
+                report,
+            )
+            ignored = report.split("## Ignored written files (not counted)")[1]
+            self.assertIn("Globs: `dist/*`", ignored)
+            self.assertIn("- `build` dist/out.txt:", ignored)
+            self.assertNotIn("dist/same.txt", ignored)
 
     def test_timeout_stops_the_run_and_its_children(self):
         with tempfile.TemporaryDirectory() as directory:

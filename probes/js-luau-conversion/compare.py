@@ -3,7 +3,7 @@
 
 Usage: compare.py <repository> [--old imp] [--new imp-luau]
                   [--goal "<goal> [<flag>...]"]... [--root <selector>]...
-                  [--no-cold] [--timeout <seconds>]
+                  [--no-cold] [--timeout <seconds>] [--ignore <glob>]...
 
 Both binaries run the same goals on the same sources: the Luau files are
 beside the JavaScript files. For each binary the script runs every goal with
@@ -17,6 +17,12 @@ status of each unit in the test, fmt, and lint reports, and the digests of the
 files that each goal writes into the checkout. It does not compare action or
 cache keys, because they are different between the binaries by design.
 
+Use --ignore for written files that are not deterministic, for example a debug
+binary that contains sandbox paths. The glob applies to the path relative to
+the checkout, and `*` also matches `/`. When both binaries write a matching
+file with different digests, the report shows it as ignored and does not count
+it. A matching file that only one binary writes is still a difference.
+
 The evidence goes to <repository>/.imp-compare/, which git ignores: one log
 for each run, summary.tsv in the format of ci/run_check.py, and report.md.
 The last output line is a one-line summary. The script exits with 0 when it
@@ -26,6 +32,7 @@ finds no differences and with 1 when it finds differences.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import os
 from pathlib import Path
@@ -122,6 +129,26 @@ def diff_maps(old, new, labels, describe):
                 f"{describe(new[key])} with {labels[1]}"
             )
     return differences
+
+
+def split_ignored(old, new, globs):
+    """Remove from `old` and `new` the paths that are in both maps and that
+    match a glob in `globs`. Return the two remaining maps and
+    {path: (old digest, new digest)} for the removed paths with different
+    digests."""
+    shared = {
+        path
+        for path in old.keys() & new.keys()
+        if any(fnmatch.fnmatchcase(path, glob) for glob in globs)
+    }
+    moved = {
+        path: (old[path], new[path])
+        for path in sorted(shared)
+        if old[path] != new[path]
+    }
+    old = {path: sha for path, sha in old.items() if path not in shared}
+    new = {path: sha for path, sha in new.items() if path not in shared}
+    return old, new, moved
 
 
 def snapshot(root):
@@ -260,11 +287,13 @@ def run_binary(repo, out, binary, label, goals, roots, phases, timeout):
     return results
 
 
-def compare(results, labels, goals, phases):
-    """Return {category: [difference]} and the kind changes of the roots."""
+def compare(results, labels, goals, phases, ignore=()):
+    """Return {category: [difference]}, the kind changes of the roots, and the
+    ignored digest differences."""
     old, new = (results[label] for label in labels)
     differences = {"exit": [], "targets": [], "units": [], "outputs": []}
     kinds = []
+    ignored = []
     for phase in phases:
         for goal in goals:
             if old[phase][goal]["exit"] != new[phase][goal]["exit"]:
@@ -293,18 +322,28 @@ def compare(results, labels, goals, phases):
                     str,
                 )
             ]
+        old_written, new_written, moved = split_ignored(
+            a["written"], b["written"], ignore
+        )
         differences["outputs"] += [
             f"`{goal}` {line}"
             for line in diff_maps(
-                a["written"], b["written"], labels, lambda sha: sha[:12]
+                old_written, new_written, labels, lambda sha: sha[:12]
             )
         ]
-    return differences, kinds
+        ignored += [
+            f"`{goal}` {path}: {old_sha[:12]} with {labels[0]}, "
+            f"{new_sha[:12]} with {labels[1]}"
+            for path, (old_sha, new_sha) in moved.items()
+        ]
+    return differences, kinds, ignored
 
 
-def summary_line(repo, differences, results, labels, phases):
+def summary_line(repo, differences, ignored, results, labels, phases):
     total = sum(len(found) for found in differences.values())
     counts = ", ".join(f"{name} {len(found)}" for name, found in differences.items())
+    if ignored:
+        counts += f", ignored {len(ignored)}"
     times = " · ".join(
         f"{phase} "
         + " / ".join(
@@ -317,7 +356,9 @@ def summary_line(repo, differences, results, labels, phases):
     return f"{repo.name}: {total} difference(s) ({counts}) · {times}"
 
 
-def write_report(out, line, differences, kinds, results, labels, phases):
+def write_report(
+    out, line, differences, kinds, ignored, ignore, results, labels, phases
+):
     with open(out / "summary.tsv", "w") as rows:
         rows.write("name\texit\tseconds\tcommand\n")
         for label in labels:
@@ -347,6 +388,11 @@ def write_report(out, line, differences, kinds, results, labels, phases):
         lines += [f"- {item}" for item in found] or ["No differences."]
     lines += ["", "## Root kinds (not counted)", ""]
     lines += [f"- {item}" for item in kinds] or ["No changes."]
+    if ignore:
+        lines += ["", "## Ignored written files (not counted)", ""]
+        lines.append("Globs: " + ", ".join(f"`{glob}`" for glob in ignore))
+        lines.append("")
+        lines += [f"- {item}" for item in ignored] or ["No differences."]
     (out / "report.md").write_text("\n".join(lines) + "\n")
 
 
@@ -371,6 +417,13 @@ def main(argv=None):
     parser.add_argument("--root", action="append", dest="roots")
     parser.add_argument("--no-cold", action="store_true")
     parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="do not count digest differences of written files that match",
+    )
+    parser.add_argument(
         "--timeout", type=float, default=1800, help="seconds for each run"
     )
     args = parser.parse_args(argv)
@@ -386,9 +439,11 @@ def main(argv=None):
         label: run_binary(repo, out, binary, label, goals, roots, phases, args.timeout)
         for label, binary in zip(labels, [args.old, args.new])
     }
-    differences, kinds = compare(results, labels, goals, phases)
-    line = summary_line(repo, differences, results, labels, phases)
-    write_report(out, line, differences, kinds, results, labels, phases)
+    differences, kinds, ignored = compare(results, labels, goals, phases, args.ignore)
+    line = summary_line(repo, differences, ignored, results, labels, phases)
+    write_report(
+        out, line, differences, kinds, ignored, args.ignore, results, labels, phases
+    )
     print(f"report: {out / 'report.md'}")
     print(line)
     return 1 if any(differences.values()) else 0
