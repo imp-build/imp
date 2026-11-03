@@ -24,6 +24,10 @@ package: its `PACKAGE` handle resolves to the executable artifact. Declare
 that handle and the grammar's `archive` handle as task inputs, then stage
 both in the action that runs the executable.
 
+`odin_analyzer` uses the Cargo release profile. The Odin rules run it on
+each change to an Odin source, also for `imp targets`. A debug build of the
+Tree-sitter C library is approximately three times slower.
+
 The package compiles the grammar C sources with the default GCC toolchain.
 On macOS, it uses the host `cc` from `@imp/rules/c/host`. On a platform with
 neither, the module loads, but a grammar build fails with an error.

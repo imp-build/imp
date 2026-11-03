@@ -29,12 +29,16 @@ struct Inner {
     grammar_by_path: BTreeMap<PathBuf, u32>,
     grammars: BTreeMap<u32, LoadedGrammar>,
     trees: BTreeMap<u32, StoredTree>,
+    /// Compiled queries by grammar and query source. A query compile costs
+    /// more than a parse of a typical file, so callers that run the same query
+    /// on many trees compile it one time.
+    queries: BTreeMap<(u32, String), Query>,
 }
 
-/// Registry of dlopen'd grammars and the trees parsed with them. Safe to
-/// share across threads; internally synchronized with a single lock, which
-/// is appropriate for the call volumes this API sees (JS host-function
-/// calls, not a hot inner loop).
+/// Registry of dlopen'd grammars, the trees parsed with them, and compiled
+/// queries. Safe to share across threads; internally synchronized with a
+/// single lock. One analyzer process runs the same queries on many files,
+/// so the registry keeps each compiled query.
 #[derive(Default)]
 pub struct GrammarRegistry {
     inner: Mutex<Inner>,
@@ -145,7 +149,8 @@ impl GrammarRegistry {
         tree_id: u32,
         query_source: &str,
     ) -> Result<Vec<Match>> {
-        let inner = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
         let language = &inner
             .grammars
             .get(&grammar_id)
@@ -156,12 +161,17 @@ impl GrammarRegistry {
             .get(&tree_id)
             .with_context(|| format!("no tree loaded with handle {tree_id}"))?;
 
-        let query = Query::new(language, query_source).context("compile tree-sitter query")?;
+        let key = (grammar_id, query_source.to_owned());
+        let query = match inner.queries.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry
+                .insert(Query::new(language, query_source).context("compile tree-sitter query")?),
+        };
         let capture_names = query.capture_names();
         let source = stored.source.as_bytes();
 
         let mut cursor = QueryCursor::new();
-        let mut matches_iter = cursor.matches(&query, stored.tree.root_node(), source);
+        let mut matches_iter = cursor.matches(query, stored.tree.root_node(), source);
         let mut out = Vec::new();
         while let Some(m) = matches_iter.next() {
             let captures = m

@@ -73,7 +73,10 @@ local luau_reference = rust.cargo_package({ path = "treesitter", bin = "imp-luau
 local imp_treesitter = rust.cargo_package({ path = "treesitter", bin = "treesitter-roundtrip", builtin = true })
 
 --- Declare the Odin analyzer. PACKAGE resolves to its binary artifact.
-local odin_analyzer = rust.cargo_package({ path = "treesitter", bin = "imp-treesitter-parse", builtin = true })
+-- Release profile: the Odin rules run the analyzer on each Odin source change,
+-- also for `imp targets`. Debug Tree-sitter is approximately three times slower.
+local odin_analyzer =
+	rust.cargo_package({ path = "treesitter", bin = "imp-treesitter-parse", builtin = true, release = true })
 
 local roundtrip_run = core.task({
 	display = "Tree-sitter grammar round-trip",

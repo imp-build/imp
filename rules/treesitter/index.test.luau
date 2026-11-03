@@ -70,6 +70,17 @@ return {
 			assert(action.argv[2] == "build/treesitter/json.so" and action.input_count == 2)
 		end)
 	end),
+	core.test.case("Odin analyzer builds with the Cargo release profile", function()
+		core.test.with_fake_toolchain_host(function(host)
+			core.test.resolve(core.task({
+				inputs = { analyzer = treesitter.odin_analyzer[package.PACKAGE] },
+				run = function() end,
+			}))
+			local action = find(host, "cargo build treesitter")
+			assert(table.find(action.argv, "--release"))
+			assert(action.outputs["imp-treesitter-parse"] == "build/rust/treesitter/release/imp-treesitter-parse")
+		end)
+	end),
 	core.test.case("round-trip reports action failures with diagnostics", function()
 		core.test.with_fake_toolchain_host(function(host)
 			host.set_run_exit_code("Tree-sitter grammar round-trip", 1)
