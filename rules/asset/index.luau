@@ -71,15 +71,17 @@ end
 
 --- Capture resource files for use as explicit graph dependencies.
 --- @param options Source globs, base, path, and exclusions.
---- @returns An asset table with a files handle.
+--- @returns A table with sources and a files handle. It has no BUILD root.
 local function resource_package(options)
 	options = options or {}
 	if type(options.srcs) ~= "table" or #options.srcs == 0 then
 		error("resource_package({ srcs }) requires one or more source glob patterns")
 	end
-	local value = asset(options)
-	value.files = value.sources
-	return value
+	local sources = source_files(options, "resource_package")
+	return {
+		sources = sources,
+		files = sources,
+	}
 end
 
 return {

@@ -6,8 +6,9 @@ files without writing build products into the workspace.
 ## Public API
 
 `asset({ srcs, base?, path?, exclude? })` returns `sources` and a BUILD root.
-`resource_package(options)` also exposes the source handle as `files` for
-resource dependencies. Paths must stay within the workspace.
+`resource_package(options)` returns `sources` and the same handle as `files`
+for resource dependencies. It has no BUILD root. Paths must stay within the
+workspace.
 
 **Illustrative example**
 

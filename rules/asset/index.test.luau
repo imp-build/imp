@@ -33,6 +33,10 @@ return {
 		assert(type(value.files) == "userdata", type(value.files))
 		assert(rawequal(value.files, value.sources))
 	end),
+	core.test.case("resource_package has no build root", function()
+		local value = rules.resource_package({ srcs = { "*.luau" } })
+		assert(value[build.BUILD] == nil, "resource_package must not declare a BUILD root")
+	end),
 	core.test.case("resource_package rejects paths outside the workspace", function()
 		for _, options in ipairs({
 			{ srcs = { "*.txt" }, path = "../outside" },

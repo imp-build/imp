@@ -1070,12 +1070,13 @@ lookup; imports use the explicit Imp and workspace addresses defined above.
 
 The installed module `@imp/rules/asset` exports `asset(options)` and
 `resource_package(options)`. Both accept `srcs`, with optional `base`, `path`,
-and `exclude` fields. The module returns `sources`, `BUILD`, and (for
-`resource_package`) `files`. `srcs` contains workspace-relative glob patterns.
+and `exclude` fields. `asset` returns `sources` and `BUILD`.
+`resource_package` returns `sources` and `files` and has no `BUILD` root.
+`srcs` contains workspace-relative glob patterns.
 `asset` accepts an empty source list at declaration time; `resource_package`
 requires at least one pattern.
 
-The `BUILD` task declares the host `sh` executable and runs `sh -c true` with
+The `asset` `BUILD` task declares the host `sh` executable and runs `sh -c true` with
 the matched files as inputs. This verifies graph loading and hermetic action
 execution. It does not create a bundle or output file. The asset rule disables
 action caching. `native_tool("sh")` resolves an executable already on `PATH`;
