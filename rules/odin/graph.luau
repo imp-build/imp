@@ -263,7 +263,10 @@ local function library_env(paths, plat)
 	end
 	return if #dirs > 0 and plat.os == "linux" then { LD_LIBRARY_PATH = table.concat(dirs, ":") } else {}
 end
-local function test_out_args(paths, plat)
+local function executable_file(name, plat)
+	return if plat.os == "windows" then `{name}.exe` else name
+end
+local function test_out_args(paths, plat, name)
 	if #paths == 0 or plat.os ~= "windows" then
 		return {}
 	end
@@ -271,7 +274,7 @@ local function test_out_args(paths, plat)
 	for _, path in ipairs(paths) do
 		assert(dirname(path) == dir, "odin test on Windows cannot load DLLs from more than one directory")
 	end
-	return { `-out:{dir}/output.exe` }
+	return { `-out:{dir}/{executable_file(name, plat)}` }
 end
 local function compile(spec, info, source_closure, native, config, kind)
 	local provider = spec.toolchain
@@ -308,8 +311,8 @@ local function compile(spec, info, source_closure, native, config, kind)
 	end
 	local values = merged_defines(source_closure.specs, config)
 	local plat = core.platform_info()
-	local executable = if plat.os == "windows" then "output.exe" else "output"
-	local output_path = if info.has_main then executable else "output.a"
+	local output_path =
+		`build/odin/{if info.has_main then executable_file(spec.output_name, plat) else `{spec.output_name}.a`}`
 	return core.task({
 		display = `odin {if is_lint then "check -vet" elseif is_test then "test" else "build"} {info.path}`,
 		inputs = inputs,
@@ -372,7 +375,7 @@ local function compile(spec, info, source_closure, native, config, kind)
 				table.insert(argv, `-out:{output_path}`)
 			end
 			if is_test then
-				append(argv, test_out_args(shared_paths, plat))
+				append(argv, test_out_args(shared_paths, plat, spec.output_name))
 			end
 			local path_dirs, flags = {}, table.clone(native.linkopts)
 			if input.gcc then
@@ -430,7 +433,7 @@ local function product_options(spec, info, native)
 	return {
 		namespace = "odin",
 		target_slug = string.gsub(spec.path, "[^%w_]", "_"),
-		executable_name = if core.platform_info().os == "windows" then "output.exe" else "output",
+		executable_name = executable_file(spec.output_name, core.platform_info()),
 		shared_libraries = native.shared,
 		bundle_display = `odin bundle {info.path}`,
 	}
@@ -599,6 +602,8 @@ local function odin_package(options, is_test)
 		test = is_test == true,
 		unsafe_system_paths = options.unsafe_system_paths == true,
 	}
+	spec.output_name =
+		package.output_name(if is_test then "odin_test_package" else "odin_package", spec.path, options.output_name)
 	if #spec.srcs == 0 then
 		spec.srcs = { "*.odin" }
 	end
@@ -662,4 +667,5 @@ return {
 	merged_defines = merged_defines,
 	library_env = library_env,
 	test_out_args = test_out_args,
+	product_options = product_options,
 }

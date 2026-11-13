@@ -57,7 +57,6 @@ local DEFAULT_CPP_HDRS = table.freeze({ "*.h", "*.hh", "*.hpp", "*.hxx" })
 local CXX_EXTENSIONS = table.freeze({ cc = true, cpp = true, cxx = true })
 local SOURCE_EXTENSIONS = table.freeze({ c = true, cc = true, cpp = true, cxx = true })
 local HEADER_EXTENSIONS = table.freeze({ h = true, hh = true, hpp = true, hxx = true })
-local RESERVED_OUTPUT_EXTENSIONS = table.freeze({ a = true, so = true, dll = true, exe = true })
 
 local function extension(path)
 	local found = string.match(path, "%.([^./]+)$")
@@ -112,29 +111,6 @@ local function normalize_workspace_path(path)
 		end
 	end
 	return if #parts == 0 then "." else table.concat(parts, "/")
-end
-
-local function output_slug_for(path)
-	return if path == "." then "root" else (string.gsub(path, "/", "_"))
-end
-
-local function output_name_for(path, output_name)
-	if output_name == nil then
-		return output_slug_for(path)
-	end
-	if
-		type(output_name) ~= "string"
-		or output_name == "."
-		or output_name == ".."
-		or RESERVED_OUTPUT_EXTENSIONS[extension(output_name)] == true
-		or string.match(output_name, "^[%w_%.%-]+$") == nil
-	then
-		error(
-			"C/C++ output_name must be a non-empty portable filename stem containing only A-Z, a-z, 0-9, '.', '_' or '-'",
-			0
-		)
-	end
-	return output_name
 end
 
 -- On Windows, the sh.exe of Git for Windows cuts each argv element at
@@ -223,8 +199,8 @@ local function crate_spec(options)
 		-- The directory slug is the build namespace. `output_name` is an
 		-- optional filename stem for two targets in one directory. Without
 		-- it, the output and cache paths do not change.
-		output_slug = output_slug_for(path),
-		output_name = output_name_for(path, options.output_name),
+		output_slug = package.output_slug(path),
+		output_name = package.output_name("C/C++", path, options.output_name),
 		shared = options.shared == true,
 		-- Skip the path guard of the Bootlin toolchain wrapper, which rejects
 		-- -I and -L flags under /usr/include and /usr/lib. A target that links

@@ -32,7 +32,7 @@ return {
 			local shared = core.files({ root = "rules/odin/example", include = { "main.odin" } })
 			local value = package("rules/odin/example", { deps = { { transitive_shared_libs = { shared } } } })
 			local info = resolve(value[vs.VSCODE])
-			assert(info.has_main and info.executable_path == "output.exe")
+			assert(info.has_main and info.executable_path == "rules_odin_example.exe")
 		end)
 	end),
 

@@ -238,7 +238,7 @@ return {
 
 		core.test.case("output_name rejects stems that are not portable", function()
 			with_cc_host(function()
-				for _, name in ipairs({ "../app", "", "app.exe", "app.A", "lib.so", "..", "a b", 7 }) do
+				for _, name in ipairs({ "../app", "", "app.exe", "app.A", "lib.so", "app.d", "..", "a b", 7 }) do
 					local message = error_text(binary, { output_name = name })
 					assert(contains(message, "C/C++ output_name must be a non-empty portable filename stem"), message)
 				end

@@ -43,6 +43,16 @@ local function action(host, display)
 	end
 	error("missing action " .. display)
 end
+local function spec_at(path)
+	local found
+	for _, spec in ipairs(graph.package_specs()) do
+		if spec.path == path and not spec.test then
+			assert(found == nil, "more than one package at " .. path)
+			found = spec
+		end
+	end
+	return assert(found, "no package at " .. path)
+end
 local function pkg(path, options)
 	options = options or {}
 	options.path = path or ROOT
@@ -123,7 +133,7 @@ return {
 			assert(
 				table.find(build_action.argv, "-linker:lld")
 					and table.find(build_action.argv, "-no-crt")
-					and table.find(build_action.argv, "-out:output.exe")
+					and table.find(build_action.argv, "-out:build/odin/rules_odin_example.exe")
 			)
 			local flags = table.concat(build_action.argv, " ")
 			assert(contains(flags, "-extra-linker-flags:/force:multiple") and contains(flags, "libucrt.a"))
@@ -217,9 +227,75 @@ return {
 		assert(graph.library_env(paths, { os = "linux" }).LD_LIBRARY_PATH == "build/a:build/b")
 		assert(next(graph.library_env(paths, { os = "windows" })) == nil)
 		fails(function()
-			graph.test_out_args(paths, { os = "windows" })
+			graph.test_out_args(paths, { os = "windows" }, "split_tests")
 		end, "more than one directory")
-		assert(graph.test_out_args({ paths[1], paths[2] }, { os = "windows" })[1] == "-out:build/a/output.exe")
+		local out = graph.test_out_args({ paths[1], paths[2] }, { os = "windows" }, "split_tests")
+		assert(out[1] == "-out:build/a/split_tests.exe", out[1])
+	end),
+	core.test.case("output names come from the package path or output_name", function()
+		fake(function(host)
+			resolve(pkg(ROOT)[build.BUILD])
+			assert(table.find(action(host, "odin build " .. ROOT).argv, "-out:build/odin/rules_odin_example"))
+			resolve(pkg(ROOT .. "/split")[build.BUILD])
+			assert(
+				table.find(
+					action(host, "odin build " .. ROOT .. "/split").argv,
+					"-out:build/odin/rules_odin_example_split.a"
+				)
+			)
+			local named = pkg(
+				ROOT .. "/collection/app",
+				{ collections = { lib = ROOT .. "/collection/vendor" }, output_name = "greeter" }
+			)
+			resolve(named[build.BUILD])
+			assert(table.find(action(host, "odin build " .. ROOT .. "/collection/app").argv, "-out:build/odin/greeter"))
+			local spec = spec_at(ROOT .. "/collection/app")
+			local options = graph.product_options(spec, { path = ROOT .. "/collection/app" }, { shared = {} })
+			assert(options.executable_name == "greeter", options.executable_name)
+		end)
+		assert(package.output_slug(".") == "root")
+		assert(package.output_slug("a/b") == "a_b")
+	end),
+	core.test.case("Windows bundles and executables use the output name with .exe", function()
+		fake(function(host)
+			require("@imp/rules/c/gcc").gcc_toolchain("16.2.0posix-14.0.0-ucrt-r1", { default = true })
+			local value = pkg(ROOT, { output_name = "app" })
+			resolve(value[build.BUILD])
+			assert(table.find(action(host, "odin build " .. ROOT).argv, "-out:build/odin/app.exe"))
+			local options = graph.product_options(spec_at(ROOT), { path = ROOT }, { shared = {} })
+			assert(options.executable_name == "app.exe", options.executable_name)
+		end, { os = "windows", arch = "x86_64" })
+	end),
+	core.test.case("Windows test packages write the named executable beside the DLLs", function()
+		fake(function(host)
+			require("@imp/rules/c/gcc").gcc_toolchain("16.2.0posix-14.0.0-ucrt-r1", { default = true })
+			local dll = codegen.stamp_file({ output = "build/native/runtime.dll", text = "" }).file
+			local tested = odin.odin_test_package({
+				base = ".",
+				path = ROOT .. "/split",
+				output_name = "split_tests",
+				deps = { pkg(ROOT .. "/split"), { transitive_shared_libs = { dll } } },
+			})
+			resolve(tested[test.TEST])
+			local argv = action(host, "odin test " .. ROOT .. "/split").argv
+			local out
+			for _, arg in ipairs(argv) do
+				if string.sub(arg, 1, 5) == "-out:" then
+					out = arg
+				end
+			end
+			assert(out ~= nil and string.match(out, "^%-out:.*build/native/split_tests%.exe$") ~= nil, tostring(out))
+		end, { os = "windows", arch = "x86_64" })
+	end),
+	core.test.case("output_name rejects stems that are not portable", function()
+		for _, name in ipairs({ "../app", "", "app.exe", "app.A", "lib.so", "app.d", "..", "a b", 7 }) do
+			fails(function()
+				pkg(ROOT, { output_name = name })
+			end, "odin_package output_name must be a non-empty portable filename stem")
+		end
+		fails(function()
+			odin.odin_test_package({ base = ".", path = ROOT .. "/split", output_name = "a/b" })
+		end, "odin_test_package output_name must be")
 	end),
 	core.test.case("workspace escapes and multiple source directories fail clearly", function()
 		fails(function()

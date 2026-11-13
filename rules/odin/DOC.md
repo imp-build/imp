@@ -72,6 +72,32 @@ imp fmt --check //src/lib:lib
 imp package //src/lib:lib
 ```
 
+### Name build outputs
+
+Each executable or archive has a name. By default, the name is the package
+path slug: the rule replaces each `/` in the package path with `_`. The
+workspace root gives `root`. For example, `odin_package({ path = "examples/rpc" })`
+builds `examples_rpc`. On Windows, the executable is `examples_rpc.exe`. A
+library is `examples_rpc.a`.
+
+Set `output_name` on `odin_package` or `odin_test_package` to use a different
+name:
+
+```lua
+local rpc = odin.odin_package({ path = "examples/rpc", output_name = "rpc_client" })
+```
+
+`output_name` is a filename stem without an extension. It contains only A-Z,
+a-z, 0-9, `.`, `_`, or `-`. It must not end in `.a`, `.so`, `.dll`, `.exe`, or
+`.d`. The rule does not check the default name. If a package path contains
+other characters, set `output_name`.
+
+Run, package, bundle, and Windows test paths use the same name. The build
+writes the output to `build/odin/<name>`. A task that stages an Odin binary
+through `deps` finds the binary at that path, for example
+`build/odin/rpc_client`. One sandbox can stage two Odin binaries only when
+their names are different.
+
 For a binary target, `imp run //src/app:app -- one "two words"` forwards the
 arguments. `--profile release` or `--axis opt=release` selects `-o:speed`;
 the default uses `-debug`. Each Odin action reserves four cores and passes

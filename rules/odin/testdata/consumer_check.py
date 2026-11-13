@@ -145,7 +145,7 @@ test_answer :: proc(t: ^testing.T) { testing.expect(t, answer() == 42) }
         run("test", "//:tests", "//:shared_tests")
         run("lint", "//:app", "//:lib", "//:tests")
         run("package", "//:shared")
-        assert (root / "dist/shared/output").is_file()
+        assert (root / "dist/shared/shared").is_file()
         assert (root / "dist/shared/libshared.so").is_file()
         run("fmt", "--check", "//:app", failure=True)
         run("fmt", "//:app", "//:lib", "//:tests")

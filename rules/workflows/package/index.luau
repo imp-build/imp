@@ -167,9 +167,46 @@ local function graph_package_goal(roots)
 	return `Packaged {#published} {noun}:{table.concat(published)}`
 end
 
+-- These extensions name a library or a Windows executable. An output name
+-- with one of them hides the kind of artifact, so it is not a valid stem.
+-- `.d` is the extension of a bundle directory (`binary_product_layout`). A
+-- binary with that name would occupy the path of its own bundle.
+local RESERVED_OUTPUT_EXTENSIONS = table.freeze({ a = true, so = true, dll = true, exe = true, d = true })
+
+--- Return the default output stem for a workspace-relative package path.
+--- The root `.` gives `root`. Each `/` becomes `_`.
+local function output_slug(path)
+	return if path == "." then "root" else (string.gsub(path, "/", "_"))
+end
+
+--- Return the output stem of a native target. Without `output_name`, the
+--- stem is `output_slug(path)`. An explicit `output_name` must be a portable
+--- filename stem. `rule` is the label in the error message.
+local function output_name(rule, path, name)
+	if name == nil then
+		return output_slug(path)
+	end
+	local ext = if type(name) == "string" then string.match(name, "%.([^./]+)$") else nil
+	if
+		type(name) ~= "string"
+		or name == "."
+		or name == ".."
+		or (ext ~= nil and RESERVED_OUTPUT_EXTENSIONS[string.lower(ext)] == true)
+		or string.match(name, "^[%w_%.%-]+$") == nil
+	then
+		error(
+			`{rule} output_name must be a non-empty portable filename stem containing only A-Z, a-z, 0-9, '.', '_' or '-'`,
+			0
+		)
+	end
+	return name
+end
+
 return {
 	PACKAGE = core.goal("package", graph_package_goal),
 	binary_product = binary_product,
 	binary_product_layout = binary_product_layout,
 	graph_package_goal = graph_package_goal,
+	output_name = output_name,
+	output_slug = output_slug,
 }
