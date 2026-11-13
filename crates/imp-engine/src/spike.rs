@@ -818,6 +818,16 @@ pub(crate) fn singleflight_register_native_tool(
     })
     .clone()
 }
+
+// Windows ships a libarchive-based bsdtar at this fixed path. Unlike the MSYS
+// tar of Git for Windows, which is often earlier on PATH, it can extract .zip
+// archives. Toolchain installers on Windows (for example rules/c/gcc and
+// rules/c/zig) download .zip releases and need this tar, so imp uses it
+// before a PATH search. A gcc install failed with "tar: This does not look
+// like a tar archive" on a machine that had the Git tar earlier on PATH.
+#[cfg(windows)]
+const WINDOWS_BSDTAR: &str = r"C:\Windows\System32\tar.exe";
+
 pub(crate) fn which_executable(name: &str) -> Option<String> {
     #[cfg(windows)]
     if name == "tar" && Path::new(WINDOWS_BSDTAR).is_file() {
