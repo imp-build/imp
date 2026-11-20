@@ -680,6 +680,16 @@ declarations in that package. Tool options require `name` and may set
 `bin_dirs`, which defaults to `{ "." }`. A tool source must be a directory
 artifact with a named-cache declaration.
 
+Use `core.tool_info(handle)` to read tool metadata during graph construction
+or in a task or program callback. It returns a fresh table with `name` and
+`bin_dirs`. For a tool from `core.tool`, `name` is the sandbox mount name.
+Use the bundle layout to select an executable within that mount. The
+`bin_dirs` list contains the relative binary search directories in their
+declared order. An explicit empty list adds no entries to `PATH`. For native
+tools and the Imp executable, `name` is the declared executable name and
+`bin_dirs` is `{ "." }`. Imp reads this metadata without resolving the tool.
+The function requires a tool handle.
+
 Pass tool and path handles through a task's `inputs`. The tool handle makes the
 cached tool available on the sandbox action's `PATH`. `exec.path(path_handle)`
 returns the artifact's workspace-relative path inside the sandbox; include the

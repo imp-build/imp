@@ -257,6 +257,12 @@ return {
 	--- @host core.tool
 	--- @category target
 	["tool"] = function(source, options) end,
+	--- Read the tool name and relative binary search directories from a tool handle.
+	--- @param handle A tool handle from `core.tool`, `core.native_tool`, or `core.self_tool`.
+	--- @returns A table with the tool `name` and the ordered `bin_dirs` list.
+	--- @host core.tool_info
+	--- @category target
+	["tool_info"] = function(handle) end,
 	--- Publishes a CAS artifact to the workspace. `merge = true` overlays files under the destination prefix and preserves unrelated files. With `merge`, `from` must select a directory; case aliases in the source tree, existing destination symlinks, and file/directory conflicts fail before publication. The default replaces the destination. Requires an active goal callback; otherwise fails with `core.write_workspace() can only run in a goal callback`. A `core.test.with_fake_write_workspace` scope records calls outside goal callbacks without writing files.
 	--- @host core.write_workspace
 	--- @category target

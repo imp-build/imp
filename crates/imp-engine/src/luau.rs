@@ -78,6 +78,14 @@ impl ModuleLoader {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct ToolIdentity {
+    owner_package: String,
+    source_id: u64,
+    name: String,
+    bin_dirs: Vec<String>,
+}
+
 #[derive(Clone)]
 struct GraphHandle {
     id: u64,
@@ -388,7 +396,7 @@ struct HostState {
     loaded_roots: Vec<u64>,
     action_count: usize,
     cache_hit_count: usize,
-    tools: HashMap<String, u64>,
+    tools: HashMap<ToolIdentity, u64>,
     paths: HashMap<String, u64>,
     goals: BTreeMap<String, LuauGoal>,
     goal_invocation: Option<GoalInvocation>,
@@ -1088,7 +1096,9 @@ impl LuauWorkspace {
                                     };
                                     let name = name.to_str().map_err(lua_err)?.to_owned();
                                     if name.is_empty() || name.contains(['/', ':', '#', '@']) {
-                                        bail!("{address} {key} has invalid graph facet selector name '{name}'");
+                                        bail!(
+                                            "{address} {key} has invalid graph facet selector name '{name}'"
+                                        );
                                     }
                                     let LuaValue::UserData(userdata) = value else {
                                         bail!(
@@ -1341,7 +1351,9 @@ impl LuauWorkspace {
                 .map_err(lua_err)
                 .with_context(|| format!("goal '{goal}' roots provider"))?;
             let invalid = |index| {
-                anyhow::anyhow!("goal '{goal}' roots entry {index} must have a non-empty address and a task root")
+                anyhow::anyhow!(
+                    "goal '{goal}' roots entry {index} must have a non-empty address and a task root"
+                )
             };
             let LuaValue::Table(entries) = value else {
                 bail!("goal '{goal}' roots provider must return an array");
@@ -2928,7 +2940,7 @@ async fn run_cache_details(
             _ => {
                 return Err(LuaError::external(
                     "cache details inputs must be tool handles",
-                ))
+                ));
             }
         };
         let spec: LuaTable = caches.get(key)?;
@@ -3267,7 +3279,7 @@ async fn describe_program_scoped(
                     } else {
                         "strings"
                     }
-                )))
+                )));
             }
         };
         let length = values.raw_len();
@@ -3886,11 +3898,13 @@ fn create_core(
                 validate_tool_bin_dir(directory)?;
             }
             let owner_package = current_package_path(&tool_loader);
-            let fingerprint = format!(
-                "{owner_package}\n{source_id}\n{name}\n{}",
-                bin_dirs.join("\n")
-            );
-            if let Some(id) = tool_host.borrow().tools.get(&fingerprint).copied() {
+            let identity = ToolIdentity {
+                owner_package: owner_package.clone(),
+                source_id,
+                name: name.clone(),
+                bin_dirs: bin_dirs.clone(),
+            };
+            if let Some(id) = tool_host.borrow().tools.get(&identity).copied() {
                 return lua.create_userdata(GraphHandle {
                     id,
                     kind: "tool",
@@ -3899,7 +3913,7 @@ fn create_core(
             }
             let handle = allocate_handle(&tool_host, "tool");
             let mut host = tool_host.borrow_mut();
-            host.tools.insert(fingerprint, handle.id);
+            host.tools.insert(identity, handle.id);
             host.nodes.insert(
                 handle.id,
                 GraphNode::Tool {
@@ -3911,6 +3925,37 @@ fn create_core(
             );
             drop(host);
             lua.create_userdata(handle)
+        })?,
+    )?;
+
+    let tool_info_host = Rc::clone(&host);
+    core.set(
+        "tool_info",
+        lua.create_function(move |lua, value: LuaValue| {
+            let invalid_tool =
+                || LuaError::external("core.tool_info(handle) requires a tool handle");
+            let id = value
+                .as_userdata()
+                .and_then(|handle| handle.borrow::<GraphHandle>().ok())
+                .ok_or_else(invalid_tool)?
+                .id;
+            let host = tool_info_host.borrow();
+            let host_bin_dirs = [".".to_owned()];
+            let (name, bin_dirs) = match host.nodes.get(&id) {
+                Some(GraphNode::Tool { name, bin_dirs, .. }) => {
+                    (name.as_str(), bin_dirs.as_slice())
+                }
+                Some(GraphNode::NativeTool(name)) => (name.as_str(), host_bin_dirs.as_slice()),
+                Some(GraphNode::SelfTool) => (SELF_TOOL_NAME, host_bin_dirs.as_slice()),
+                _ => return Err(invalid_tool()),
+            };
+            let info = lua.create_table()?;
+            info.set("name", name)?;
+            info.set(
+                "bin_dirs",
+                lua.create_sequence_from(bin_dirs.iter().map(String::as_str))?,
+            )?;
+            Ok(info)
         })?,
     )?;
 
@@ -4249,7 +4294,7 @@ fn create_core(
                         OutputDeclaration::File(_) | OutputDeclaration::Directory { .. } => {
                             return Err(LuaError::external(format!(
                                 "task.outputs.{name} must be output.value() or output.artifact()"
-                            )))
+                            )));
                         }
                     };
                     outputs.insert(name, kind);
@@ -4743,7 +4788,7 @@ fn create_core(
                             _ => {
                                 return Err(LuaError::external(format!(
                                     "write_workspace invalid option '{key}'"
-                                )))
+                                )));
                             }
                         }
                     }
@@ -4902,7 +4947,7 @@ fn parse_goal_options(goal: &str, options: LuaTable) -> LuaResult<GoalOptions> {
                 _ => {
                     return Err(LuaError::external(format!(
                         "core.goal('{goal}') selection must be \"none\""
-                    )))
+                    )));
                 }
             }
             continue;
@@ -4956,7 +5001,7 @@ fn parse_goal_options(goal: &str, options: LuaTable) -> LuaResult<GoalOptions> {
                     _ => {
                         return Err(LuaError::external(format!(
                             "core.goal('{goal}') flag '{flag}' accepts only a 'description' string"
-                        )))
+                        )));
                     }
                 }
             }
@@ -5219,7 +5264,7 @@ fn install_test_host_api(
                         _ => {
                             return Err(LuaError::external(
                                 "core.test.with_fake_toolchain_host expects ([platform,] fn)",
-                            ))
+                            ));
                         }
                     };
                     let recorder = lua.create_table()?;
@@ -5790,7 +5835,8 @@ fn existing_exact_files(workspace_root: &Path, paths: &[String]) -> Result<Vec<S
                     break;
                 }
                 Err(error) => {
-                    return Err(error).with_context(|| format!("files({{ paths }}): stat '{path}'"))
+                    return Err(error)
+                        .with_context(|| format!("files({{ paths }}): stat '{path}'"));
                 }
             };
             if metadata.file_type().is_symlink() {
@@ -7235,7 +7281,7 @@ fn flatten_test_cases(value: LuaValue) -> Result<Vec<LuauTestCase>> {
                 return Err(LuaError::external(format!(
                     "test module must return a list of test cases or suites, got {}",
                     other.type_name()
-                )))
+                )));
             }
         };
         if table
@@ -8224,7 +8270,9 @@ return {}
                 let release = root.path().join("release");
                 let release_literal = serde_json::to_string(&release.to_string_lossy()).unwrap();
                 let exit = if outcome == "failure" { 7 } else { 0 };
-                let command = format!("while [ ! -f \"$RELEASE\" ]; do :; done; printf job-output; printf job-error >&2; exit {exit}");
+                let command = format!(
+                    "while [ ! -f \"$RELEASE\" ]; do :; done; printf job-output; printf job-error >&2; exit {exit}"
+                );
                 let command_literal = serde_json::to_string(&command).unwrap();
                 let source = format!(
                     r#"
@@ -12116,6 +12164,81 @@ return {
     }
 
     #[tokio::test]
+    async fn luau_tool_info_reads_declared_and_resolved_handles() {
+        let (_, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+return {
+    core.test.case("tool metadata", function()
+        core.test.with_fake_run(function()
+            local runs = 0
+            local producer = core.task({
+                outputs = { root = output.artifact() },
+                run = function(exec)
+                    runs += 1
+                    local result = exec.action({
+                        argv = { "install" },
+                        outputs = {
+                            root = output.directory("demo", { named_cache = { name = "demo-tools", key = "v1" } }),
+                        },
+                    })
+                    return { root = result.outputs.root }
+                end,
+            })
+            local root = producer.outputs.root
+            local tool = core.tool(root, { name = "bundle", bin_dirs = { "sbin", "bin" } })
+            local native = core.native_tool("imp-test-unresolved-executable")
+            local self = core.self_tool()
+
+            local function check(handle, name, dirs)
+                local info = core.tool_info(handle)
+                assert(info.name == name)
+                assert(table.concat(info.bin_dirs, ",") == dirs)
+                info.name = "changed"
+                table.clear(info.bin_dirs)
+            end
+
+            check(tool, "bundle", "sbin,bin")
+            check(tool, "bundle", "sbin,bin")
+            check(core.tool(root, { name = "default" }), "default", ".")
+            check(core.tool(root, { name = "empty", bin_dirs = {} }), "empty", "")
+            local one_dir = core.tool(root, { name = "collision", bin_dirs = { "a\nb" } })
+            local two_dirs = core.tool(root, { name = "collision", bin_dirs = { "a", "b" } })
+            check(one_dir, "collision", "a\nb")
+            check(two_dirs, "collision", "a,b")
+            check(native, "imp-test-unresolved-executable", ".")
+            check(self, "imp", ".")
+            assert(runs == 0)
+            for _, invalid in ipairs({ producer, root, "bundle" }) do
+                local ok, err = pcall(core.tool_info, invalid)
+                assert(not ok and string.find(tostring(err), "requires a tool handle", 1, true))
+            end
+
+            local consumer = core.task({
+                inputs = { tool = tool, native = native, self = self },
+                outputs = { checked = output.value() },
+                run = function(_, inputs)
+                    check(inputs.tool, "bundle", "sbin,bin")
+                    check(inputs.native, "imp-test-unresolved-executable", ".")
+                    check(inputs.self, "imp", ".")
+                    return { checked = true }
+                end,
+            })
+            assert(core.test.resolve(consumer.outputs.checked))
+            assert(runs == 1)
+        end)
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
     async fn luau_tool_and_path_handles_keep_package_owner_and_stable_identity() {
         let workspace_root = tempfile::tempdir().unwrap();
         let rules_root = rules_tempdir();
@@ -12746,35 +12869,63 @@ return {
     #[tokio::test]
     async fn luau_build_generator_resolves_value_outputs_and_rejects_other_handles() {
         for (body, expected) in [
-            (r#"return core.task({
+            (
+                r#"return core.task({
                 inputs = { source = core.task({ outputs = { value = core.output.value() }, run = function() return { value = 7 } end }).outputs.value },
                 outputs = { declarations = core.output.value() },
                 run = function(_exec, input)
                     assert(input.source == 7)
                     return { declarations = { ["generated/BUILD.luau"] = { { name = "generated", rule = "sample" } } } }
                 end,
-            }).outputs.declarations"#, "1 file(s) written"),
+            }).outputs.declarations"#,
+                "1 file(s) written",
+            ),
             ("return core.native_tool('sh')", "task value-output handle"),
-            ("return core.task({ run = function() end })", "task value-output handle"),
-            ("return core.task({ outputs = { file = core.output.artifact() }, run = function() error('must not execute') end }).outputs.file", "task value-output handle"),
-            ("return core.task({ outputs = { value = core.output.value() }, run = function() error('metadata failed') end }).outputs.value", "metadata failed"),
-            ("return core.task({ outputs = { value = core.output.value() }, run = function() return { value = 42 } end }).outputs.value", "must produce a declaration table"),
+            (
+                "return core.task({ run = function() end })",
+                "task value-output handle",
+            ),
+            (
+                "return core.task({ outputs = { file = core.output.artifact() }, run = function() error('must not execute') end }).outputs.file",
+                "task value-output handle",
+            ),
+            (
+                "return core.task({ outputs = { value = core.output.value() }, run = function() error('metadata failed') end }).outputs.value",
+                "metadata failed",
+            ),
+            (
+                "return core.task({ outputs = { value = core.output.value() }, run = function() return { value = 42 } end }).outputs.value",
+                "must produce a declaration table",
+            ),
         ] {
             let workspace = tempfile::tempdir().unwrap();
             let rules = rules_tempdir();
-            fs::write(rules.path().join("sample.luau"), "return { sample = function() return {} end }").unwrap();
-            fs::write(workspace.path().join("imp.workspace.luau"), format!(r#"
+            fs::write(
+                rules.path().join("sample.luau"),
+                "return { sample = function() return {} end }",
+            )
+            .unwrap();
+            fs::write(
+                workspace.path().join("imp.workspace.luau"),
+                format!(
+                    r#"
 local core = require("@imp/core")
 require("@imp/rules/workflows/generate_build")
 core.define_config_schema("sample", {{ build_generate = core.field.bool({{ default = false }}) }})
 core.register_build_rule({{ rule = "sample", module = "@imp/rules/sample" }})
 core.register_build_generator({{ namespace = "sample", generate = function() {body} end }})
 return {{ sample = {{ build_generate = true }} }}
-"#)).unwrap();
+"#
+                ),
+            )
+            .unwrap();
             let mut runtime = LuauWorkspace::new(workspace.path(), rules.path()).unwrap();
             runtime.load_modules().await.unwrap();
             let result = generate_build(&mut runtime, false).await;
-            let text = match result { Ok(report) => report.unwrap_or_default(), Err(error) => format!("{error:#}") };
+            let text = match result {
+                Ok(report) => report.unwrap_or_default(),
+                Err(error) => format!("{error:#}"),
+            };
             assert!(text.contains(expected), "expected {expected}: {text}");
             if expected == "1 file(s) written" {
                 let report = generate_build(&mut runtime, true).await.unwrap().unwrap();
@@ -12885,7 +13036,9 @@ return {}
             }
             let result = match package {
                 "plain" => "return { tests = { [test.TEST] = root } }",
-                "configured" => "return { tests = { [test.TEST] = core.configured(root, { opt = \"release\" }) } }",
+                "configured" => {
+                    "return { tests = { [test.TEST] = core.configured(root, { opt = \"release\" }) } }"
+                }
                 _ => "return {}",
             };
             fs::write(workspace.path().join(package).join("BUILD.luau"), format!(
