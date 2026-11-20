@@ -575,6 +575,14 @@ those handles in the action's `inputs` list. Imp merges the captured trees;
 overlapping identical content is valid. Luau does not provide a reusable
 `file_set.union` handle or accept legacy raw `{ kind, path }` specifications.
 
+You can group file sets in a task input, for example
+`inputs = { templates = { base, overrides } }`. In the task callback, use
+`exec.paths(input.templates[1])` to list the files in `base`. To stage both file
+sets, set `inputs = input.templates` in the action request.
+
+Task and program inputs accept lists with consecutive integer keys starting at
+`1`. Lists can contain other lists. Keyed and sparse tables supply callback data.
+
 ### Fileset paths and digests
 
 A task reads a files handle from its `inputs` with these `exec` functions:

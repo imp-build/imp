@@ -2163,6 +2163,20 @@ fn invocation_mode(host: &HostState) -> ModeScope {
     host.invocation_mode.clone()
 }
 
+fn is_dense_input_list(table: &LuaTable) -> LuaResult<bool> {
+    let len = table.raw_len();
+    let mut count = 0;
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, _) = pair?;
+        if !matches!(key, LuaValue::Integer(index) if index > 0 && usize::try_from(index).is_ok_and(|index| index <= len))
+        {
+            return Ok(false);
+        }
+        count += 1;
+    }
+    Ok(count == len)
+}
+
 // Each edge carries its own scope. No callback reads a mutable current scope.
 async fn resolve_mode_inputs(
     lua: &Lua,
@@ -2171,11 +2185,42 @@ async fn resolve_mode_inputs(
     inputs: &LuaTable,
     scope: &ModeScope,
     visiting: &[u64],
+    mut execution: Option<&mut ExecutionInputBuilder>,
 ) -> LuaResult<(LuaTable, ModeAxes)> {
     let resolved = lua.create_table()?;
     let mut axes = ModeAxes::new();
     for pair in inputs.pairs::<LuaValue, LuaValue>() {
         let (key, value) = pair?;
+        if let (LuaValue::Table(list), Some(execution)) = (&value, execution.as_deref_mut()) {
+            if is_dense_input_list(list)? {
+                let identity = list.to_pointer() as usize;
+                if !execution.active_lists.insert(identity) {
+                    return Err(LuaError::external("cyclic list in Luau graph inputs"));
+                }
+                let graph_edges = execution.graph_edges;
+                let result = Box::pin(resolve_mode_inputs(
+                    lua,
+                    host,
+                    configuration,
+                    list,
+                    scope,
+                    visiting,
+                    Some(execution),
+                ))
+                .await;
+                execution.active_lists.remove(&identity);
+                let (resolved_list, list_axes) = result?;
+                axes.extend(list_axes);
+                if execution.graph_edges == graph_edges {
+                    resolved.raw_set(key, list.clone())?;
+                } else {
+                    resolved_list.set_metatable(list.metatable())?;
+                    resolved_list.set_readonly(list.is_readonly());
+                    resolved.raw_set(key, resolved_list)?;
+                }
+                continue;
+            }
+        }
         let id = match &value {
             LuaValue::UserData(userdata) => userdata.borrow::<GraphHandle>().ok().map(|h| h.id),
             _ => None,
@@ -2216,7 +2261,10 @@ async fn resolve_mode_inputs(
         } else {
             value
         };
-        resolved.set(key, value)?;
+        if let Some(execution) = execution.as_deref_mut() {
+            execution.record(id, &value)?;
+        }
+        resolved.raw_set(key, value)?;
     }
     Ok((resolved, axes))
 }
@@ -2286,9 +2334,17 @@ fn resolve_mode_handle<'a>(
                     .get(&id)
                     .cloned()
                     .ok_or_else(|| LuaError::external("unknown Luau task"))?;
-                let (inputs, axes) =
-                    resolve_mode_inputs(lua, host, configuration, &task.inputs, scope, &visiting)
-                        .await?;
+                let mut execution = ExecutionInputBuilder::new(lua)?;
+                let (inputs, axes) = resolve_mode_inputs(
+                    lua,
+                    host,
+                    configuration,
+                    &task.inputs,
+                    scope,
+                    &visiting,
+                    Some(&mut execution),
+                )
+                .await?;
                 let key = (id, mode_key(&axes, scope));
                 let cached = host.borrow().task_results.get(&key).cloned();
                 let outputs = if let Some(cached) = cached {
@@ -2302,7 +2358,7 @@ fn resolve_mode_handle<'a>(
                         host,
                         configuration,
                         &inputs,
-                        &task.inputs,
+                        &execution.finish(),
                         &salt,
                         &task.exec_options,
                     )?;
@@ -2458,8 +2514,16 @@ async fn discover_mode_expansion(
         .get(&id)
         .cloned()
         .ok_or_else(|| LuaError::external(format!("unknown Luau expansion {id}")))?;
-    let (inputs, axes) =
-        resolve_mode_inputs(lua, host, configuration, &expansion.inputs, scope, visiting).await?;
+    let (inputs, axes) = resolve_mode_inputs(
+        lua,
+        host,
+        configuration,
+        &expansion.inputs,
+        scope,
+        visiting,
+        None,
+    )
+    .await?;
     let key = (id, mode_key(&axes, scope));
     if let Some(children) = host.borrow().expansion_results.get(&key).cloned() {
         return Ok((children, axes));
@@ -2513,19 +2577,47 @@ fn install_task_executor(
 
 type ExecAliases = Rc<HashMap<u64, LuaAnyUserData>>;
 
-fn execution_aliases(declared: &LuaTable, resolved: &LuaTable) -> LuaResult<ExecAliases> {
-    let mut aliases = HashMap::new();
-    for pair in declared.pairs::<LuaValue, LuaValue>() {
-        let (key, value) = pair?;
+struct ExecutionInputs {
+    handles: LuaTable,
+    aliases: ExecAliases,
+}
+
+struct ExecutionInputBuilder {
+    handles: LuaTable,
+    aliases: HashMap<u64, LuaAnyUserData>,
+    active_lists: std::collections::HashSet<usize>,
+    graph_edges: usize,
+}
+
+impl ExecutionInputBuilder {
+    fn new(lua: &Lua) -> LuaResult<Self> {
+        Ok(Self {
+            handles: lua.create_table()?,
+            aliases: HashMap::new(),
+            active_lists: Default::default(),
+            graph_edges: 0,
+        })
+    }
+
+    fn record(&mut self, original: Option<u64>, value: &LuaValue) -> LuaResult<()> {
+        if original.is_some() {
+            self.graph_edges += 1;
+        }
         if let LuaValue::UserData(value) = value {
-            if let Ok(handle) = value.borrow::<GraphHandle>() {
-                if let LuaValue::UserData(resolved) = resolved.get::<LuaValue>(key)? {
-                    aliases.insert(handle.id, resolved);
-                }
+            if let Some(id) = original {
+                self.aliases.insert(id, value.clone());
             }
+            self.handles.raw_push(value.clone())?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> ExecutionInputs {
+        ExecutionInputs {
+            handles: self.handles,
+            aliases: Rc::new(self.aliases),
         }
     }
-    Ok(Rc::new(aliases))
 }
 
 fn scoped_exec_handle(aliases: &ExecAliases, handle: LuaAnyUserData) -> LuaResult<LuaAnyUserData> {
@@ -2575,7 +2667,7 @@ fn create_task_exec(
     host: &Rc<RefCell<HostState>>,
     configuration: &Rc<RefCell<ConfigurationState>>,
     inputs: &LuaTable,
-    declared_inputs: &LuaTable,
+    execution_inputs: &ExecutionInputs,
     config_digest: &str,
     exec_options: &TaskExecOptions,
 ) -> LuaResult<LuaTable> {
@@ -2620,10 +2712,10 @@ fn create_task_exec(
             lua.create_userdata(handle)
         })?,
     )?;
-    let aliases = execution_aliases(declared_inputs, inputs)?;
+    let aliases = Rc::clone(&execution_inputs.aliases);
     let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
     let path_host = Rc::clone(host);
-    let path_inputs = inputs.clone();
+    let path_inputs = execution_inputs.handles.clone();
     let path_aliases = Rc::clone(&aliases);
     exec.set(
                     "path",
@@ -2645,7 +2737,7 @@ fn create_task_exec(
                     })?,
                 )?;
     let tool_dir_host = Rc::clone(host);
-    let tool_dir_inputs = inputs.clone();
+    let tool_dir_inputs = execution_inputs.handles.clone();
     let tool_dir_aliases = Rc::clone(&aliases);
     exec.set(
         "tool_dir",
@@ -2657,7 +2749,7 @@ fn create_task_exec(
     )?;
     for (name, want_paths) in [("paths", true), ("digest", false)] {
         let fileset_host = Rc::clone(host);
-        let fileset_inputs = inputs.clone();
+        let fileset_inputs = execution_inputs.handles.clone();
         let fileset_captures = Rc::clone(&captures);
         let fileset_aliases = Rc::clone(&aliases);
         exec.set(
@@ -2706,7 +2798,7 @@ fn create_task_exec(
     let action_host = Rc::clone(host);
     let action_configuration = Rc::clone(configuration);
     let action_lua = lua.clone();
-    let action_inputs = inputs.clone();
+    let action_inputs = execution_inputs.handles.clone();
     let action_captures = Rc::clone(&captures);
     let returns_outputs = exec_options.returns_outputs;
     let exec_options = exec_options.clone();
@@ -2863,6 +2955,11 @@ async fn run_cache_details(
         }
         bindings.insert(source_id, cache);
     }
+    let mut execution = ExecutionInputBuilder::new(&lua)?;
+    for value in inputs.pairs::<LuaValue, LuaValue>() {
+        let (_, value) = value?;
+        execution.record(None, &value)?;
+    }
     let previous = host.borrow_mut().cached_tool_bindings.replace(bindings);
     let result = async {
         let exec = create_task_exec(
@@ -2870,7 +2967,7 @@ async fn run_cache_details(
             host,
             configuration,
             &inputs,
-            &inputs,
+            &execution.finish(),
             "",
             &TaskExecOptions::default(),
         )?;
@@ -3115,15 +3212,25 @@ async fn describe_program_scoped(
     program: Program,
     scope: &ModeScope,
 ) -> LuaResult<LuaValue> {
-    let (inputs, _) =
-        resolve_mode_inputs(lua, host, configuration, &program.inputs, scope, &[]).await?;
-    let aliases = execution_aliases(&program.inputs, &inputs)?;
+    let mut execution = ExecutionInputBuilder::new(lua)?;
+    let (inputs, _) = resolve_mode_inputs(
+        lua,
+        host,
+        configuration,
+        &program.inputs,
+        scope,
+        &[],
+        Some(&mut execution),
+    )
+    .await?;
+    let execution_inputs = execution.finish();
+    let aliases = &execution_inputs.aliases;
     let exec = create_task_exec(
         lua,
         host,
         configuration,
         &inputs,
-        &program.inputs,
+        &execution_inputs,
         "",
         &TaskExecOptions::default(),
     )?;
@@ -3201,7 +3308,7 @@ async fn describe_program_scoped(
         if field == "tools" {
             let bound = lua.create_table()?;
             for (index, tool) in values.sequence_values::<LuaAnyUserData>().enumerate() {
-                bound.set(index + 1, scoped_exec_handle(&aliases, tool?)?)?;
+                bound.set(index + 1, scoped_exec_handle(aliases, tool?)?)?;
             }
             result.set(field, bound)?;
         } else {
@@ -3240,7 +3347,7 @@ async fn describe_program_scoped(
         for tool in tools.sequence_values::<LuaAnyUserData>() {
             let tool = tool?;
             let handle = tool.borrow::<GraphHandle>()?;
-            require_declared_input(&inputs, handle.id, "program tools")?;
+            require_declared_input(&execution_inputs.handles, handle.id, "program tools")?;
             if !matches!(
                 host.borrow().nodes.get(&handle.id),
                 Some(GraphNode::Tool { .. } | GraphNode::NativeTool(_) | GraphNode::SelfTool)
@@ -8276,17 +8383,17 @@ return { core.test.case("captured mode handles", function()
     local path = core.path(provider.outputs.dir)
     local tool = core.tool(provider.outputs.dir, { name = "runtime", bin_dirs = {} })
     local unrelated = core.path(core.task({ outputs = { dir = core.output.artifact() }, run = function() error("must not run") end }).outputs.dir)
-    local consumer = core.task({ inputs = { path = path, tool = tool, opt = core.semantic.mode("opt"), sh = core.native_tool("sh"), cat = core.native_tool("cat") },
+    local consumer = core.task({ inputs = { paths = { { path }, tool }, opts = { core.semantic.mode("opt") }, sh = core.native_tool("sh"), cat = core.native_tool("cat") },
         outputs = { text = core.output.value() }, run = function(exec, input)
-            assert(exec.path(path) == "runtime-" .. input.opt)
+            assert(exec.path(path) == "runtime-" .. input.opts[1])
             local ok, err = pcall(exec.path, unrelated)
             assert(not ok and string.find(tostring(err), "requires a declared task input", 1, true))
-            exec.action({ argv = { "sh", "-c", 'test "$(cat "$1/value.txt")" = "$3" && test "$(cat "$2/value.txt")" = "$3"', "consumer", exec.path(path), exec.tool_dir(tool), input.opt }, inputs = { path } })
-            return { text = input.opt }
+            exec.action({ argv = { "sh", "-c", 'test "$(cat "$1/value.txt")" = "$3" && test "$(cat "$2/value.txt")" = "$3"', "consumer", exec.path(path), exec.tool_dir(tool), input.opts[1] }, inputs = { path } })
+            return { text = input.opts[1] }
         end })
     assert(core.test.resolve(consumer.outputs.text) == "debug")
     assert(core.test.resolve(core.configured(consumer, { opt = "release" }).outputs.text) == "release")
-    local program = core.program({ inputs = { path = path, tool = tool, artifact = provider.outputs.dir }, describe = function(exec)
+    local program = core.program({ inputs = { group = { path, tool }, artifact = provider.outputs.dir }, describe = function(exec)
         return { argv = { "echo", exec.path(path) }, tools = { tool }, inputs = { exec.digest(provider.outputs.dir) } }
     end })
     assert(core.test.resolve(core.configured(program, { opt = "release" })).argv[2] == "runtime-release")
@@ -8648,6 +8755,113 @@ return { probe = { VERIFY = expansion:get("child", "VERIFY") }, pinned = { VERIF
                 .to_string()
                 .contains(part));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_task_and_program_resolve_dense_list_inputs() {
+        let (_, report) = run_luau_test_module(r#"
+local core = require("@imp/core")
+return { core.test.case("list inputs", function()
+    local files = core.files({ include = { "**/*.test.luau" } })
+    local sh = core.native_tool("sh")
+    local cat = core.native_tool("cat")
+    local mkdir = core.native_tool("mkdir")
+    local function consumer(nested)
+        local task = core.task({
+            inputs = {
+                files = if nested then { "first", { files }, false } else files,
+                tools = if nested then { sh, { cat } } else nil,
+                sh = if nested then nil else sh,
+                cat = if nested then nil else cat,
+                keyed = { tool = mkdir },
+                sparse = { [2] = mkdir },
+            },
+            outputs = { digest = core.output.value() },
+            run = function(exec, input)
+                local selected = input.files
+                if nested then
+                    assert(input.files[1] == "first" and input.files[3] == false)
+                    selected = input.files[2][1]
+                end
+                assert(input.keyed.tool == mkdir and input.sparse[2] == mkdir)
+                local paths = exec.paths(selected)
+                assert(#paths == 1 and paths[1] == "pkg/fakes.test.luau")
+                exec.action({
+                    argv = { "sh", "-c", 'cat "$1" >/dev/null && ! command -v mkdir', "probe", paths[1] },
+                    inputs = { selected },
+                })
+                return { digest = exec.digest(selected) }
+            end,
+        })
+        return core.test.resolve(task.outputs.digest)
+    end
+    assert(consumer(true) == consumer(false))
+    core.test.with_fake_run(function(host)
+        consumer(true)
+        assert(table.concat(host.runs[1].tools, ",") == "cat,sh")
+    end)
+    local list = { mkdir }
+    local program = core.program({
+        inputs = { tools = list, shared = { list, list } },
+        describe = function(_, input)
+            assert(input.shared[1][1] == mkdir and input.shared[2][1] == mkdir)
+            return { argv = { "mkdir", "probe" }, tools = input.tools }
+        end,
+    })
+    assert(core.test.resolve(program).tools[1] == mkdir)
+    local function fails(fn, message)
+        local ok, err = pcall(fn)
+        assert(not ok and string.find(tostring(err), message, 1, true), tostring(err))
+    end
+    local undeclared = core.program({
+        inputs = { data = { [2] = mkdir } },
+        describe = function() return { argv = { "mkdir" }, tools = { mkdir } } end,
+    })
+    fails(function() core.test.resolve(undeclared) end, "requires a declared task input")
+    local cycle = {}
+    cycle[1] = cycle
+    local cyclic = core.task({ inputs = { cycle = cycle }, run = function() error("unexpected run") end })
+    fails(function() core.test.resolve(cyclic) end, "cyclic list in Luau graph inputs")
+end) }
+"#).await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn luau_list_inputs_preserve_table_metadata_and_resolved_membership() {
+        let (_, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+return { core.test.case("list metadata and membership", function()
+    local metadata = { __index = { label = "input list" } }
+    local data = table.freeze(setmetatable({ "value" }, metadata))
+    local files = core.files({ paths = { "pkg/fakes.test.luau" } })
+    local frozen_handles = table.freeze(setmetatable({ files }, metadata))
+    local mutable = { files }
+    local dependency = core.task({ outputs = { result = core.output.value() }, run = function()
+        mutable[1] = nil
+        return { result = "resolved" }
+    end })
+    local task = core.task({
+        inputs = { mutable, dependency.outputs.result, data, { data }, frozen_handles },
+        run = function(exec, input)
+            assert(input[2] == "resolved" and mutable[1] == nil)
+            assert(input[1][1] == files and #exec.paths(input[1][1]) == 1)
+            assert(input[3] == data and input[4][1] == data)
+            assert(table.isfrozen(input[3]) and input[3].label == "input list")
+            assert(table.isfrozen(input[5]) and getmetatable(input[5]) == metadata)
+            assert(input[5][1] == files)
+        end,
+    })
+    core.test.resolve(task)
+end) }
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 1/1 unit(s) passed"), "{report}");
     }
 
     #[tokio::test]
